@@ -13,8 +13,8 @@ from pathlib import Path
 # which is how the slurm jobs invoke it inside the container.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from spikepipe.cli import main  # noqa: E402
-from spikepipe.pipeline import run_pipeline  # noqa: E402,F401  (re-export)
+from spikeshpc.cli import main  # noqa: E402
+from spikeshpc.pipeline import run_pipeline  # noqa: E402,F401  (re-export)
 
 if __name__ == "__main__":
     main()
