@@ -1,0 +1,83 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
+
+# Single combined image: spikeinterface + kilosort4 + torch/CUDA.
+#
+# The whole pipeline (load, concatenate, optional preprocess, sort,
+# postprocess) runs inside this one container on a GPU node. kilosort4 is
+# imported directly by spikeinterface's run_sorter() -- no nested container
+# call, so the pipeline dict must NOT set sorting.singularity_image.
+#
+# The base tag is pinned deliberately (not :latest). CUDA 12.8 (cu128) is the
+# hard requirement here: Blackwell cards (RTX PRO 6000 = sm_120) need kernels
+# that the cu126 builds do not ship. With a cu126 torch the GPU is detected,
+# torch.cuda.is_available() returns True, and the run dies later with
+# "CUDA error: no kernel image is available for execution on the device".
+#
+# Build (on a Linux host with fakeroot, e.g. the cluster login node):
+#   apptainer build --fakeroot si_kilosort4.sif si_kilosort4.def
+#
+# Verify after building, ON A GPU NODE:
+#   apptainer exec --nv si_kilosort4.sif python -c \
+#     "import torch, spikeinterface, kilosort; \
+#      print(spikeinterface.__version__, kilosort.__version__); \
+#      print(torch.__version__, torch.cuda.is_available()); \
+#      print(torch.cuda.get_arch_list())"
+#
+# get_arch_list() is the check that matters -- it lists the architectures this
+# torch was actually compiled for, and must contain 'sm_120' for Blackwell.
+# torch.cuda.is_available() alone is NOT sufficient: it returns True on a card
+# whose architecture has no compiled kernels.
+#
+# This check only works ON A GPU NODE: get_arch_list() returns [] whenever no
+# CUDA device is visible, so on a login node it tells you nothing. The build
+# itself asserts torch.version.cuda == 12.8, which needs no GPU.
+
+%post
+    set -eux
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential git \
+        && rm -rf /var/lib/apt/lists/*
+
+    pip install --no-cache-dir --upgrade pip
+    # Optional kilosort4 dependency -- without it kilosort prints "conda install
+    # pynvml for GPU usage" on every processing step and can't report GPU memory.
+    # Use nvidia-ml-py, NOT the pynvml package: nvidia-ml-py is NVIDIA's official
+    # binding and still provides the `pynvml` module, while the standalone pynvml
+    # package is deprecated and makes torch emit a FutureWarning on every import.
+    # Installing both would have two distributions fighting over the same module.
+    pip install --no-cache-dir \
+        "spikeinterface[full]" \
+        kilosort \
+        nvidia-ml-py \
+        numpy pandas zarr
+
+    # NP2004 probes: released probeinterface can't parse their imro header
+    # ('invalid literal for int() with base 10: NP2004'). Fixed on main but
+    # not yet released. Installed last so it wins over the released version
+    # pulled in as a spikeinterface dependency above.
+    pip install --no-cache-dir --upgrade \
+        "probeinterface @ git+https://github.com/SpikeInterface/probeinterface.git"
+
+    # Fail the build now, rather than mid-job, if anything above conflicted.
+    python -c "import torch, spikeinterface, kilosort, probeinterface, pynvml"
+
+    # Guard against a pip dependency quietly resolving torch to a non-cu128
+    # wheel, which is what costs us Blackwell (sm_120) support.
+    # NB: torch.cuda.get_arch_list() is useless here -- it early-returns [] when
+    # no CUDA device is visible, so it always fails on a CPU-only build node.
+    # torch.version.cuda is a build-time constant and needs no GPU.
+    python -c "import torch, sys; v = torch.version.cuda; \
+print('torch', torch.__version__, 'cuda', v); \
+sys.exit(0 if v and v.startswith('12.8') else 'ERROR: not a cu128 torch build; Blackwell sm_120 needs CUDA 12.8')"
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+
+%labels
+    Author collinsd27@gmail.com
+    Purpose "SpikeInterface + kilosort4 + CUDA: full load/sort/postprocess pipeline in one image"
+
+%runscript
+    exec python "$@"

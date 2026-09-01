@@ -1,0 +1,180 @@
+"""Command line entry point."""
+
+import argparse
+import json
+from pathlib import Path
+
+from .config import BAD_CHANNELS_NAME, deep_merge
+from .pipeline import run_pipeline
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="spikeshpc",
+        description="Spike sorting pipeline for use with HPC",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  # single SpikeGLX run, format and stream auto-detected
+  spikeshpc /data/mouse1_g0 --output_dir /scratch/mouse1
+
+  # concatenate three runs (sync channel dropped, sample counts recorded)
+  spikeshpc /data/m1_g0 /data/m1_g1 /data/m1_g2 --output_dir /scratch/m1
+
+  # re-run only post-processing against a finished sort
+  spikeshpc /data/m1_g0 --output_dir /scratch/m1 \\
+      --skip_statescoring --skip_preprocessing --skip_sorting
+
+  # re-sort with dead channels excluded, reusing the concatenated binary
+  spikeshpc /data/m1_g0 --output_dir /scratch/m1 \\
+      --skip_statescoring --skip_preprocessing --bad_channels AP191 AP192 287
+
+  # brain-state scoring only
+  spikeshpc /data/m1_g0 /data/m1_g1 --output_dir /scratch/m1 \\
+      --skip_preprocessing --skip_sorting --skip_postprocessing
+
+outputs (in --output_dir):
+  states/            per-session WAKE/NREM/REM intervals + metrics, and
+                     states_concatenated.json on the concatenated clock
+  concatenated.bin   combined binary handed to kilosort4
+  concat_info.json   per-session sample counts + offsets, channel alignment
+  chanMap.mat        channel map in kilosort's format
+  probe.json         probe geometry, used to reload the binary
+  bad_channels.json  per-channel labels + the set applied (autodetect only)
+  kilosort4/         kilosort4 results (phy format)
+  analyzer.zarr      spikeinterface sorting analyzer
+            """,
+    )
+    parser.add_argument(
+        "phys_path",
+        type=Path,
+        nargs="+",
+        help=(
+            "Recording session directory or raw binary file. "
+            "Pass several to concatenate them before sorting."
+        ),
+    )
+    parser.add_argument(
+        "--phys_type",
+        type=str,
+        default=None,
+        choices=["spikeglx", "openephysbinary"],
+        help="Acquisition system (default: auto-detect from sidecar files)",
+    )
+    parser.add_argument(
+        "--stream_name",
+        type=str,
+        default=None,
+        help=(
+            "Name of raw phys stream saved by OE/SpikeGLX -- e.g. 'imec0.ap', or "
+            "'Record Node 101#Neuropix-PXI-100.ProbeA' (default: auto-detect the "
+            "AP-band stream; required if the session has more than one probe)"
+        ),
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=Path,
+        default=None,
+        help="Where to write states/binary/chanMap/sorting/analyzer (default: first phys_path)",
+    )
+    parser.add_argument(
+        "--tmp_dir",
+        type=Path,
+        default=None,
+        help=(
+            "Scratch space for intermediate files (default: <output_dir>/tmp). "
+            "Keep this on a partition with room for kilosort4's intermediates "
+            "-- roughly the size of the raw recording."
+        ),
+    )
+    parser.add_argument(
+        "--skip_statescoring",
+        action="store_true",
+        help="Reuse the brain-state scoring already in <output_dir>/states.",
+    )
+    parser.add_argument(
+        "--skip_preprocessing",
+        action="store_true",
+        help="Reuse the concatenated binary already in --output_dir.",
+    )
+    parser.add_argument(
+        "--skip_sorting",
+        action="store_true",
+        help="Reuse the kilosort4 output already in --output_dir.",
+    )
+    parser.add_argument(
+        "--skip_postprocessing",
+        action="store_true",
+        help="Stop after sorting; do not build the sorting analyzer.",
+    )
+    parser.add_argument(
+        "--bad_channels",
+        nargs="+",
+        default=None,
+        metavar="CH",
+        help=(
+            "Channels to exclude from sorting, as channel ids listed in "
+            "concat_info.json (e.g. --bad_channels AP191 AP192) or 0-based "
+            "rows of concatenated.bin. Overrides bad_channels in "
+            "--pipeline_config."
+        ),
+    )
+    parser.add_argument(
+        "--detect_bad_channels",
+        action="store_true",
+        help=(
+            "Also flag bad channels automatically with si.detect_bad_channels, "
+            "unioned with --bad_channels. Per-channel labels are written to "
+            f"{BAD_CHANNELS_NAME} for review."
+        ),
+    )
+    parser.add_argument(
+        "--pipeline_config",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a JSON file with pipeline overrides "
+            '(e.g. {"sorting": {"nblocks": 5}}), deep-merged onto DEFAULT_PIPELINE.'
+        ),
+    )
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+
+    pipeline_overrides = {}
+    if args.pipeline_config is not None:
+        with open(args.pipeline_config) as f:
+            pipeline_overrides = json.load(f)
+
+    if args.bad_channels is not None:
+        # argparse hands back strings; digit-only tokens are row indices, and
+        # anything else is a channel id.
+        pipeline_overrides["bad_channels"] = [
+            int(c) if c.lstrip("-").isdigit() else c for c in args.bad_channels
+        ]
+
+    if args.detect_bad_channels:
+        # deep_merge so the flag turns detection on without dropping any
+        # detect_bad_channels tuning already set in --pipeline_config.
+        pipeline_overrides = deep_merge(
+            pipeline_overrides, {"detect_bad_channels": {"enabled": True}}
+        )
+
+    return run_pipeline(
+        phys_path=args.phys_path,
+        phys_type=args.phys_type,
+        stream_name=args.stream_name,
+        output_dir=args.output_dir,
+        tmp_dir=args.tmp_dir,
+        skip_statescoring=args.skip_statescoring,
+        skip_preprocessing=args.skip_preprocessing,
+        skip_sorting=args.skip_sorting,
+        skip_postprocessing=args.skip_postprocessing,
+        **pipeline_overrides,
+    )
+
+
+if __name__ == "__main__":
+    main()
