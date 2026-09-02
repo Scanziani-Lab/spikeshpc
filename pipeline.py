@@ -15,6 +15,7 @@ from .config import (
     STATES_DIRNAME,
     deep_merge,
 )
+from .drift import drift_at_junction
 from .io import load_concatenated
 from .postprocess import postprocess
 from .preprocess import preprocess
@@ -175,6 +176,14 @@ def run_pipeline(
         print("[3/4] starting kilosort4...")
         run_kilosort4(output_dir, info, pipeline.get("sorting"), bad_channels)
         print("[3/4] sorting complete.")
+
+    # Concatenating only holds up if the probe barely moved between sessions.
+    # Report it here rather than leaving it to be dug out of ops.npy later.
+    if len(info["sample_offsets"]) > 2:
+        try:
+            drift_at_junction(output_dir)
+        except (FileNotFoundError, KeyError) as e:
+            print(f"    (could not read the drift estimate: {e})")
 
     # ── 4/4 Post-processing ──────────────────────────────────────────────
     if skip_postprocessing:

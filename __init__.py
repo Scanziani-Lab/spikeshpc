@@ -24,6 +24,7 @@ deep-merged on top of the defaults.
 """
 
 from .config import DEFAULT_PIPELINE, deep_merge
+from .drift import drift_at_junction, plot_drift
 from .io import detect_phys_type, load_concatenated, read_recording
 from .pipeline import run_pipeline
 from .split import SessionSplit, save_splits, split_run
@@ -34,7 +35,9 @@ __all__ = [
     "SessionSplit",
     "deep_merge",
     "detect_phys_type",
+    "drift_at_junction",
     "load_concatenated",
+    "plot_drift",
     "read_recording",
     "run_pipeline",
     "save_splits",
