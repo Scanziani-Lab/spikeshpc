@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .config import BAD_CHANNELS_NAME, deep_merge
+from .config import BAD_CHANNELS_NAME, DEFAULT_PIPELINE, deep_merge
 from .pipeline import run_pipeline
 
 
@@ -140,13 +140,57 @@ outputs (in --output_dir):
     return parser
 
 
+def load_pipeline_config(path):
+    """Read a --pipeline_config JSON file, reporting where a bad one breaks.
+
+    json.load's own error names neither the file nor the offending text, which
+    is a poor way to lose a queued job.
+    """
+    path = Path(path)
+    text = path.read_text()
+    try:
+        overrides = json.loads(text)
+    except json.JSONDecodeError as e:
+        lines = text.splitlines()
+        context = []
+        for n in range(max(e.lineno - 3, 1), min(e.lineno + 1, len(lines)) + 1):
+            marker = ">>" if n == e.lineno else "  "
+            context.append(f"  {marker} {n:>3} | {lines[n - 1]}")
+            if n == e.lineno:
+                context.append(f"       {' ' * len(str(n))} | {' ' * (e.colno - 1)}^")
+        raise SystemExit(
+            f"ERROR: {path} is not valid JSON.\n"
+            f"  {e.msg} at line {e.lineno}, column {e.colno}\n"
+            + "\n".join(context)
+            + "\n\n  'Expecting ',' delimiter' almost always means the line above "
+            "is missing\n  a trailing comma. A comma after the LAST entry in an "
+            "object is also\n  invalid JSON -- unlike Python.\n"
+            f"  Check the whole file with: python -m json.tool {path}"
+        ) from e
+
+    if not isinstance(overrides, dict):
+        raise SystemExit(
+            f"ERROR: {path} must contain a JSON object, got "
+            f"{type(overrides).__name__}."
+        )
+
+    # A misspelled top-level key would otherwise be accepted in silence and
+    # the run would quietly use defaults for whatever it was meant to set.
+    unknown = sorted(set(overrides) - set(DEFAULT_PIPELINE))
+    if unknown:
+        raise SystemExit(
+            f"ERROR: {path} has unrecognised top-level key(s): {unknown}\n"
+            f"  Valid keys are: {sorted(DEFAULT_PIPELINE)}"
+        )
+    return overrides
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
 
     pipeline_overrides = {}
     if args.pipeline_config is not None:
-        with open(args.pipeline_config) as f:
-            pipeline_overrides = json.load(f)
+        pipeline_overrides = load_pipeline_config(args.pipeline_config)
 
     if args.bad_channels is not None:
         # argparse hands back strings; digit-only tokens are row indices, and

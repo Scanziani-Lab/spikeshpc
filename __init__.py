@@ -26,15 +26,19 @@ deep-merged on top of the defaults.
 from .config import DEFAULT_PIPELINE, deep_merge
 from .io import detect_phys_type, load_concatenated, read_recording
 from .pipeline import run_pipeline
+from .split import SessionSplit, save_splits, split_run
 from .states import score_recording, score_session
 
 __all__ = [
     "DEFAULT_PIPELINE",
+    "SessionSplit",
     "deep_merge",
     "detect_phys_type",
     "load_concatenated",
     "read_recording",
     "run_pipeline",
+    "save_splits",
     "score_recording",
     "score_session",
+    "split_run",
 ]
