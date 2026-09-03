@@ -20,9 +20,18 @@ DEFAULT_PIPELINE = {
     # CAR and whitening, so filtering twice is usually not what you want.
     # Override with e.g. {"preprocessing": {"bandpass_filter": {}}}.
     "preprocessing": {},
-    # dtype of the concatenated binary. None keeps the recording's own dtype
-    # (int16 for raw SpikeGLX/OpenEphys).
-    "binary": {"dtype": None},
+    "binary": {
+        # dtype of the concatenated binary. None keeps the recording's own
+        # dtype (int16 for raw SpikeGLX/OpenEphys).
+        "dtype": None,
+        # Hand kilosort the acquisition system's own binary instead of writing
+        # a copy, when that is possible: one recording, no preprocessing, no
+        # dtype change, and the file's layout verified against the loaded
+        # traces. Rewriting a 9 h session is ~an hour of pure copying and a
+        # second full-size file on disk. Falls back to writing, with a reason
+        # logged, whenever any of those conditions fails.
+        "reuse_source": True,
+    },
     "concatenation": {
         # How far apart two contacts may be and still count as the same
         # electrode site when aligning recordings. Neuropixels site pitch is

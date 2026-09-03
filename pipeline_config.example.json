@@ -4,7 +4,8 @@
     "chunk_duration": "1s"
   },
   "binary": {
-    "dtype": null
+    "dtype": null,
+    "reuse_source": true
   },
   "concatenation": {
     "align_tolerance_um": 1.0,

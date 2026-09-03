@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import spikeinterface.full as si
 
 from .channels import (
@@ -11,7 +12,13 @@ from .channels import (
     drop_sync_channels,
 )
 from .config import CONCAT_BIN_NAME, CONCAT_INFO_NAME, PROBE_NAME
-from .io import channel_positions, read_recording, write_channel_map
+from .io import (
+    channel_positions,
+    check_source_binary,
+    locate_source_binary,
+    read_recording,
+    write_channel_map,
+)
 
 
 def preprocess(
@@ -23,6 +30,7 @@ def preprocess(
     dtype=None,
     align_tolerance_um: float = 1.0,
     sampling_frequency_max_diff: float = 0.0,
+    reuse_source: bool = True,
 ) -> dict:
     """Load, sync-strip, align, concatenate and write the binary + metadata.
 
@@ -67,13 +75,51 @@ def preprocess(
             "Check that the .meta/settings.xml sidecars are next to the binary."
         ) from e
 
-    bin_path = output_dir / CONCAT_BIN_NAME
-    print(f"    writing combined binary -> {bin_path}")
-    si.write_binary_recording(
-        rec, file_paths=bin_path, dtype=dtype, add_file_extension=False, verbose=True
-    )
+    # ── Sort the source binary in place when nothing has to change ───────
+    # Rewriting is pure copying: hours of I/O for a long single-session
+    # recording, and a second full-size copy on disk. It is only avoidable
+    # when there is one recording, no preprocessing, and the file's own layout
+    # matches what kilosort will read.
+    source_path, channel_rows, n_file_channels = None, None, None
+    if reuse_source:
+        why = None
+        if len(phys_paths) > 1:
+            why = "multiple recordings must be concatenated"
+        elif preprocessing:
+            why = "preprocessing changes the samples"
+        elif dtype is not None and np.dtype(dtype) != rec.get_dtype():
+            why = f"a dtype change to {dtype} was requested"
+        elif rec.get_dtype() != np.dtype("int16"):
+            why = f"recording dtype is {rec.get_dtype()}, not int16"
+        else:
+            candidate = locate_source_binary(phys_paths[0], phys_type, stream_name)
+            if candidate is None:
+                why = "could not identify a single source binary"
+            else:
+                checked = check_source_binary(rec, candidate, str(rec.get_dtype()))
+                if checked is None:
+                    why = f"{candidate.name} does not match the loaded traces"
+                else:
+                    n_file_channels, channel_rows = checked
+                    source_path = candidate
+        if source_path is None:
+            print(f"    writing a new binary ({why})")
 
-    write_channel_map(rec, output_dir)
+    if source_path is not None:
+        bin_path = source_path
+        extra = n_file_channels - len(channel_rows)
+        print(f"    sorting the source binary in place -> {bin_path}")
+        print(f"      verified {len(channel_rows)} channels against "
+              f"{n_file_channels} rows in the file"
+              + (f" ({extra} extra row(s) skipped)" if extra else ""))
+    else:
+        bin_path = output_dir / CONCAT_BIN_NAME
+        print(f"    writing combined binary -> {bin_path}")
+        si.write_binary_recording(
+            rec, file_paths=bin_path, dtype=dtype, add_file_extension=False, verbose=True
+        )
+
+    write_channel_map(rec, output_dir, channel_rows)
     probeinterface.write_probeinterface(output_dir / PROBE_NAME, probegroup)
 
     # Cumulative sample offsets let you split the concatenated sorting back
@@ -89,7 +135,14 @@ def preprocess(
         "phys_paths": [str(Path(p).resolve()) for p in phys_paths],
         "phys_type": phys_type,
         "stream_name": stream_name,
-        "binary_file": CONCAT_BIN_NAME,
+        "binary_file": bin_path.name,
+        "binary_path": str(bin_path.resolve()),
+        "sorted_in_place": source_path is not None,
+        # Rows per sample in the binary, and which of them are our channels.
+        # These differ from num_channels only when sorting a source file that
+        # carries extra rows.
+        "file_num_channels": int(n_file_channels or rec.get_num_channels()),
+        "channel_rows": None if channel_rows is None else [int(r) for r in channel_rows],
         "num_samples": num_samples,
         "sample_offsets": offsets,
         "total_samples": running,

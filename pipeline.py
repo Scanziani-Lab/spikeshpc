@@ -135,6 +135,7 @@ def run_pipeline(
             stream_name=stream_name,
             preprocessing=pipeline.get("preprocessing"),
             dtype=pipeline["binary"]["dtype"],
+            reuse_source=pipeline["binary"].get("reuse_source", True),
             align_tolerance_um=pipeline["concatenation"]["align_tolerance_um"],
             sampling_frequency_max_diff=(
                 pipeline["concatenation"]["sampling_frequency_max_diff"]

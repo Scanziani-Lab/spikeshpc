@@ -19,8 +19,10 @@ def run_kilosort4(
     settings = dict(DEFAULT_SETTINGS)
     # n_chan_bin counts rows in the binary, so it stays at the full channel
     # count even when bad channels are excluded -- kilosort drops those from
-    # the probe, not from the file it reads.
-    settings["n_chan_bin"] = info["num_channels"]
+    # the probe, not from the file it reads. When the source binary is sorted
+    # in place it can hold rows we never loaded (SpikeGLX's SY0), and chanMap
+    # is what selects ours back out.
+    settings["n_chan_bin"] = info.get("file_num_channels", info["num_channels"])
     settings["fs"] = info["sampling_frequency"]
     settings.update(settings_overrides or {})
 
@@ -35,7 +37,7 @@ def run_kilosort4(
     run_kilosort(
         settings=settings,
         probe=load_probe(output_dir / CHANMAP_NAME),
-        filename=output_dir / info["binary_file"],
+        filename=Path(info.get("binary_path") or (output_dir / info["binary_file"])),
         results_dir=results_dir,
         data_dtype=info["dtype"],
         bad_channels=bad_idx or None,
