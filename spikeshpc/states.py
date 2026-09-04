@@ -43,6 +43,7 @@ from scipy.signal import butter, sosfiltfilt
 
 from .config import STATES_DIRNAME
 from .io import channel_positions, read_recording
+from .tracking import read_rigid_body_track
 
 # buzcode's SleepState convention.
 STATE_CODES = {"WAKE": 1, "NREM": 3, "REM": 5}
@@ -436,16 +437,16 @@ def load_movement(config, session, times, step_s):
         print(f"      movement: no tracking files for {session}, skipping")
         return None
 
-    # The submodule, not the package: optitrack/__init__ pulls in matplotlib
-    # and the heading/tuning machinery, none of which is needed to read a CSV
-    # and none of which should be able to fail a sorting job.
-    from optitrack.io import load_optitrack_csv
-
     frame_times = np.load(times_path)
-    take = load_optitrack_csv(csv_path)
-    name = config.get("rigid_body") or next(iter(take.rigid_bodies))
-    position = np.asarray(take.rigid_bodies[name].position, dtype=float)
+    try:
+        track = read_rigid_body_track(csv_path, config.get("rigid_body"))
+    except ValueError as e:
+        # A malformed or ambiguous export is worth reporting, but not worth
+        # losing a sorting job over an optional signal.
+        print(f"      movement: {e} -- skipping the veto")
+        return None
 
+    position = track.position
     if len(frame_times) != len(position):
         print(
             f"      movement: {len(frame_times)} frame times but "
@@ -454,7 +455,8 @@ def load_movement(config, session, times, step_s):
         )
         return None
 
-    print(f"      movement: {name!r}, {len(position)} frames from {csv_path.name}")
+    print(f"      movement: {track.name!r}, {len(position)} frames from "
+          f"{csv_path.name} @ {track.frame_rate:g} Hz")
     return binned_speed(frame_times, position, times, step_s)
 
 

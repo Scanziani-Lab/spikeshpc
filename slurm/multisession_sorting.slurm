@@ -17,7 +17,10 @@ set -euo pipefail
 # module load apptainer   # adjust to your cluster's module name if different (e.g. singularity)
 
 # ── Paths -- edit these for your run ─────────────────────────────────────
-REPO_DIR=/home/remote/davcollins/spikes
+# Clone of github.com/Scanziani-Lab/spikeshpc. This script lives in its
+# slurm/ subdirectory, and the entry point sits at the repo root next to the
+# spikeshpc/ package, so nothing here needs the package pip-installed.
+REPO_DIR=/home/remote/davcollins/spikeshpc
 
 # Single combined image (spikeinterface + kilosort4 + CUDA). Read by apptainer
 # on the host, so it does not need its own bind-mount.
@@ -65,7 +68,7 @@ export APPTAINER_CACHEDIR="/scratch/user/davcollins/apptainer/cache"
 export APPTAINER_TMPDIR="/scratch/user/davcollins/apptainer/tmp"
 mkdir -p "${APPTAINER_CACHEDIR}" "${APPTAINER_TMPDIR}"
 
-# See slurm/pipeline_config.example.json. NOTE: the "sorting" key now holds
+# See ${REPO_DIR}/slurm/pipeline_config.example.json. NOTE: the "sorting" key holds
 # kilosort.DEFAULT_SETTINGS overrides, not si.run_sorter kwargs -- kilosort
 # raises "Unrecognized settings" on leftovers like sorter_name or
 # save_preprocessed_copy, so strip those from an old config.

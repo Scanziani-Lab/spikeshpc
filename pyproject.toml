@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spikeshpc"
+version = "0.1.0"
+description = "Neuropixels spike-sorting pipeline for HPC: brain-state scoring, channel-aligned concatenation, kilosort4, and spikeinterface post-processing"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "David Collins", email = "collinsd27@gmail.com" }]
+dependencies = [
+    "numpy",
+    "scipy",
+    # spikeinterface[full] pulls in pandas and scikit-learn, which the
+    # brain-state scoring and the OptiTrack CSV reader both need. Pinned as a
+    # floor rather than exactly: 0.104 is where the extension/analyzer API
+    # this package calls settled.
+    "spikeinterface[full]>=0.104",
+    "probeinterface",
+]
+
+[project.optional-dependencies]
+# kilosort4 and torch are large and CUDA-specific. On the cluster they come
+# from the container image (containers/si_kilosort4.def), not from pip, so
+# they are kept out of the hard dependencies.
+sorting = ["kilosort>=4.1"]
+dev = ["pytest>=7"]
+
+[project.urls]
+Repository = "https://github.com/Scanziani-Lab/spikeshpc"
+
+[project.scripts]
+spikeshpc = "spikeshpc.cli:main"
+spikeshpc-split = "spikeshpc.split:main"
+spikeshpc-drift = "spikeshpc.drift:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["spikeshpc*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

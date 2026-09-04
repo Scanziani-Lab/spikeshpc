@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Backwards-compatible entry point -- the pipeline now lives in spikepipe/.
+"""Entry point for running the pipeline straight out of a checkout.
 
-Kept so existing slurm scripts that call
-`python hpc_load_sort_post.py ...` keep working. Equivalent to
-`python -m spikepipe ...`.
+Equivalent to `python -m spikeshpc ...` or the `spikeshpc` console script,
+but needs no install: the slurm jobs bind-mount this repo into the container
+and run it in place.
 """
 
 import sys
 from pathlib import Path
 
-# Allow running this file directly from a checkout that is not pip-installed,
-# which is how the slurm jobs invoke it inside the container.
+# This file sits at the repo root, one level above the package, so adding its
+# own directory is what makes `import spikeshpc` resolve without an install.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from spikeshpc.cli import main  # noqa: E402
