@@ -135,13 +135,22 @@ def test_load_movement_skips_when_unconfigured(capsys):
     assert "no optitrack_csv" in capsys.readouterr().out
 
 
-def test_load_movement_skips_when_files_are_absent(tmp_path, capsys):
+def test_load_movement_skips_when_the_csv_is_absent(tmp_path, capsys):
     cfg = {
         "optitrack_csv": str(tmp_path / "{session}.csv"),
         "frame_times": str(tmp_path / "{session}.npy"),
     }
     assert S.load_movement(cfg, "s1", bin_times(10), STEP) is None
-    assert "no tracking files" in capsys.readouterr().out
+    assert "no OptiTrack CSV" in capsys.readouterr().out
+
+
+def test_load_movement_needs_somewhere_to_derive_frame_times_from(tmp_path, capsys):
+    """No cached times and no recording to extract them from: skip, don't crash."""
+    (tmp_path / "s1.csv").write_text("dummy")
+    cfg = {"optitrack_csv": str(tmp_path / "{session}.csv"), "frame_times": None}
+
+    assert S.load_movement(cfg, "s1", bin_times(10), STEP) is None
+    assert "nothing to derive them from" in capsys.readouterr().out
 
 
 def test_running_theta_is_removed_but_immobile_theta_survives():

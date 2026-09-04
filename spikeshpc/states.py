@@ -43,7 +43,7 @@ from scipy.signal import butter, sosfiltfilt
 
 from .config import STATES_DIRNAME
 from .io import channel_positions, read_recording
-from .tracking import read_rigid_body_track
+from .optitrack.io import read_rigid_body_track
 
 # buzcode's SleepState convention.
 STATE_CODES = {"WAKE": 1, "NREM": 3, "REM": 5}
@@ -419,23 +419,44 @@ def apply_movement_veto(
     return codes, info
 
 
-def load_movement(config, session, times, step_s):
+def load_movement(
+    config, session, times, step_s, phys_path=None, output_dir=None, phys_type=None
+):
     """Per-bin speed for `session`, or None when tracking is unavailable.
 
     `optitrack_csv` and `frame_times` are format strings taking `{session}`,
     which is how the same config covers every session in a run.
+
+    `frame_times` may be left unset: the shutter TTL is then extracted from
+    the recording's own ADC stream and cached, so a session can be scored
+    straight off the rig without a notebook step first.
     """
     csv_template = config.get("optitrack_csv")
-    times_template = config.get("frame_times")
-    if not csv_template or not times_template:
-        print("      movement: no optitrack_csv/frame_times configured, skipping")
+    if not csv_template:
+        print("      movement: no optitrack_csv configured, skipping")
         return None
 
     csv_path = Path(str(csv_template).format(session=session))
-    times_path = Path(str(times_template).format(session=session))
-    if not csv_path.exists() or not times_path.exists():
-        print(f"      movement: no tracking files for {session}, skipping")
+    if not csv_path.exists():
+        print(f"      movement: no OptiTrack CSV for {session}, skipping")
         return None
+
+    times_template = config.get("frame_times")
+    times_path = (
+        Path(str(times_template).format(session=session)) if times_template else None
+    )
+    if times_path is None or not times_path.exists():
+        if phys_path is None or output_dir is None:
+            print("      movement: no frame_times and nothing to derive them "
+                  "from, skipping")
+            return None
+        from .shutter import derive_shutter_times
+
+        times_path = derive_shutter_times(
+            phys_path, output_dir, session, config, phys_type, csv_path
+        )
+        if times_path is None:
+            return None
 
     frame_times = np.load(times_path)
     try:
@@ -644,7 +665,15 @@ def score_session(
         nstep = int(round(config["step_s"] * fs))
         n_windows = 1 + (n - nwin) // nstep
         grid = (np.arange(n_windows) * nstep + nwin / 2.0) / fs
-        speed = load_movement(movement_cfg, session, grid, config["step_s"])
+        speed = load_movement(
+            movement_cfg,
+            session,
+            grid,
+            config["step_s"],
+            phys_path=phys_path,
+            output_dir=output_dir,
+            phys_type=phys_type,
+        )
 
     result = score_recording(rec_lfp, rec_emg, config, exclude_channels, speed=speed)
     result["session"] = session

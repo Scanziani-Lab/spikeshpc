@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from spikeshpc.tracking import (
-    HEADER_ROWS,
+from spikeshpc.optitrack.io import (
+    _HEADER_ROWS as HEADER_ROWS,
     read_rigid_body_track,
     rigid_body_names,
 )
@@ -203,22 +203,19 @@ def test_load_movement_reports_a_bad_csv_without_raising(tmp_path, capsys):
     assert "skipping the veto" in capsys.readouterr().out
 
 
-def test_spikeshpc_does_not_import_optitrack():
-    """The point of vendoring: no cross-repo import anywhere in the package.
-
-    Resolved from this file rather than from `spikeshpc.__file__`, which is
-    None whenever the package is shadowed by a same-named namespace directory.
-    """
+def test_optitrack_is_a_subpackage_not_an_outside_dependency():
+    """Folded in, so nothing reaches outside the repo for it."""
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parent.parent / "spikeshpc"
-    modules = sorted(root.glob("*.py"))
-    assert modules, f"no package modules found at {root}"
+    assert (root / "optitrack" / "__init__.py").exists()
 
+    modules = sorted(p for p in root.glob("*.py"))
+    assert modules, f"no package modules found at {root}"
     offenders = [
         f"{p.name}:{i}"
         for p in modules
         for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
-        if "import optitrack" in line or "from optitrack" in line
+        if line.lstrip().startswith(("import optitrack", "from optitrack"))
     ]
-    assert not offenders, f"optitrack imported at {offenders}"
+    assert not offenders, f"top-level optitrack imported at {offenders}"

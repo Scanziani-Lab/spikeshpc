@@ -14,6 +14,21 @@ SORTER_DIRNAME = "kilosort4"
 ANALYZER_NAME = "analyzer.zarr"
 
 DEFAULT_PIPELINE = {
+    # Everything a run needs beyond the SBATCH directives themselves, so the
+    # same file drives a laptop and a cluster job. Command-line arguments
+    # override anything set here.
+    "run": {
+        "phys_paths": [],
+        "output_dir": None,
+        "tmp_dir": None,
+        # Directories the slurm job must bind into the container. Left empty,
+        # they are derived from the paths above plus the movement templates.
+        "bind_paths": [],
+        "skip_statescoring": False,
+        "skip_preprocessing": False,
+        "skip_sorting": False,
+        "skip_postprocessing": False,
+    },
     "job_kwargs": dict(n_jobs=16, chunk_duration="1s", progress_bar=True),
     # Optional spikeinterface steps applied *before* the concatenated binary
     # is written. Empty by default: kilosort4 does its own highpass filtering,
@@ -94,7 +109,14 @@ DEFAULT_PIPELINE = {
         "movement": {
             "enabled": False,
             "optitrack_csv": None,
+            # Camera-frame times on the ephys clock. Leave null and they are
+            # extracted from the recording's own ADC stream, checked against
+            # the take's frame count, and cached next to the state metrics --
+            # so a session can be scored without a notebook step first.
             "frame_times": None,
+            "adc_stream_name": None,  # null = auto-detect the ADC stream
+            "adc_channel": None,      # null = auto-detect the channel with a TTL
+            "save_sanity_plot": True,
             "rigid_body": None,      # null = the take's only rigid body
             "veto": ["NREM", "REM"],
             "threshold": None,       # null = bimodal split on log10 speed

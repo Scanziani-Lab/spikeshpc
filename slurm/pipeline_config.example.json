@@ -1,6 +1,18 @@
 {
+  "run": {
+    "phys_paths": [
+      "/scratch/user/davcollins/physiology/5800941/session6a"
+    ],
+    "output_dir": "/scratch/user/davcollins/physiology/5800941/kilosort_session6a",
+    "tmp_dir": "/scratch/user/davcollins/physiology/5800941/tmp",
+    "bind_paths": [],
+    "skip_statescoring": false,
+    "skip_preprocessing": false,
+    "skip_sorting": false,
+    "skip_postprocessing": false
+  },
   "job_kwargs": {
-    "n_jobs": 16,
+    "n_jobs": 23,
     "chunk_duration": "1s"
   },
   "binary": {
@@ -20,9 +32,12 @@
     "theta_channels": null,
     "min_state_duration_s": 6.0,
     "movement": {
-      "enabled": false,
-      "optitrack_csv": "Z:/Behavior/5800941/{session}/{session}_optitrack.csv",
-      "frame_times": "Z:/Behavior/5800941/{session}/optitrack_shutter_close_times.npy",
+      "enabled": true,
+      "optitrack_csv": "/scratch/user/davcollins/behavior/5800941/{session}/{session}_optitrack.csv",
+      "frame_times": null,
+      "adc_stream_name": null,
+      "adc_channel": null,
+      "save_sanity_plot": true,
       "rigid_body": null,
       "veto": ["NREM", "REM"],
       "threshold": null

@@ -48,10 +48,11 @@ outputs (in --output_dir):
     parser.add_argument(
         "phys_path",
         type=Path,
-        nargs="+",
+        nargs="*",
         help=(
             "Recording session directory or raw binary file. "
-            "Pass several to concatenate them before sorting."
+            "Pass several to concatenate them before sorting. "
+            "May instead be set as run.phys_paths in --pipeline_config."
         ),
     )
     parser.add_argument(
@@ -206,16 +207,36 @@ def main(argv=None):
             pipeline_overrides, {"detect_bad_channels": {"enabled": True}}
         )
 
+    # The "run" block lets one config drive a laptop and a cluster job alike.
+    # Anything given on the command line wins over it, so a config can be
+    # overridden for a one-off without editing the file.
+    run_cfg = pipeline_overrides.pop("run", None) or {}
+
+    phys_path = args.phys_path or run_cfg.get("phys_paths") or []
+    if not phys_path:
+        build_parser().error(
+            "no recordings given: pass them as arguments, or set "
+            'run.phys_paths in --pipeline_config'
+        )
+
+    def pick(cli_value, key):
+        return cli_value if cli_value is not None else run_cfg.get(key)
+
+    # store_true flags are False rather than None when absent, so OR them:
+    # the config can turn a stage off, the flag can too, neither turns it on.
+    def skip(cli_flag, key):
+        return bool(cli_flag) or bool(run_cfg.get(key, False))
+
     return run_pipeline(
-        phys_path=args.phys_path,
-        phys_type=args.phys_type,
-        stream_name=args.stream_name,
-        output_dir=args.output_dir,
-        tmp_dir=args.tmp_dir,
-        skip_statescoring=args.skip_statescoring,
-        skip_preprocessing=args.skip_preprocessing,
-        skip_sorting=args.skip_sorting,
-        skip_postprocessing=args.skip_postprocessing,
+        phys_path=[Path(p) for p in phys_path],
+        phys_type=pick(args.phys_type, "phys_type"),
+        stream_name=pick(args.stream_name, "stream_name"),
+        output_dir=pick(args.output_dir, "output_dir"),
+        tmp_dir=pick(args.tmp_dir, "tmp_dir"),
+        skip_statescoring=skip(args.skip_statescoring, "skip_statescoring"),
+        skip_preprocessing=skip(args.skip_preprocessing, "skip_preprocessing"),
+        skip_sorting=skip(args.skip_sorting, "skip_sorting"),
+        skip_postprocessing=skip(args.skip_postprocessing, "skip_postprocessing"),
         **pipeline_overrides,
     )
 

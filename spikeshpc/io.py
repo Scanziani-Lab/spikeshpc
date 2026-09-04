@@ -34,9 +34,20 @@ def detect_phys_type(phys_path: Path) -> str:
 def _stream_candidates(stream_names, phys_type: str, band: str):
     """Streams matching the requested band, per acquisition system."""
     if phys_type == "spikeglx":
-        # 'imec0.ap' alongside 'imec0.lf', 'imec0.ap-SYNC' and 'nidq'.
+        # 'imec0.ap' alongside 'imec0.lf', 'imec0.ap-SYNC' and 'nidq'. Analog
+        # inputs land on the NI card rather than the probe.
+        if band == "adc":
+            return [s for s in stream_names if s.lower().startswith("nidq")]
         suffix = ".ap" if band == "ap" else ".lf"
         return [s for s in stream_names if s.lower().endswith(suffix)]
+
+    if band == "adc":
+        # OpenEphys: '...ProbeA-ADC' on a OneBox, or a separate DAQ stream.
+        return [
+            s
+            for s in stream_names
+            if re.search(r"[-_.]adc$", s, flags=re.IGNORECASE)
+        ]
 
     # OpenEphys names the AP band after the probe -- e.g.
     # 'Record Node 101#Neuropix-PXI-100.ProbeA' -- with the ADC and LFP bands
