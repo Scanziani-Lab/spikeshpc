@@ -18,7 +18,15 @@
     "emg_rate": 2500.0,
     "sw_channels": null,
     "theta_channels": null,
-    "min_state_duration_s": 6.0
+    "min_state_duration_s": 6.0,
+    "movement": {
+      "enabled": false,
+      "optitrack_csv": "Z:/Behavior/5800941/{session}/{session}_optitrack.csv",
+      "frame_times": "Z:/Behavior/5800941/{session}/optitrack_shutter_close_times.npy",
+      "rigid_body": null,
+      "veto": ["NREM", "REM"],
+      "threshold": null
+    }
   },
   "bad_channels": [],
   "detect_bad_channels": {

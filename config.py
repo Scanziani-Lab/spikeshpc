@@ -85,6 +85,20 @@ DEFAULT_PIPELINE = {
         "emg_min_distance_um": 100.0,
         "smooth_s": 10.0,
         "min_state_duration_s": 6.0,
+        # Optional OptiTrack veto. Gross movement proves the animal is awake,
+        # so it overrules an NREM/REM call; stillness proves nothing and is
+        # ignored, since a mouse can sit motionless and wide awake. This is
+        # the only signal here that catches running, whose hippocampal theta
+        # is otherwise indistinguishable from REM's.
+        # Paths take a {session} placeholder so one config covers a whole run.
+        "movement": {
+            "enabled": False,
+            "optitrack_csv": None,
+            "frame_times": None,
+            "rigid_body": None,      # null = the take's only rigid body
+            "veto": ["NREM", "REM"],
+            "threshold": None,       # null = bimodal split on log10 speed
+        },
     },
     # Channels to exclude from sorting -- dead/broken sites, or anything out of
     # the brain. Channel ids as listed in concat_info.json (preferred) or ints

@@ -42,6 +42,16 @@ OUTPUT_DIR="${DATA_DIR}/kilosort"
 # with no traceback.
 TMP_DIR="${DATA_DIR}/tmp"
 
+# OptiTrack tracking, for the brain-state movement veto. Only needed when
+# state_scoring.movement.enabled is true in PIPELINE_CONFIG; the paths there
+# must live under this directory, or the container cannot see them. Leave
+# empty to skip the extra bind mount.
+BEHAVIOR_DIR=/scratch/user/davcollins/behavior
+BEHAVIOR_BIND=()
+if [[ -n "${BEHAVIOR_DIR}" && -d "${BEHAVIOR_DIR}" ]]; then
+    BEHAVIOR_BIND=(--bind "${BEHAVIOR_DIR}:${BEHAVIOR_DIR}")
+fi
+
 # Acquisition system and stream are auto-detected (SpikeGLX .meta vs OpenEphys
 # structure.oebin/settings.xml; the AP-band stream is picked per format).
 # Uncomment to force them -- required if a session has more than one probe,
@@ -131,10 +141,12 @@ echo "output   : ${OUTPUT_DIR}"
 # ${arr[@]+...} keeps `set -u` from tripping over an empty array on bash < 4.4.
 echo "skipping : ${SKIP_ARGS[@]+${SKIP_ARGS[@]}}"
 echo "bad chans: ${BAD_CHANNELS:-none} (autodetect=${DETECT_BAD_CHANNELS:-0})"
+echo "behavior : ${BEHAVIOR_DIR:-none}${BEHAVIOR_BIND:+ (bound)}"
 
 apptainer exec --nv \
     --bind "${REPO_DIR}:${REPO_DIR}" \
     --bind "${DATA_DIR}:${DATA_DIR}" \
+    ${BEHAVIOR_BIND[@]+"${BEHAVIOR_BIND[@]}"} \
     "${SI_SIF}" \
     python -u "${REPO_DIR}/hpc_load_sort_post.py" \
         "${PHYS_DIRS[@]}" \

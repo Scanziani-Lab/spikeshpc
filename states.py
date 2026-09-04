@@ -309,6 +309,155 @@ def intervals_from_states(codes, times, step_s):
     return intervals
 
 
+# ── movement ─────────────────────────────────────────────────────────────
+def binned_speed(frame_times, position, times, step_s):
+    """Mean speed per state bin, from tracked position sampled at frame_times.
+
+    Frames with non-finite position are skipped and the speed is taken over
+    the real elapsed interval, so tracking dropouts do not read as stillness.
+    Bins with no frames come back NaN, which the veto leaves alone.
+    """
+    frame_times = np.asarray(frame_times, dtype=float)
+    position = np.asarray(position, dtype=float)
+    if len(frame_times) != len(position):
+        raise ValueError(
+            f"{len(frame_times)} frame times but {len(position)} position "
+            "samples; align them before calling (see "
+            "optitrack.align_frames_to_shutter_events)."
+        )
+
+    finite = np.isfinite(position).all(axis=1)
+    idx = np.flatnonzero(finite)
+    speed = np.full(len(position), np.nan)
+    if idx.size > 1:
+        step = np.linalg.norm(np.diff(position[idx], axis=0), axis=1)
+        elapsed = np.diff(frame_times[idx])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            speed[idx[1:]] = np.where(elapsed > 0, step / elapsed, np.nan)
+
+    edges = np.r_[times - step_s / 2, times[-1] + step_s / 2]
+    which = np.digitize(frame_times, edges) - 1
+    ok = (which >= 0) & (which < len(times)) & np.isfinite(speed)
+
+    totals = np.bincount(which[ok], weights=speed[ok], minlength=len(times))
+    counts = np.bincount(which[ok], minlength=len(times))
+    out = np.full(len(times), np.nan)
+    np.divide(totals, counts, out=out, where=counts > 0)
+    return out
+
+
+def movement_threshold(speed, floor=1e-3, seed=0):
+    """Split immobility from locomotion on log10 speed.
+
+    Log scale on purpose. Movement never reaches zero -- breathing, postural
+    sway and tracking jitter put a floor under it -- so the question is never
+    "is the speed zero" but "which of two modes is this bin in". Those two
+    modes are roughly log-normal and well separated; the same bimodal split
+    used for the LFP metrics finds the trough between them.
+    """
+    log_speed = np.log10(np.maximum(np.asarray(speed, dtype=float), floor))
+    finite = log_speed[np.isfinite(log_speed)]
+    if finite.size < 10:
+        return None
+    return bimodal_threshold(finite, seed=seed)
+
+
+def apply_movement_veto(
+    codes,
+    speed,
+    threshold=None,
+    step_s=1.0,
+    min_duration_s=6.0,
+    veto=("NREM", "REM"),
+    floor=1e-3,
+):
+    """Reassign to WAKE any bin scored asleep while the animal was moving.
+
+    Deliberately asymmetric. Gross movement proves the animal is awake, but
+    stillness proves nothing -- a mouse can sit motionless and wide awake, so
+    absence of movement must not push a bin towards sleep. Used as a veto, the
+    tracker adds information the LFP cannot: it is the only signal here that
+    can catch running, which drives hippocampal theta and is otherwise
+    indistinguishable from REM's theta.
+
+    Bins with no tracking data (NaN) are left untouched. Minimum-duration
+    smoothing is re-applied afterwards, since vetoing punches holes in
+    otherwise good bouts.
+
+    Returns (codes, info).
+    """
+    codes = np.asarray(codes).copy()
+    speed = np.asarray(speed, dtype=float)
+    if threshold is None:
+        threshold = movement_threshold(speed, floor=floor)
+    if threshold is None:
+        return codes, {"applied": False, "reason": "no usable movement data"}
+
+    log_speed = np.log10(np.maximum(speed, floor))
+    moving = np.isfinite(log_speed) & (log_speed > threshold)
+    targets = np.isin(codes, [STATE_CODES[name] for name in veto])
+
+    before = codes.copy()
+    codes[moving & targets] = STATE_CODES["WAKE"]
+    codes = enforce_min_duration(codes, step_s, min_duration_s)
+
+    changed = codes != before
+    info = {
+        "applied": True,
+        "threshold_log10": float(threshold),
+        "threshold_speed": float(10**threshold),
+        "vetoed_states": list(veto),
+        "coverage": float(np.isfinite(speed).mean()),
+        "fraction_moving": float(moving.mean()),
+        "n_reassigned": int(changed.sum()),
+        "fraction_reassigned": float(changed.mean()),
+    }
+    print(f"      movement veto: threshold {10**threshold:.1f} units/s, "
+          f"{moving.mean():.1%} of bins moving, "
+          f"{changed.sum()} bins reassigned ({changed.mean():.1%})")
+    return codes, info
+
+
+def load_movement(config, session, times, step_s):
+    """Per-bin speed for `session`, or None when tracking is unavailable.
+
+    `optitrack_csv` and `frame_times` are format strings taking `{session}`,
+    which is how the same config covers every session in a run.
+    """
+    csv_template = config.get("optitrack_csv")
+    times_template = config.get("frame_times")
+    if not csv_template or not times_template:
+        print("      movement: no optitrack_csv/frame_times configured, skipping")
+        return None
+
+    csv_path = Path(str(csv_template).format(session=session))
+    times_path = Path(str(times_template).format(session=session))
+    if not csv_path.exists() or not times_path.exists():
+        print(f"      movement: no tracking files for {session}, skipping")
+        return None
+
+    # The submodule, not the package: optitrack/__init__ pulls in matplotlib
+    # and the heading/tuning machinery, none of which is needed to read a CSV
+    # and none of which should be able to fail a sorting job.
+    from optitrack.io import load_optitrack_csv
+
+    frame_times = np.load(times_path)
+    take = load_optitrack_csv(csv_path)
+    name = config.get("rigid_body") or next(iter(take.rigid_bodies))
+    position = np.asarray(take.rigid_bodies[name].position, dtype=float)
+
+    if len(frame_times) != len(position):
+        print(
+            f"      movement: {len(frame_times)} frame times but "
+            f"{len(position)} tracked frames for {session}; skipping rather "
+            "than guessing the alignment"
+        )
+        return None
+
+    print(f"      movement: {name!r}, {len(position)} frames from {csv_path.name}")
+    return binned_speed(frame_times, position, times, step_s)
+
+
 # ── top level ────────────────────────────────────────────────────────────
 def _smooth(x, step_s, smooth_s):
     width = max(int(round(smooth_s / step_s)), 1)
@@ -318,8 +467,12 @@ def _smooth(x, step_s, smooth_s):
     return np.convolve(x, kernel, mode="same").astype(np.float32)
 
 
-def score_recording(rec_lfp, rec_emg, config, exclude_channels=()):
-    """Compute the three signals and the state sequence for one recording."""
+def score_recording(rec_lfp, rec_emg, config, exclude_channels=(), speed=None):
+    """Compute the three signals and the state sequence for one recording.
+
+    `speed` is an optional per-bin movement trace on the same time base; see
+    :func:`apply_movement_veto` for how it is used.
+    """
     step_s = float(config["step_s"])
 
     sw_ids = pick_channels(
@@ -384,6 +537,18 @@ def score_recording(rec_lfp, rec_emg, config, exclude_channels=()):
     codes = classify_states(broadband_s, theta_s, emg_s, thresholds)
     codes = enforce_min_duration(codes, step_s, config["min_state_duration_s"])
 
+    movement_info = {"applied": False}
+    if speed is not None:
+        mv = config.get("movement") or {}
+        codes, movement_info = apply_movement_veto(
+            codes,
+            speed,
+            threshold=mv.get("threshold"),
+            step_s=step_s,
+            min_duration_s=config["min_state_duration_s"],
+            veto=tuple(mv.get("veto", ("NREM", "REM"))),
+        )
+
     fractions = {
         name: float(np.mean(codes == code)) for name, code in STATE_CODES.items()
     }
@@ -400,8 +565,10 @@ def score_recording(rec_lfp, rec_emg, config, exclude_channels=()):
         "broadband": broadband_s,
         "theta": theta_s,
         "emg": emg_s,
+        "speed": speed,
         "codes": codes,
         "thresholds": thresholds,
+        "movement": movement_info,
         "fractions": fractions,
         "intervals": intervals_from_states(codes, times, step_s),
         "channels": {
@@ -464,7 +631,20 @@ def score_session(
     rec_lfp = _resample_to(source, config["lfp_rate"])
     rec_emg = _resample_to(source, config["emg_rate"])
 
-    result = score_recording(rec_lfp, rec_emg, config, exclude_channels)
+    # The bin grid is fixed by the spectrogram, so derive it the same way here
+    # rather than duplicating the arithmetic inside score_recording.
+    speed = None
+    movement_cfg = config.get("movement") or {}
+    if movement_cfg.get("enabled"):
+        n = rec_lfp.get_num_frames()
+        fs = rec_lfp.get_sampling_frequency()
+        nwin = int(round(config["window_s"] * fs))
+        nstep = int(round(config["step_s"] * fs))
+        n_windows = 1 + (n - nwin) // nstep
+        grid = (np.arange(n_windows) * nstep + nwin / 2.0) / fs
+        speed = load_movement(movement_cfg, session, grid, config["step_s"])
+
+    result = score_recording(rec_lfp, rec_emg, config, exclude_channels, speed=speed)
     result["session"] = session
     result["phys_path"] = str(phys_path.resolve())
     result["duration_s"] = float(
@@ -473,18 +653,20 @@ def score_session(
 
     states_dir = output_dir / STATES_DIRNAME
     states_dir.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        states_dir / f"{session}_metrics.npz",
+    arrays = dict(
         times=result["times"],
         broadband=result["broadband"],
         theta=result["theta"],
         emg=result["emg"],
         codes=result["codes"],
     )
+    if result.get("speed") is not None:
+        arrays["speed"] = result["speed"]
+    np.savez_compressed(states_dir / f"{session}_metrics.npz", **arrays)
     summary = {
         k: v
         for k, v in result.items()
-        if k not in ("times", "broadband", "theta", "emg", "codes")
+        if k not in ("times", "broadband", "theta", "emg", "codes", "speed")
     }
     summary["state_codes"] = STATE_CODES
     summary["step_s"] = config["step_s"]
