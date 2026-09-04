@@ -204,15 +204,20 @@ def test_load_movement_reports_a_bad_csv_without_raising(tmp_path, capsys):
 
 
 def test_spikeshpc_does_not_import_optitrack():
-    """The point of vendoring: no cross-repo import anywhere in the package."""
+    """The point of vendoring: no cross-repo import anywhere in the package.
+
+    Resolved from this file rather than from `spikeshpc.__file__`, which is
+    None whenever the package is shadowed by a same-named namespace directory.
+    """
     import pathlib
 
-    import spikeshpc
+    root = pathlib.Path(__file__).resolve().parent.parent / "spikeshpc"
+    modules = sorted(root.glob("*.py"))
+    assert modules, f"no package modules found at {root}"
 
-    root = pathlib.Path(spikeshpc.__file__).parent
     offenders = [
         f"{p.name}:{i}"
-        for p in root.glob("*.py")
+        for p in modules
         for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
         if "import optitrack" in line or "from optitrack" in line
     ]
