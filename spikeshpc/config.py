@@ -61,8 +61,8 @@ DEFAULT_PIPELINE = {
         "sampling_frequency_max_diff": 0.0,
     },
     # Brain-state scoring, after Watson et al. 2016. Runs per recording,
-    # BEFORE concatenation, so the 10 s spectrogram window never straddles a
-    # junction between sessions. See spikesphc/states.py for the method and
+    # BEFORE concatenation, so the spectrogram window never straddles a
+    # junction between sessions. See spikeshpc/states.py for the method and
     # its deviations from the buzcode original.
     "state_scoring": {
         "enabled": True,
@@ -74,7 +74,11 @@ DEFAULT_PIPELINE = {
         # which is a poor place for a Butterworth. buzcode filters there
         # anyway; we resample to 2500 Hz first instead.
         "emg_rate": 2500.0,
-        "window_s": 10.0,
+        # Watson et al. use a 10 s window; 5 s trades frequency resolution
+        # (0.2 Hz, still ample for a 1-100 Hz log-spaced spectrogram) for
+        # temporal precision, which matters for short REM bouts. The EMG
+        # correlation window follows it.
+        "window_s": 5.0,
         "step_s": 1.0,
         "freq_range": [1.0, 100.0],
         "n_freqs": 100,
@@ -118,6 +122,13 @@ DEFAULT_PIPELINE = {
             "adc_channel": None,      # null = auto-detect the channel with a TTL
             "save_sanity_plot": True,
             "rigid_body": None,      # null = the take's only rigid body
+            # Motive repeats the last known position when it loses the body,
+            # which reads as perfect stillness and then as a burst when it
+            # reacquires. Those frames are dropped; a displacement spanning
+            # more than max_gap_s is not credited to any instant, and the
+            # resulting empty bins are interpolated only if short.
+            "max_gap_s": 0.5,
+            "interpolate_gaps_s": 2.0,
             "veto": ["NREM", "REM"],
             "threshold": None,       # null = bimodal split on log10 speed
         },

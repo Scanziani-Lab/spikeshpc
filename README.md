@@ -68,7 +68,7 @@ WAKE/NREM/REM from LFP, after [Watson et al. 2016](https://pmc.ncbi.nlm.nih.gov/
 Runs per session *before* concatenation, so the 10 s spectrogram window never straddles
 a junction between sessions.
 
-Three signals in 1 s steps: the first principal component of the z-scored log
+Three signals in 1 s steps over a 5 s window: the first principal component of the z-scored log
 spectrogram (high in NREM), the 5–10 Hz / 2–16 Hz power ratio (high in REM), and a
 pseudo-EMG from zero-lag correlations between 300–600 Hz signals at separated sites
 (high in waking movement). Each is split at the trough between its two modes.

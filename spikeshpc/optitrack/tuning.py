@@ -32,6 +32,22 @@ def compute_frame_firing_rates(sorting, unit_id, frame_times: np.ndarray) -> np.
     return _frame_spike_counts(sorting, unit_id, frame_times) / np.diff(frame_times)
 
 
+def _check_interval_mask(interval_mask, n_intervals: int):
+    """Validate an interval mask, or None. Returns a boolean array or None."""
+    if interval_mask is None:
+        return None
+    keep = np.asarray(interval_mask, dtype=bool)
+    if keep.shape != (n_intervals,):
+        raise ValueError(
+            f"interval_mask has {keep.shape} entries but there are "
+            f"{n_intervals} inter-frame intervals. It masks intervals, not "
+            "frames -- see spikeshpc.states.frames_in_states."
+        )
+    if not keep.any():
+        raise ValueError("interval_mask keeps no intervals at all.")
+    return keep
+
+
 def _bin_headings(
     heading_deg: np.ndarray, n_bins: int
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -155,6 +171,7 @@ def compute_hd_tuning_significance(
     min_shift_s: float = 20.0,
     alpha: float = 0.01,
     seed: int = 0,
+    interval_mask=None,
 ) -> dict:
     """Test each unit's tuning curve against a shifted-spike-train null.
 
@@ -188,8 +205,13 @@ def compute_hd_tuning_significance(
         unit_ids = sorting.unit_ids
 
     occupancy_time = np.diff(frame_times)
+    interval_heading = heading_deg[:-1]
+    keep = _check_interval_mask(interval_mask, len(occupancy_time))
+    if keep is not None:
+        occupancy_time = occupancy_time[keep]
+        interval_heading = interval_heading[keep]
     n_intervals = len(occupancy_time)
-    bin_centers, bin_idx = _bin_headings(heading_deg[:-1], n_bins)
+    bin_centers, bin_idx = _bin_headings(interval_heading, n_bins)
     summed_occupancy = np.bincount(bin_idx, weights=occupancy_time, minlength=n_bins)
 
     mean_interval = occupancy_time.mean()
@@ -206,6 +228,8 @@ def compute_hd_tuning_significance(
     stats = {}
     for unit_id in unit_ids:
         spike_counts = _frame_spike_counts(sorting, unit_id, frame_times)
+        if keep is not None:
+            spike_counts = spike_counts[keep]
         rate = _occupancy_normalized_rate(
             bin_idx, spike_counts, summed_occupancy, n_bins, smooth_sigma_deg
         )
@@ -271,6 +295,7 @@ def compute_all_units_tuning_curves(
     unit_ids=None,
     n_bins: int = 360,
     smooth_sigma_deg: float = 10.0,
+    interval_mask=None,
 ) -> dict:
     """Tuning curve for each unit in ``unit_ids`` (default: every unit in ``analyzer.sorting``).
 
@@ -282,16 +307,29 @@ def compute_all_units_tuning_curves(
     :func:`optitrack.sync.align_frames_to_shutter_events`, matched 1:1 with
     the (aligned) ``frame_times`` (the shutter-closure timestamps). The last
     entry of each has no following interval and is dropped internally.
+
+    ``interval_mask`` (length ``len(frame_times) - 1``) restricts the curve to
+    a subset of inter-frame intervals -- the wake epochs, say. Pass the *full*
+    arrays alongside it rather than pre-filtering them: a filtered
+    ``frame_times`` splices the removed span into one enormous interval that
+    absorbs every spike fired during it. See
+    :func:`spikeshpc.states.frames_in_states`.
     """
     sorting = analyzer.sorting
     if unit_ids is None:
         unit_ids = sorting.unit_ids
     occupancy_time = np.diff(frame_times)
     interval_heading = heading_deg[:-1]
+    keep = _check_interval_mask(interval_mask, len(occupancy_time))
+    if keep is not None:
+        occupancy_time = occupancy_time[keep]
+        interval_heading = interval_heading[keep]
 
     curves = {}
     for unit_id in unit_ids:
         firing_rate = compute_frame_firing_rates(sorting, unit_id, frame_times)
+        if keep is not None:
+            firing_rate = firing_rate[keep]
         curves[unit_id] = compute_hd_tuning_curve(
             interval_heading,
             firing_rate,

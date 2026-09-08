@@ -170,3 +170,111 @@ def test_running_theta_is_removed_but_immobile_theta_survives():
     assert (out[:60] == S.STATE_CODES["WAKE"]).mean() > 0.9
     assert (out[60:] == S.STATE_CODES["REM"]).mean() > 0.9
     assert 3.0 < info["threshold_speed"] < 40.0
+
+
+# ── tracking dropouts ───────────────────────────────────────────────────
+def _track(segments, rate=FRAME_RATE):
+    """Build a position track from (n_frames, per_frame_step_mm) segments.
+
+    A step of 0 repeats the previous position exactly, which is what Motive
+    writes when it loses the rigid body.
+    """
+    pos = [np.zeros(3)]
+    for n, step in segments:
+        for _ in range(n):
+            pos.append(pos[-1] + np.array([step, 0.0, 0.0]))
+    pos = np.array(pos[1:])
+    return np.arange(len(pos)) / rate, pos
+
+
+def test_held_frames_are_detected():
+    _, pos = _track([(5, 1.0), (4, 0.0), (5, 1.0)])
+    held = S.held_frames(pos)
+    assert held.sum() == 4
+    assert list(np.flatnonzero(held)) == [5, 6, 7, 8]
+
+
+def test_held_frames_on_degenerate_input():
+    assert S.held_frames(np.zeros((0, 3))).sum() == 0
+    assert S.held_frames(np.zeros((1, 3))).sum() == 0
+
+
+def test_a_dropout_does_not_read_as_stillness():
+    """The real failure: 12 bins read 0 mm/s while the animal was running."""
+    moving = 0.5                                   # mm per frame -> 60 mm/s
+    ft, pos = _track([(120, moving), (60, 0.0), (120, moving)])
+    times = np.arange(3) + 0.5                     # three 1 s bins
+
+    speed = S.binned_speed(ft, pos, times, 1.0, verbose=False)
+    # the middle bin is entirely dropout, so it has no usable frames of its own
+    assert np.isclose(speed[0], 60.0, rtol=0.05)
+    assert np.isclose(speed[2], 60.0, rtol=0.05)
+    assert speed[1] > 10.0, "a dropout bin must not read as immobile"
+
+
+def test_the_reacquisition_step_is_not_read_as_an_instantaneous_burst():
+    """The animal keeps moving through a blackout, so the tracker reacquires
+    it somewhere else entirely. Counting the held frames would credit that
+    whole displacement to a single frame interval -- 120 mm in 1/120 s reads
+    as 14 m/s, a burst that never happened."""
+    rate = FRAME_RATE
+    ft, pos = _track([(120, 0.5), (240, 0.0)])
+    # 2 s of blackout during which the animal covered 120 mm, then moving again
+    resumed = pos[-1] + np.array([120.0, 0.0, 0.0])
+    tail = resumed + np.arange(1, 121)[:, None] * np.array([0.5, 0.0, 0.0])
+    pos = np.vstack([pos, tail])
+    ft = np.arange(len(pos)) / rate
+    times = np.arange(4) + 0.5
+
+    lenient = S.binned_speed(ft, pos, times, 1.0, max_gap_s=1e9,
+                             interpolate_gaps_s=0.0, verbose=False)
+    naive_burst = 120.0 * rate           # what counting the held frames gives
+    assert np.nanmax(lenient) < naive_burst / 100
+    # across a 2 s gap the honest reading is the average over it, ~60 mm/s
+    assert np.nanmax(lenient) == pytest.approx(60.0, rel=0.2)
+
+    # and with a short max_gap_s that across-gap step is not used at all
+    strict = S.binned_speed(ft, pos, times, 1.0, max_gap_s=0.5,
+                            interpolate_gaps_s=0.0, verbose=False)
+    assert np.isnan(strict[1]) or np.isnan(strict[2])
+
+
+def test_short_gaps_are_interpolated_and_long_ones_are_not():
+    values = np.array([10.0, np.nan, 30.0, np.nan, np.nan, np.nan, 70.0])
+    filled = S.interpolate_gaps(values, step_s=1.0, max_gap_s=2.0)
+    assert filled == 1
+    assert values[1] == pytest.approx(20.0)
+    assert np.isnan(values[3:6]).all(), "a 3 s gap is too long to invent"
+
+
+def test_interpolation_leaves_open_ended_gaps_alone():
+    """Nothing on one side to interpolate between."""
+    values = np.array([np.nan, np.nan, 30.0, 40.0, np.nan])
+    S.interpolate_gaps(values, step_s=1.0, max_gap_s=10.0)
+    assert np.isnan(values[0]) and np.isnan(values[1]) and np.isnan(values[4])
+
+
+def test_interpolation_can_be_switched_off():
+    values = np.array([10.0, np.nan, 30.0])
+    assert S.interpolate_gaps(values, step_s=1.0, max_gap_s=0.0) == 0
+    assert np.isnan(values[1])
+
+
+def test_interpolation_on_arrays_with_nothing_to_do():
+    assert S.interpolate_gaps(np.array([1.0, 2.0]), 1.0, 2.0) == 0
+    assert S.interpolate_gaps(np.array([np.nan, np.nan]), 1.0, 2.0) == 0
+
+
+def test_a_long_dropout_stays_nan_rather_than_being_invented():
+    ft, pos = _track([(120, 0.5), (600, 0.0), (120, 0.5)])
+    times = np.arange(7) + 0.5
+    speed = S.binned_speed(ft, pos, times, 1.0, interpolate_gaps_s=2.0,
+                           verbose=False)
+    assert np.isnan(speed[2:5]).any(), "a 5 s dropout must not be filled"
+
+
+def test_a_clean_track_is_unchanged_by_any_of_this():
+    ft, pos = _track([(360, 0.5)])
+    times = np.arange(3) + 0.5
+    speed = S.binned_speed(ft, pos, times, 1.0, verbose=False)
+    np.testing.assert_allclose(speed, 60.0, rtol=0.05)

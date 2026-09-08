@@ -4,7 +4,8 @@ Watson, Levenstein, Greene, Gelinas, Buzsáki & Rinzel, "Network Homeostasis
 and State Dynamics of Neocortical Sleep", Neuron 90(4):839-852.
 https://pmc.ncbi.nlm.nih.gov/articles/PMC4873379/
 
-Three signals are computed from LFP, in 1 s steps over a 10 s window:
+Three signals are computed from LFP, in 1 s steps over a sliding window
+(`window_s`, 5 s by default; the paper uses 10 s):
 
   broadband   first principal component of the z-scored log spectrogram
               (1-100 Hz, log-spaced), sign-fixed to increase with slow-wave
@@ -35,6 +36,7 @@ and it has not been validated against hand-scored data. Known differences:
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -311,12 +313,38 @@ def intervals_from_states(codes, times, step_s):
 
 
 # ── movement ─────────────────────────────────────────────────────────────
-def binned_speed(frame_times, position, times, step_s):
+def held_frames(position) -> np.ndarray:
+    """Frames whose position is bit-identical to the one before.
+
+    When Motive loses the rigid body it does not write a gap -- it repeats the
+    last known position, frame after frame, until it reacquires. Those frames
+    are missing data wearing the costume of perfect stillness, and they are
+    exactly the samples a movement threshold must not see: a run of them drags
+    a bin's mean speed to zero, and the frame that finally moves carries the
+    whole accumulated displacement in one frame interval, which reads as a
+    violent burst.
+    """
+    position = np.asarray(position, dtype=float)
+    held = np.zeros(len(position), dtype=bool)
+    if len(position) > 1:
+        held[1:] = np.all(np.diff(position, axis=0) == 0, axis=1)
+    return held
+
+
+def binned_speed(frame_times, position, times, step_s, max_gap_s=0.5,
+                 interpolate_gaps_s=2.0, verbose=True):
     """Mean speed per state bin, from tracked position sampled at frame_times.
 
-    Frames with non-finite position are skipped and the speed is taken over
-    the real elapsed interval, so tracking dropouts do not read as stillness.
-    Bins with no frames come back NaN, which the veto leaves alone.
+    Frames that are non-finite, or held over from a dropout
+    (:func:`held_frames`), are treated as missing. Speed is then taken between
+    consecutive surviving frames over the real elapsed interval -- but only
+    where that interval is at most `max_gap_s`, since a displacement measured
+    across a six-second dropout is not a speed at any instant within it.
+
+    Bins left with no usable frames come back NaN. Runs of NaN shorter than
+    `interpolate_gaps_s` are filled by interpolating between the neighbouring
+    bins; longer ones are left NaN, which the veto skips rather than guessing
+    at. Set `interpolate_gaps_s=0` to fill nothing.
     """
     frame_times = np.asarray(frame_times, dtype=float)
     position = np.asarray(position, dtype=float)
@@ -328,13 +356,20 @@ def binned_speed(frame_times, position, times, step_s):
         )
 
     finite = np.isfinite(position).all(axis=1)
-    idx = np.flatnonzero(finite)
+    held = held_frames(position)
+    usable = finite & ~held
+
+    idx = np.flatnonzero(usable)
     speed = np.full(len(position), np.nan)
     if idx.size > 1:
         step = np.linalg.norm(np.diff(position[idx], axis=0), axis=1)
         elapsed = np.diff(frame_times[idx])
         with np.errstate(divide="ignore", invalid="ignore"):
-            speed[idx[1:]] = np.where(elapsed > 0, step / elapsed, np.nan)
+            values = np.where(elapsed > 0, step / elapsed, np.nan)
+        # a step bridging a long gap is an average over the gap, not a speed;
+        # leaving it out is what stops the post-dropout burst
+        values[elapsed > max_gap_s] = np.nan
+        speed[idx[1:]] = values
 
     edges = np.r_[times - step_s / 2, times[-1] + step_s / 2]
     which = np.digitize(frame_times, edges) - 1
@@ -344,17 +379,55 @@ def binned_speed(frame_times, position, times, step_s):
     counts = np.bincount(which[ok], minlength=len(times))
     out = np.full(len(times), np.nan)
     np.divide(totals, counts, out=out, where=counts > 0)
+
+    dropped = int(held.sum())
+    empty = int(np.isnan(out).sum())
+    filled = interpolate_gaps(out, step_s, interpolate_gaps_s)
+    if verbose and (dropped or empty):
+        print(f"      tracking: {dropped} held frame(s) "
+              f"({dropped / max(len(position), 1):.2%}) treated as dropouts; "
+              f"{empty} bin(s) left empty, {filled} interpolated")
     return out
+
+
+def interpolate_gaps(values, step_s, max_gap_s=2.0) -> int:
+    """Fill short runs of NaN in place by interpolating across them.
+
+    Only runs shorter than `max_gap_s`, and only those with real values on
+    both sides -- a gap at either end has nothing to interpolate between, and
+    a long one would be invention rather than repair. Returns how many bins
+    were filled.
+    """
+    if max_gap_s <= 0:
+        return 0
+    values = np.asarray(values, dtype=float)
+    missing = np.isnan(values)
+    if not missing.any() or missing.all():
+        return 0
+
+    max_bins = int(round(max_gap_s / step_s))
+    edges = np.flatnonzero(np.diff(np.r_[0, missing.astype(int), 0]))
+    starts, stops = edges[::2], edges[1::2]
+
+    index = np.arange(len(values))
+    known = ~missing
+    filled = 0
+    for a, b in zip(starts, stops):
+        if b - a > max_bins or a == 0 or b == len(values):
+            continue  # too long, or open at one end
+        values[a:b] = np.interp(index[a:b], index[known], values[known])
+        filled += b - a
+    return filled
 
 
 def movement_threshold(speed, floor=1e-3, seed=0):
     """Split immobility from locomotion on log10 speed.
 
-    Log scale on purpose. Movement never reaches zero -- breathing, postural
-    sway and tracking jitter put a floor under it -- so the question is never
-    "is the speed zero" but "which of two modes is this bin in". Those two
-    modes are roughly log-normal and well separated; the same bimodal split
-    used for the LFP metrics finds the trough between them.
+    Log scale on purpose. Movement never reaches zero (breathing, postural
+    sway and tracking jitter create floor) so the question is which of two
+    (non-zero) modes each bin is in. Two modes are roughly log-normal and
+    well separated; the same bimodal split used for the LFP metrics finds
+    the trough between them.
     """
     log_speed = np.log10(np.maximum(np.asarray(speed, dtype=float), floor))
     finite = log_speed[np.isfinite(log_speed)]
@@ -371,15 +444,15 @@ def apply_movement_veto(
     min_duration_s=6.0,
     veto=("NREM", "REM"),
     floor=1e-3,
+    verbose=True,
 ):
-    """Reassign to WAKE any bin scored asleep while the animal was moving.
+    """Reassign to WAKE any bin scored asleep while the animal was moving
+    (based on optitrack data)
 
     Deliberately asymmetric. Gross movement proves the animal is awake, but
-    stillness proves nothing -- a mouse can sit motionless and wide awake, so
-    absence of movement must not push a bin towards sleep. Used as a veto, the
-    tracker adds information the LFP cannot: it is the only signal here that
-    can catch running, which drives hippocampal theta and is otherwise
-    indistinguishable from REM's theta.
+    stillness proves nothing. Used as a veto, the tracker adds information
+    the LFP cannot: it is the only signal here that can catch running, which
+    drives hippocampal theta and is otherwise indistinguishable from REM theta.
 
     Bins with no tracking data (NaN) are left untouched. Minimum-duration
     smoothing is re-applied afterwards, since vetoing punches holes in
@@ -403,6 +476,7 @@ def apply_movement_veto(
     codes = enforce_min_duration(codes, step_s, min_duration_s)
 
     changed = codes != before
+    info_before = before
     info = {
         "applied": True,
         "threshold_log10": float(threshold),
@@ -413,9 +487,13 @@ def apply_movement_veto(
         "n_reassigned": int(changed.sum()),
         "fraction_reassigned": float(changed.mean()),
     }
-    print(f"      movement veto: threshold {10**threshold:.1f} units/s, "
-          f"{moving.mean():.1%} of bins moving, "
-          f"{changed.sum()} bins reassigned ({changed.mean():.1%})")
+    info["codes_before"] = info_before
+    if verbose:
+        print(
+            f"      movement veto: threshold {10**threshold:.1f} units/s, "
+            f"{moving.mean():.1%} of bins moving, "
+            f"{changed.sum()} bins reassigned ({changed.mean():.1%})"
+        )
     return codes, info
 
 
@@ -447,8 +525,10 @@ def load_movement(
     )
     if times_path is None or not times_path.exists():
         if phys_path is None or output_dir is None:
-            print("      movement: no frame_times and nothing to derive them "
-                  "from, skipping")
+            print(
+                "      movement: no frame_times and nothing to derive them "
+                "from, skipping"
+            )
             return None
         from .shutter import derive_shutter_times
 
@@ -476,8 +556,10 @@ def load_movement(
         )
         return None
 
-    print(f"      movement: {track.name!r}, {len(position)} frames from "
-          f"{csv_path.name} @ {track.frame_rate:g} Hz")
+    print(
+        f"      movement: {track.name!r}, {len(position)} frames from "
+        f"{csv_path.name} @ {track.frame_rate:g} Hz"
+    )
     return binned_speed(frame_times, position, times, step_s)
 
 
@@ -590,6 +672,7 @@ def score_recording(rec_lfp, rec_emg, config, exclude_channels=(), speed=None):
         "emg": emg_s,
         "speed": speed,
         "codes": codes,
+        "codes_before_veto": movement_info.pop("codes_before", None),
         "thresholds": thresholds,
         "movement": movement_info,
         "fractions": fractions,
@@ -693,11 +776,24 @@ def score_session(
     )
     if result.get("speed") is not None:
         arrays["speed"] = result["speed"]
+    # what the LFP alone called, before movement overruled it -- the only way
+    # to review which calls the veto actually changed
+    if result.get("codes_before_veto") is not None:
+        arrays["codes_before_veto"] = result["codes_before_veto"]
     np.savez_compressed(states_dir / f"{session}_metrics.npz", **arrays)
     summary = {
         k: v
         for k, v in result.items()
-        if k not in ("times", "broadband", "theta", "emg", "codes", "speed")
+        if k
+        not in (
+            "times",
+            "broadband",
+            "theta",
+            "emg",
+            "codes",
+            "speed",
+            "codes_before_veto",
+        )
     }
     summary["state_codes"] = STATE_CODES
     summary["step_s"] = config["step_s"]
@@ -736,3 +832,220 @@ def merge_to_concatenated_time(results, info, output_dir: Path):
         json.dump(record, f, indent=2)
     print(f"    concatenated-time intervals -> {path}")
     return record
+
+
+# ── using the scoring downstream ─────────────────────────────────────────
+@dataclass
+class StateEpoch:
+    """One contiguous run of a single state."""
+
+    state: str
+    start: float  # seconds, leading edge of the first bin
+    stop: float  # seconds, trailing edge of the last bin
+    first_bin: int
+    last_bin: int  # inclusive
+
+    @property
+    def duration(self) -> float:
+        return self.stop - self.start
+
+    def __repr__(self):
+        return (
+            f"StateEpoch({self.state}, {self.start:.1f}-{self.stop:.1f}s, "
+            f"{self.duration:.1f}s)"
+        )
+
+
+def state_epochs(codes, times, state_codes=None, step_s=1.0, states=None):
+    """Contiguous runs of one state, as StateEpoch objects in time order."""
+    codes = np.asarray(codes)
+    times = np.asarray(times, dtype=float)
+    names = {v: k for k, v in (state_codes or STATE_CODES).items()}
+    wanted = (
+        None
+        if states is None
+        else {s.upper() for s in ([states] if isinstance(states, str) else states)}
+    )
+
+    if codes.size == 0:
+        return []
+    boundaries = np.flatnonzero(np.diff(codes)) + 1
+    starts = np.r_[0, boundaries]
+    stops = np.r_[boundaries, len(codes)]
+
+    epochs = []
+    for a, b in zip(starts, stops):
+        name = names.get(int(codes[a]), "?")
+        if wanted is not None and name not in wanted:
+            continue
+        epochs.append(
+            StateEpoch(
+                state=name,
+                start=float(times[a] - step_s / 2),
+                stop=float(times[b - 1] + step_s / 2),
+                first_bin=int(a),
+                last_bin=int(b - 1),
+            )
+        )
+    return epochs
+
+
+def times_in_states(query_times, intervals, states=("WAKE",)) -> np.ndarray:
+    """Boolean mask: which of `query_times` fall inside any of `states`.
+
+    `intervals` is the {state: [[start, stop], ...]} mapping from the scoring
+    (either StateScoring.intervals or states_concatenated.json). Times are
+    expected on the same clock as the intervals.
+    """
+    query_times = np.asarray(query_times, dtype=float)
+    wanted = [states] if isinstance(states, str) else list(states)
+
+    spans = []
+    for name in wanted:
+        spans.extend(intervals.get(name.upper(), []))
+    if not spans:
+        return np.zeros(len(query_times), dtype=bool)
+
+    spans = np.asarray(sorted(spans), dtype=float)
+    # searchsorted against the flattened edges: an odd insertion point means
+    # the time landed inside a span
+    starts, stops = spans[:, 0], spans[:, 1]
+    idx = np.searchsorted(starts, query_times, side="right") - 1
+    inside = np.zeros(len(query_times), dtype=bool)
+    valid = idx >= 0
+    inside[valid] = query_times[valid] < stops[idx[valid]]
+    return inside
+
+
+def intervals_between_frames(frame_mask) -> np.ndarray:
+    """Which inter-frame intervals lie wholly inside the kept frames.
+
+    Analyses that work per inter-frame interval -- head-direction tuning, for
+    instance -- cannot simply be handed a filtered `frame_times` array. Doing
+    that silently splices the gap where a sleep epoch was removed into one
+    enormous "interval" that absorbs every spike fired during it and credits
+    them to a single heading. The fix is to drop those intervals rather than
+    the frames: interval i survives only when frames i and i+1 both do.
+    """
+    frame_mask = np.asarray(frame_mask, dtype=bool)
+    if frame_mask.size < 2:
+        return np.zeros(max(frame_mask.size - 1, 0), dtype=bool)
+    return frame_mask[:-1] & frame_mask[1:]
+
+
+def frames_in_states(frame_times, intervals, states=("WAKE",)):
+    """(frame_mask, interval_mask) for frames sampled at `frame_times`.
+
+    Pass `interval_mask` to the tuning functions; see
+    :func:`intervals_between_frames` for why the frame mask alone is not
+    enough.
+    """
+    frame_mask = times_in_states(frame_times, intervals, states)
+    return frame_mask, intervals_between_frames(frame_mask)
+
+
+def slice_recording_to_states(
+    recording, intervals, states=("WAKE",), min_duration_s=0.0
+):
+    """The recording restricted to `states`, as one concatenated segment.
+
+    Sample indices no longer correspond to the original recording's clock, so
+    this is for analyses that only need the samples themselves. Anything that
+    has to line up with spike times or tracking should use
+    :func:`times_in_states` and keep the original clock.
+    """
+    import spikeinterface.full as si
+
+    fs = recording.get_sampling_frequency()
+    n = recording.get_num_frames()
+    wanted = [states] if isinstance(states, str) else list(states)
+
+    spans = []
+    for name in wanted:
+        spans.extend(intervals.get(name.upper(), []))
+    if not spans:
+        raise ValueError(f"No {wanted} intervals to slice to.")
+
+    pieces = []
+    for start, stop in sorted(spans):
+        if stop - start < min_duration_s:
+            continue
+        a = max(int(round(start * fs)), 0)
+        b = min(int(round(stop * fs)), n)
+        if b > a:
+            pieces.append(recording.frame_slice(a, b))
+    if not pieces:
+        raise ValueError(
+            f"No {wanted} intervals survived the {min_duration_s}s minimum."
+        )
+
+    kept = sum(p.get_num_frames() for p in pieces)
+    print(
+        f"    {len(pieces)} {'/'.join(wanted)} epochs, "
+        f"{kept / fs:.1f}s of {n / fs:.1f}s ({kept / n:.1%})"
+    )
+    return si.concatenate_recordings(pieces) if len(pieces) > 1 else pieces[0]
+
+
+def attach_movement(scoring, optitrack_csv=None, frame_times=None, rigid_body=None):
+    """Compute per-bin speed from the tracking files and attach it to `scoring`.
+
+    The movement trace is only saved with the scoring when the veto ran, so a
+    session scored without it -- or before it existed -- has no movement panel
+    to look at. This recomputes the trace from the OptiTrack export so it can
+    always be plotted alongside the LFP signals, whether or not it was used to
+    decide anything.
+
+    `frame_times` may be an array or a path; left None it is looked for in the
+    states directory (where the pipeline caches it) and then next to the CSV.
+    Returns `scoring`, modified in place.
+    """
+    from .optitrack.io import read_rigid_body_track
+
+    if optitrack_csv is None:
+        raise ValueError("optitrack_csv is required to compute movement.")
+    csv_path = Path(optitrack_csv)
+    if not csv_path.exists():
+        raise FileNotFoundError(csv_path)
+
+    if frame_times is None:
+        candidates = []
+        if getattr(scoring, "source", None) is not None:
+            candidates.append(
+                Path(scoring.source).parent
+                / f"{scoring.session}_shutter_close_times.npy"
+            )
+        candidates.append(csv_path.parent / "optitrack_shutter_close_times.npy")
+        candidates.append(
+            csv_path.parent / f"{scoring.session}_shutter_close_times.npy"
+        )
+        for candidate in candidates:
+            if candidate.exists():
+                frame_times = candidate
+                break
+        else:
+            raise FileNotFoundError(
+                "No shutter-close times found for "
+                f"{scoring.session!r}; looked in "
+                f"{[str(c) for c in candidates]}. Pass frame_times= explicitly."
+            )
+
+    times = (
+        np.load(frame_times)
+        if isinstance(frame_times, (str, Path))
+        else np.asarray(frame_times, dtype=float)
+    )
+    track = read_rigid_body_track(csv_path, rigid_body)
+    if len(times) != len(track.position):
+        raise ValueError(
+            f"{len(times)} shutter times but {len(track.position)} tracked "
+            f"frames for {scoring.session!r}; these are not the same take."
+        )
+
+    scoring.speed = binned_speed(times, track.position, scoring.times, scoring.step_s)
+    covered = float(np.isfinite(scoring.speed).mean())
+    print(
+        f"    movement attached: {track.name!r}, {len(track.position)} frames, "
+        f"{covered:.1%} of bins covered"
+    )
+    return scoring

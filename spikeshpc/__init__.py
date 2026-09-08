@@ -25,23 +25,45 @@ deep-merged on top of the defaults.
 
 from .config import DEFAULT_PIPELINE, deep_merge
 from .drift import drift_at_junction, plot_drift
-from .io import detect_phys_type, load_concatenated, read_recording
+from .io import (
+    StateScoring,
+    detect_phys_type,
+    load_concatenated,
+    load_states,
+    read_recording,
+)
 from .pipeline import run_pipeline
 from .split import SessionSplit, save_splits, split_run
-from .states import score_recording, score_session
+from .states import (
+    frames_in_states,
+    score_recording,
+    score_session,
+    slice_recording_to_states,
+    times_in_states,
+)
+from .editor import StateEditor, show_state_editor
+from .widgets import show_state_epochs
 
 __all__ = [
     "DEFAULT_PIPELINE",
     "SessionSplit",
+    "StateScoring",
     "deep_merge",
     "detect_phys_type",
     "drift_at_junction",
+    "frames_in_states",
     "load_concatenated",
+    "load_states",
     "plot_drift",
     "read_recording",
     "run_pipeline",
     "save_splits",
     "score_recording",
     "score_session",
+    "StateEditor",
+    "show_state_editor",
+    "show_state_epochs",
+    "slice_recording_to_states",
     "split_run",
+    "times_in_states",
 ]

@@ -2,6 +2,7 @@
 
 import json
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -317,3 +318,182 @@ def channel_positions(rec):
             "3D probe geometries are not supported."
         )
     return loc
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Brain-state scoring results
+# ─────────────────────────────────────────────────────────────────────────
+@dataclass
+class StateScoring:
+    """One session's scored brain states, as written by stage 1.
+
+    `codes` and the per-bin signals share the `times` grid (bin centres, in
+    seconds on that recording's own clock). `intervals` holds the same
+    information as contiguous [start, stop] spans per state name.
+    """
+
+    session: str
+    times: np.ndarray
+    codes: np.ndarray
+    broadband: np.ndarray | None = None
+    theta: np.ndarray | None = None
+    emg: np.ndarray | None = None
+    speed: np.ndarray | None = None
+    codes_before_veto: np.ndarray | None = None
+    intervals: dict = field(default_factory=dict)
+    thresholds: dict = field(default_factory=dict)
+    fractions: dict = field(default_factory=dict)
+    state_codes: dict = field(default_factory=dict)
+    step_s: float = 1.0
+    metadata: dict = field(default_factory=dict)
+    source: Path | None = None
+
+    @property
+    def names(self) -> np.ndarray:
+        """State name per bin, e.g. array(['WAKE', 'WAKE', 'NREM', ...])."""
+        lookup = {v: k for k, v in self.state_codes.items()}
+        return np.array([lookup.get(int(c), "?") for c in self.codes])
+
+    def signals(self) -> dict:
+        """The per-bin traces that are actually present, in display order."""
+        wanted = (
+            ("broadband", "broadband LFP (PC1)"),
+            ("theta", "theta ratio"),
+            ("emg", "EMG (LFP correlation)"),
+            ("speed", "movement (mm/s)"),
+        )
+        return {
+            label: getattr(self, name)
+            for name, label in wanted
+            if getattr(self, name) is not None
+        }
+
+    def epochs(self, states=None) -> list:
+        """Contiguous runs of one state: (state, start_s, stop_s, i0, i1).
+
+        Built from the per-bin codes rather than from `intervals`, so each
+        epoch carries the bin indices a plot needs.
+        """
+        # imported here: states.py reads recordings through this module,
+        # so a module-level import would be circular
+        from .states import state_epochs
+
+        return state_epochs(
+            self.codes, self.times, self.state_codes, self.step_s, states
+        )
+
+    @property
+    def vetoed(self) -> np.ndarray:
+        """Bins the movement veto reassigned, if the pre-veto codes were saved."""
+        if self.codes_before_veto is None:
+            return np.zeros(len(self.codes), dtype=bool)
+        return np.asarray(self.codes_before_veto) != np.asarray(self.codes)
+
+    def vetoed_epochs(self) -> list:
+        """Spans the veto overruled, labelled by what the LFP alone called.
+
+        These no longer carry their original label -- a REM call rejected for
+        movement is WAKE now -- so stepping through the scored epochs will
+        never show them. This is how to review the veto's own decisions.
+        """
+        from .states import state_epochs
+
+        if self.codes_before_veto is None:
+            raise ValueError(
+                f"{self.session!r} has no codes_before_veto saved, so the "
+                "veto's changes cannot be recovered. Re-run state scoring to "
+                "record them."
+            )
+        changed = self.vetoed
+        if not changed.any():
+            return []
+        # label each span by its ORIGINAL state, and keep only changed bins
+        original = np.where(changed, self.codes_before_veto, -1)
+        return [
+            e
+            for e in state_epochs(
+                original, self.times, self.state_codes, self.step_s
+            )
+            if e.state != "?"
+        ]
+
+    def __repr__(self):
+        parts = ", ".join(f"{k}={v:.1%}" for k, v in sorted(self.fractions.items()))
+        return (
+            f"StateScoring({self.session!r}, {len(self.times)} bins of "
+            f"{self.step_s:g}s, {parts})"
+        )
+
+
+def load_states(states_path, session: str | None = None,
+                optitrack_csv=None, frame_times=None,
+                rigid_body=None) -> StateScoring:
+    """Load one session's scoring from a states/ directory or a _states.json.
+
+    With several sessions in the directory, name one -- returning an arbitrary
+    session's states would be a quiet way to analyse the wrong recording.
+
+    Pass `optitrack_csv` to attach the movement trace even when the scoring
+    was run without the veto, so it can always be plotted alongside the LFP
+    signals. See :func:`spikeshpc.states.attach_movement`.
+    """
+    states_path = Path(states_path)
+
+    if states_path.is_file():
+        json_path = states_path
+    else:
+        candidates = sorted(states_path.glob("*_states.json"))
+        if session is not None:
+            json_path = states_path / f"{session}_states.json"
+            if not json_path.exists():
+                found = [p.name[: -len("_states.json")] for p in candidates]
+                raise FileNotFoundError(
+                    f"No scoring for session {session!r} in {states_path}; "
+                    f"found: {found}"
+                )
+        elif not candidates:
+            raise FileNotFoundError(f"No *_states.json in {states_path}")
+        elif len(candidates) > 1:
+            found = [p.name[: -len("_states.json")] for p in candidates]
+            raise ValueError(
+                f"{states_path} holds {len(candidates)} sessions ({found}); "
+                "pass session= to choose one."
+            )
+        else:
+            json_path = candidates[0]
+
+    summary = json.loads(json_path.read_text())
+    name = summary.get("session") or json_path.name[: -len("_states.json")]
+
+    metrics_path = json_path.with_name(f"{name}_metrics.npz")
+    if not metrics_path.exists():
+        raise FileNotFoundError(
+            f"{metrics_path} not found; the per-bin signals live there and "
+            f"{json_path.name} only holds the summary."
+        )
+    with np.load(metrics_path) as m:
+        arrays = {k: m[k] for k in m.files}
+
+    scoring = StateScoring(
+        session=name,
+        times=arrays["times"],
+        codes=arrays["codes"],
+        codes_before_veto=arrays.get("codes_before_veto"),
+        broadband=arrays.get("broadband"),
+        theta=arrays.get("theta"),
+        emg=arrays.get("emg"),
+        speed=arrays.get("speed"),
+        intervals=summary.get("intervals", {}),
+        thresholds=summary.get("thresholds", {}),
+        fractions=summary.get("fractions", {}),
+        state_codes=summary.get("state_codes", {"WAKE": 1, "NREM": 3, "REM": 5}),
+        step_s=float(summary.get("step_s", 1.0)),
+        metadata=summary,
+        source=json_path,
+    )
+
+    if optitrack_csv is not None:
+        from .states import attach_movement
+
+        attach_movement(scoring, optitrack_csv, frame_times, rigid_body)
+    return scoring
