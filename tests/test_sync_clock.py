@@ -295,6 +295,94 @@ def test_score_session_resolves_the_type_before_using_it(monkeypatch, tmp_path):
     )
 
 
+# ── the sanity plot must be on one clock ────────────────────────────────
+def ttl_with_a_late_start(n, start_s, fs, rate=RATE, width=4):
+    """A pulse train that begins partway in, as OptiTrack's does."""
+    trace = np.zeros(n)
+    period = int(fs / rate)
+    for k in range(int(start_s * fs), n - width, period):
+        trace[k : k + width] = 1000.0
+    return trace
+
+
+def test_the_sanity_plot_puts_the_trace_on_the_marker_s_clock():
+    """The figure that lied.
+
+    Shutter times shifted onto the spike clock, drawn against a trace still on
+    the acquisition clock. A pulse train is periodic, so an offset close to a
+    whole number of frame periods lands the marker on the wrong pulse and the
+    figure looks right everywhere the train is dense -- it only breaks at the
+    start, before the camera began.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from spikeshpc.optitrack.sync import (
+        extract_shutter_close_times,
+        plot_shutter_close_sanity_check,
+    )
+
+    fs, offset = 30000.0, 9.808033
+    n = int(fs * 60)
+    events = recording(
+        {"ADC0": ttl_with_a_late_start(n, start_s=20.0, fs=fs)},
+        fs=fs,
+        times=offset + np.arange(n) / fs,
+    )
+    acquisition_clock = extract_shutter_close_times(events, channel_id="ADC0")
+    spike_clock = acquisition_clock - offset
+
+    told = plot_shutter_close_sanity_check(
+        events, spike_clock, channel_id="ADC0", time_offset=offset
+    )
+    titles = [ax.get_title() for ax in told.axes]
+    assert not any("NO EDGE" in t for t in titles), titles
+    for title in titles:
+        residual = float(title.split("\n")[1].split()[0])
+        assert abs(residual) < 0.05, title
+    plt.close(told)
+
+    # and without being told, the first events fall where the camera had not
+    # started yet -- which is exactly how the real figure gave itself away
+    fooled = plot_shutter_close_sanity_check(
+        events, spike_clock, channel_id="ADC0", time_offset=0.0
+    )
+    assert any("NO EDGE" in ax.get_title() for ax in fooled.axes)
+    plt.close(fooled)
+
+
+def test_derive_draws_the_sanity_plot_on_the_shifted_clock(tmp_path, monkeypatch):
+    """End to end: the cached times and the plotted trace must agree."""
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+
+    seen = {}
+
+    def spy(events_raw, times, channel_id=None, time_offset=0.0, **kw):
+        seen["time_offset"] = time_offset
+        seen["first"] = float(times[0])
+        return matplotlib.pyplot.figure()
+
+    monkeypatch.setattr(shutter, "plot_shutter_close_sanity_check", spy)
+
+    probe_t0 = 9.808033
+    root = open_ephys_tree(tmp_path / "phys", {"OneBox-109.ProbeA": probe_t0})
+    n = int(TRUE_FS * DUR)
+    events = recording(
+        {"ADC0": ttl(n, fs=TRUE_FS)}, fs=DECLARED_FS,
+        times=9.825 + np.arange(n) / TRUE_FS,
+    )
+    synced(monkeypatch, events, events)
+    monkeypatch.setattr(shutter, "find_adc_stream", lambda *a, **k: "ADC")
+
+    shutter.derive_shutter_times(
+        root, tmp_path, "s1", {"save_sanity_plot": True}, "openephysbinary"
+    )
+    assert seen["time_offset"] == pytest.approx(probe_t0)
+    assert seen["first"] < 1.0, "times were shifted but the offset was not passed on"
+
+
 # ── the bug this was found through ──────────────────────────────────────
 def test_shutter_times_come_from_the_measured_clock(tmp_path, monkeypatch):
     """The regression test for the drift.

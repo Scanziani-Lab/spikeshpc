@@ -97,7 +97,7 @@ def _report_clock(events):
 
 
 def _to_probe_clock(times, phys_path, phys_type, folder, config):
-    """Move shutter times onto the clock the spikes are on.
+    """Move shutter times onto the clock the spikes are on. Returns (times, offset).
 
     The ADC and the probe are timestamped against the same acquisition epoch,
     but nothing downstream uses that epoch. Kilosort counts from the sorted
@@ -127,11 +127,11 @@ def _to_probe_clock(times, phys_path, phys_type, folder, config):
     if t0 is None:
         print("        probe stream has no synchronized clock; "
               "leaving times as they are")
-        return times
+        return times, 0.0
 
     print(f"        origin: the sorted stream starts {t0:.3f}s into the "
           "acquisition clock; shifting shutter times onto the spike clock")
-    return times - t0
+    return times - t0, t0
 
 
 def derive_shutter_times(
@@ -193,7 +193,7 @@ def derive_shutter_times(
         print(f"      shutter: {e} -- skipping")
         return None
 
-    times = _to_probe_clock(times, phys_path, phys_type, folder, config)
+    times, clock_offset = _to_probe_clock(times, phys_path, phys_type, folder, config)
 
     print(f"      shutter: {len(times)} falling edges on {channel!r}")
     if len(times) > 1:
@@ -224,7 +224,11 @@ def derive_shutter_times(
             import matplotlib
 
             matplotlib.use("Agg")
-            fig = plot_shutter_close_sanity_check(events, times, channel_id=channel)
+            # the trace is on the acquisition clock and `times` is not, so the
+            # plot has to be told how far they were moved apart
+            fig = plot_shutter_close_sanity_check(
+                events, times, channel_id=channel, time_offset=clock_offset
+            )
             png = states_dir / f"{session}_shutter_check.png"
             fig.savefig(png, dpi=150, bbox_inches="tight")
             import matplotlib.pyplot as plt

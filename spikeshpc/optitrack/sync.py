@@ -191,14 +191,29 @@ def plot_shutter_close_sanity_check(
     n_events: int = 2,
     window: float = 0.02,
     segment_index: int = 0,
+    time_offset: float = 0.0,
 ):
     """Zoom in on the first/last ``n_events`` detected events side by side.
 
     Rather than eyeballing one arbitrary time window, this shows the falling-
     edge detection holds up at both ends of the recording. Assumes a single
     segment (``segment_index``), which is what OneBox recordings are here.
+
+    ``time_offset`` is subtracted from the recording's own timestamps to put
+    the trace on the same clock as ``shutter_close_times``. It has to be given
+    whenever the caller has already moved those times somewhere else -- onto
+    the clock the spikes are on, say. Plotting one clock against the other
+    produces a figure that is wrong in a peculiarly convincing way: a pulse
+    train is periodic, so a whole-period error puts the marker neatly on the
+    wrong pulse and only the ends of the recording, where the train starts and
+    stops, give it away.
+
+    The residual in each title is the defence against that. It measures from
+    the marker to the nearest falling edge actually present in the window, so
+    a misalignment reads as a number rather than as something to be spotted by
+    eye at the width of a dashed line.
     """
-    times = events_raw.get_times(segment_index=segment_index)
+    times = np.asarray(events_raw.get_times(segment_index=segment_index)) - time_offset
     trace = events_raw.get_traces(
         segment_index=segment_index, channel_ids=[channel_id]
     ).flatten()
@@ -209,6 +224,13 @@ def plot_shutter_close_sanity_check(
     )
     check_indices = sorted(set(check_indices))
 
+    threshold = ttl_threshold(trace)
+    if threshold is not None:
+        above = trace > threshold
+        edges = times[1:][above[:-1] & ~above[1:]]
+    else:
+        edges = np.array([])
+
     fig, axes = plt.subplots(
         1, len(check_indices), figsize=(4 * len(check_indices), 3), sharey=True
     )
@@ -218,7 +240,14 @@ def plot_shutter_close_sanity_check(
         in_window = (times >= t_event - window) & (times <= t_event + window)
         ax.plot(times[in_window], trace[in_window])
         ax.axvline(t_event, color="r", linestyle="--", linewidth=1)
-        ax.set_title(f"event {event_idx} / {n - 1}")
+
+        near = edges[(edges >= t_event - window) & (edges <= t_event + window)]
+        if near.size:
+            residual = 1e3 * (t_event - near[np.argmin(np.abs(near - t_event))])
+            label = f"{residual:+.2f} ms from the nearest edge"
+        else:
+            label = "NO EDGE IN WINDOW"
+        ax.set_title(f"event {event_idx} / {n - 1}\n{label}", fontsize=9)
         ax.set_xlabel("Time (s)")
     axes[0].set_ylabel(f"{channel_id} (raw)")
     fig.tight_layout()
