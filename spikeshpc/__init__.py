@@ -43,6 +43,7 @@ from .decoder import (
     state_interval_mask,
 )
 from .drift import drift_at_junction, plot_drift
+from .editor import StateEditor, show_state_editor
 from .io import (
     StateScoring,
     detect_phys_type,
@@ -55,15 +56,17 @@ from .io import (
     sync_clock_problem,
 )
 from .pipeline import run_pipeline
+from .shutter import derive_shutter_times
 from .split import SessionSplit, save_splits, split_run
 from .states import (
+    attach_movement,
     frames_in_states,
+    rescore_movement,
     score_recording,
     score_session,
     slice_recording_to_states,
     times_in_states,
 )
-from .editor import StateEditor, show_state_editor
 from .widgets import show_state_epochs
 
 __all__ = [
@@ -74,9 +77,12 @@ __all__ = [
     "EncodingModel",
     "SessionSplit",
     "ShuffleTest",
+    "StateEditor",
     "StateScoring",
+    "attach_movement",
     "decode",
     "deep_merge",
+    "derive_shutter_times",
     "detect_phys_type",
     "drift_at_junction",
     "fit_encoding_model",
@@ -84,28 +90,28 @@ __all__ = [
     "load_concatenated",
     "load_states",
     "open_stream",
-    "probe_start_time",
-    "read_openephys_synced",
-    "sync_clock_problem",
     "plot_decoded",
     "plot_drift",
     "plot_encoding_model",
     "plot_error",
     "plot_shuffle",
     "prepare_decoder_data",
+    "probe_start_time",
+    "read_openephys_synced",
     "read_recording",
+    "rescore_movement",
     "run_decoder",
     "run_pipeline",
     "save_splits",
     "score_recording",
     "score_session",
-    "shuffle_test",
-    "split_train_test",
-    "state_interval_mask",
-    "StateEditor",
     "show_state_editor",
     "show_state_epochs",
+    "shuffle_test",
     "slice_recording_to_states",
     "split_run",
+    "split_train_test",
+    "state_interval_mask",
+    "sync_clock_problem",
     "times_in_states",
 ]

@@ -996,6 +996,123 @@ def slice_recording_to_states(
     return si.concatenate_recordings(pieces) if len(pieces) > 1 else pieces[0]
 
 
+def rescore_movement(
+    states_path,
+    session=None,
+    optitrack_csv=None,
+    frame_times=None,
+    rigid_body=None,
+    min_duration_s=None,
+    veto=None,
+    threshold=None,
+    write=True,
+):
+    """Re-apply the movement veto to an already-scored session, in place.
+
+    For when the tracking was right but its timing was not. The veto is the
+    only part of the scoring that reads the camera: the broadband, theta and
+    EMG traces come from LFP alone, and so does ``codes_before_veto``. So a
+    session whose shutter timestamps were on the wrong clock does not need its
+    spectrograms recomputing -- it needs the veto applied again to the states
+    the LFP already decided, with the movement trace in the right place. That
+    is minutes of work against hours, and it touches no signal that was not
+    already wrong.
+
+    Requires ``codes_before_veto`` in the saved metrics, which is what makes
+    the veto undoable. Sessions scored before it was recorded, or with the veto
+    disabled, have to be scored again properly -- their `codes` cannot be
+    separated back into a decision and an override.
+
+    ``min_duration_s``, ``veto`` and ``threshold`` default to whatever the
+    original run used, read back from the saved summary, so the only thing that
+    changes is the movement trace. Returns the updated
+    :class:`~spikeshpc.io.StateScoring`.
+    """
+    import shutil
+
+    from .io import load_states
+
+    scoring = load_states(states_path, session)
+    if scoring.codes_before_veto is None:
+        raise ValueError(
+            f"{scoring.session!r} has no 'codes_before_veto' saved, so the "
+            "movement veto cannot be undone and re-applied -- the states it "
+            "produced are not separable from the ones the LFP decided. Re-run "
+            "score_session for this recording instead."
+        )
+
+    before = np.asarray(scoring.codes).copy()
+    attach_movement(scoring, optitrack_csv, frame_times, rigid_body)
+
+    previous = dict(scoring.metadata.get("movement") or {})
+    if min_duration_s is None:
+        min_duration_s = scoring.metadata.get("min_state_duration_s", 6.0)
+    if veto is None:
+        veto = tuple(previous.get("vetoed_states") or ("NREM", "REM"))
+
+    codes, info = apply_movement_veto(
+        scoring.codes_before_veto,
+        scoring.speed,
+        threshold=threshold,
+        step_s=scoring.step_s,
+        min_duration_s=min_duration_s,
+        veto=veto,
+    )
+    info.pop("codes_before", None)
+    scoring.codes = codes
+    scoring.intervals = intervals_from_states(codes, scoring.times, scoring.step_s)
+    scoring.fractions = {
+        name: float(np.mean(codes == code)) for name, code in STATE_CODES.items()
+    }
+    scoring.metadata["movement"] = info
+
+    moved = int(np.count_nonzero(codes != before))
+    print(
+        f"    re-vetoed {scoring.session!r}: {info['n_reassigned']} bins "
+        f"reassigned (was {previous.get('n_reassigned', '?')}), "
+        f"{moved} bins differ from the scoring on disk "
+        f"({moved / len(codes):.1%})"
+    )
+    print(
+        "    fractions now "
+        + ", ".join(f"{n} {scoring.fractions[n]:.1%}" for n in ("WAKE", "NREM", "REM"))
+    )
+
+    if not write:
+        return scoring
+    if scoring.source is None:
+        raise ValueError("This scoring has no source path; pass write=False.")
+
+    json_path = Path(scoring.source)
+    npz_path = json_path.with_name(f"{scoring.session}_metrics.npz")
+    for original in (json_path, npz_path):
+        backup = original.with_suffix(".orig" + original.suffix)
+        if original.exists() and not backup.exists():
+            shutil.copy2(original, backup)
+            print(f"    kept the original scoring at {backup.name}")
+
+    summary = dict(scoring.metadata)
+    summary["intervals"] = scoring.intervals
+    summary["fractions"] = scoring.fractions
+    summary["state_codes"] = scoring.state_codes or STATE_CODES
+    summary["step_s"] = scoring.step_s
+    summary["rescored_movement"] = True
+    json_path.write_text(json.dumps(summary, indent=2))
+
+    arrays = {
+        "times": scoring.times,
+        "codes": scoring.codes,
+        "codes_before_veto": scoring.codes_before_veto,
+        "speed": scoring.speed,
+    }
+    for name in ("broadband", "theta", "emg"):
+        if getattr(scoring, name) is not None:
+            arrays[name] = getattr(scoring, name)
+    np.savez_compressed(npz_path, **arrays)
+    print(f"    wrote {json_path.name} and {npz_path.name}")
+    return scoring
+
+
 def attach_movement(scoring, optitrack_csv=None, frame_times=None, rigid_body=None):
     """Compute per-bin speed from the tracking files and attach it to `scoring`.
 
