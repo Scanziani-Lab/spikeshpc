@@ -149,6 +149,7 @@ class HDTuningStats:
     p_value: float
     mvl_threshold: float
     significant: bool
+    too_quiet: bool = False
 
     def __str__(self) -> str:
         return (
@@ -156,6 +157,7 @@ class HDTuningStats:
             f"preferred {self.preferred_direction_deg:.1f} deg, "
             f"peak {self.peak_rate_hz:.1f} Hz, mean {self.mean_rate_hz:.1f} Hz, "
             f"p={self.p_value:.4f}"
+            f"{' (too quiet)' if self.too_quiet else ''}"
             f"{' *' if self.significant else ''}"
         )
 
@@ -172,6 +174,7 @@ def compute_hd_tuning_significance(
     alpha: float = 0.01,
     seed: int = 0,
     interval_mask=None,
+    min_peak_rate_hz: float = 0.0,
 ) -> dict:
     """Test each unit's tuning curve against a shifted-spike-train null.
 
@@ -193,6 +196,16 @@ def compute_hd_tuning_significance(
     and ``significant`` is ``p_value <= alpha``. Note this is a per-unit
     threshold: across many units, correct for multiple comparisons (or read
     ``p_value`` yourself) rather than trusting the flag on its own.
+
+    ``min_peak_rate_hz`` additionally requires the curve to reach that rate
+    somewhere before the unit counts as tuned, and flags the rest as
+    ``too_quiet``. The shuffle test asks whether a unit's firing is more
+    concentrated in heading than chance, which a unit firing a handful of
+    spikes can satisfy on sparsity alone -- the shifted null is just as sparse,
+    so a couple of spikes that happen to land together beat it. Such a curve is
+    not wrong, it is simply an estimate from almost nothing, and it carries
+    nearly no information into a decoder's likelihood. Default 0.0 keeps every
+    unit the test passes; 1 Hz is a reasonable floor for decoding.
     """
     if len(heading_deg) != len(frame_times):
         raise ValueError(
@@ -261,6 +274,9 @@ def compute_hd_tuning_significance(
             threshold = float(np.percentile(null_mvl, 100 * (1 - alpha)))
             significant = p_value <= alpha
 
+        too_quiet = bool(rate.max() < min_peak_rate_hz)
+        significant = bool(significant and not too_quiet)
+
         stats[unit_id] = HDTuningStats(
             mean_vector_length=mvl,
             preferred_direction_deg=preferred_deg,
@@ -269,7 +285,8 @@ def compute_hd_tuning_significance(
             n_spikes=int(spike_counts.sum()),
             p_value=float(p_value),
             mvl_threshold=threshold,
-            significant=bool(significant),
+            significant=significant,
+            too_quiet=too_quiet,
         )
     return stats
 

@@ -141,18 +141,22 @@ def derive_shutter_times(
     config: dict,
     phys_type=None,
     optitrack_csv=None,
+    force: bool = False,
 ):
     """Extract, check, plot and cache shutter-close times for one recording.
 
     Returns the path to the saved .npy, or None if the TTL could not be used.
-    Re-running is cheap: an existing cache is returned untouched.
+    Re-running is cheap: an existing cache is returned untouched -- which also
+    means it is returned unexamined, and no sanity plot is drawn, so a cache
+    written by older code survives a re-run silently along with whatever was
+    wrong with it. Pass ``force=True`` to extract and plot again regardless.
     """
     from .io import detect_phys_type, open_stream
 
     states_dir = Path(output_dir) / STATES_DIRNAME
     cached = states_dir / f"{session}_shutter_close_times.npy"
-    if cached.exists():
-        print(f"      shutter: reusing {cached.name}")
+    if cached.exists() and not force:
+        print(f"      shutter: reusing {cached.name} (force=True to redo it)")
         return cached
 
     # Detected here as well as by the caller: which acquisition system wrote

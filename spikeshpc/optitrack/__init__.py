@@ -27,6 +27,7 @@ from .io import (
     rigid_body_names,
 )
 from .kinematics import compute_kinematics
+from .store import HDTuning, load_hd_tuning, save_hd_tuning
 from .sync import (
     align_frames_to_shutter_events,
     cross_check_with_optitrack_csv,
@@ -50,8 +51,11 @@ __version__ = "0.1.0"
 
 __all__ = [
     "IDENTITY_HEAD_FRAME",
+    "HDTuning",
     "HDTuningStats",
     "HeadFrame",
+    "load_hd_tuning",
+    "save_hd_tuning",
     "OptitrackTake",
     "PositionTrack",
     "RigidBodyTrack",

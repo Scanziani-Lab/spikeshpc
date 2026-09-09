@@ -136,6 +136,25 @@ def test_derive_extracts_checks_caches_and_plots(tmp_path, monkeypatch):
     assert (tmp_path / "states" / "s1_shutter_check.png").exists()
 
 
+def test_force_redoes_a_cached_result(tmp_path, monkeypatch, capsys):
+    """A cache written by older code otherwise survives every re-run unseen."""
+    states = tmp_path / "states"
+    states.mkdir()
+    np.save(states / "s1_shutter_close_times.npy", np.arange(5.0))
+
+    n = int(FS * DUR)
+    events = adc_stream({"ADC0": floating(n), "ADC1": ttl(n)})
+    _patch_reader(monkeypatch, events)
+
+    out = shutter.derive_shutter_times(
+        tmp_path / "rec", tmp_path, "s1", {"save_sanity_plot": False},
+        "openephysbinary", force=True,
+    )
+    times = np.load(out)
+    assert len(times) == pytest.approx(RATE * DUR, rel=0.02)
+    assert "reusing" not in capsys.readouterr().out
+
+
 def test_derive_reuses_its_cache(tmp_path, monkeypatch, capsys):
     states = tmp_path / "states"
     states.mkdir()
