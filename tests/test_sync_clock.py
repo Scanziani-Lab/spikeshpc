@@ -238,6 +238,63 @@ def test_an_unsynced_probe_leaves_the_times_alone(tmp_path, monkeypatch, capsys)
     assert "no synchronized clock" in capsys.readouterr().out
 
 
+# ── the acquisition type has to survive the trip ────────────────────────
+def test_derive_detects_the_acquisition_type_when_it_is_not_given(
+    tmp_path, monkeypatch
+):
+    """phys_type=None used to be swallowed by an `else: read_openephys`.
+
+    That made an unresolved acquisition type look harmless, right up until a
+    SpikeGLX recording was read as Open Ephys. open_stream refuses it instead,
+    so anything that can be handed a None has to resolve it first.
+    """
+    root = open_ephys_tree(tmp_path / "phys", {"OneBox-109.ProbeA": 9.808033})
+    (root / "Record Node 101" / "experiment1" / "recording1"
+     / "structure.oebin").write_text("{}")
+
+    n = int(TRUE_FS * DUR)
+    events = recording(
+        {"ADC0": ttl(n, fs=TRUE_FS)}, fs=DECLARED_FS,
+        times=9.825 + np.arange(n) / TRUE_FS,
+    )
+    synced(monkeypatch, events, events)
+    monkeypatch.setattr(shutter, "find_adc_stream", lambda *a, **k: "ADC")
+
+    out = shutter.derive_shutter_times(
+        root, tmp_path, "s1", {"save_sanity_plot": False}, phys_type=None
+    )
+    assert out is not None and out.exists()
+    # and the origin correction still ran, which needs the type resolved too
+    assert np.load(out)[0] < 1.0
+
+
+def test_score_session_resolves_the_type_before_using_it(monkeypatch, tmp_path):
+    """The regression itself.
+
+    score_session took phys_type=None, let read_recording detect it privately,
+    and then passed the original None on to the movement veto -- which reached
+    open_stream and failed there, four calls from where the type was known.
+    """
+    from spikeshpc import states
+
+    seen = {}
+
+    def fake_read_recording(phys_path, phys_type=None, stream_name=None, band="ap"):
+        seen["phys_type"] = phys_type
+        raise RuntimeError("far enough")
+
+    monkeypatch.setattr(states, "detect_phys_type", lambda p: "openephysbinary")
+    monkeypatch.setattr(states, "read_recording", fake_read_recording)
+
+    with pytest.raises(RuntimeError, match="far enough"):
+        states.score_session(tmp_path / "rec", tmp_path, {"lfp_rate": 1250.0})
+
+    assert seen["phys_type"] == "openephysbinary", (
+        "score_session must resolve the acquisition type before anything "
+        "downstream has to guess it"
+    )
+
+
 # ── the bug this was found through ──────────────────────────────────────
 def test_shutter_times_come_from_the_measured_clock(tmp_path, monkeypatch):
     """The regression test for the drift.

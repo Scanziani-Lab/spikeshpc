@@ -169,8 +169,24 @@ def test_a_frame_count_mismatch_is_not_cached(tmp_path, monkeypatch, capsys):
 
 def test_no_adc_stream_skips_cleanly(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(shutter, "find_adc_stream", lambda *a, **k: None)
-    assert shutter.derive_shutter_times(tmp_path / "rec", tmp_path, "s1", {}) is None
+    assert shutter.derive_shutter_times(
+        tmp_path / "rec", tmp_path, "s1", {}, "openephysbinary"
+    ) is None
     assert "no ADC stream" in capsys.readouterr().out
+
+
+def test_an_undetectable_acquisition_type_skips_rather_than_raising(
+    tmp_path, capsys
+):
+    """The veto is optional; a sorting job must not die for want of it.
+
+    Which system wrote the data decides which stream is the ADC and which
+    clock it is on, so it cannot be guessed -- but it can be declined.
+    """
+    assert shutter.derive_shutter_times(
+        tmp_path / "rec", tmp_path, "s1", {}, phys_type=None
+    ) is None
+    assert "skipping" in capsys.readouterr().out
 
 
 def test_dead_adc_channel_skips_instead_of_returning_noise(tmp_path, monkeypatch, capsys):

@@ -147,13 +147,26 @@ def derive_shutter_times(
     Returns the path to the saved .npy, or None if the TTL could not be used.
     Re-running is cheap: an existing cache is returned untouched.
     """
-    from .io import open_stream
+    from .io import detect_phys_type, open_stream
 
     states_dir = Path(output_dir) / STATES_DIRNAME
     cached = states_dir / f"{session}_shutter_close_times.npy"
     if cached.exists():
         print(f"      shutter: reusing {cached.name}")
         return cached
+
+    # Detected here as well as by the caller: which acquisition system wrote
+    # the data decides which stream is the ADC and which clock its samples are
+    # on, so an unresolved None cannot be allowed to reach either question.
+    # Failing to tell is a skip rather than an error, like every other way this
+    # step can come up empty -- the veto is optional, and losing a sorting job
+    # over it would be a worse outcome than scoring without movement.
+    if phys_type is None:
+        try:
+            phys_type = detect_phys_type(Path(phys_path))
+        except (ValueError, FileNotFoundError) as e:
+            print(f"      shutter: {e} -- skipping")
+            return None
 
     stream = find_adc_stream(phys_path, phys_type, config.get("adc_stream_name"))
     if stream is None:

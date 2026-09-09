@@ -44,7 +44,7 @@ import spikeinterface.full as si
 from scipy.signal import butter, sosfiltfilt
 
 from .config import STATES_DIRNAME
-from .io import channel_positions, read_recording
+from .io import channel_positions, detect_phys_type, read_recording
 from .optitrack.io import read_rigid_body_track
 
 # buzcode's SleepState convention.
@@ -728,6 +728,13 @@ def score_session(
 
     phys_path = Path(phys_path)
     session = phys_path.stem or phys_path.name
+
+    # Resolved once, here, because it is passed on to load_movement and from
+    # there to the shutter extraction. read_recording would detect it too, but
+    # only for itself -- leaving this None sent an unresolved acquisition type
+    # down a path that then had to guess, and guessing right for Open Ephys is
+    # what kept a SpikeGLX dataset from ever being noticed as misread.
+    phys_type = phys_type or detect_phys_type(phys_path)
 
     rec_lf, _, lf_stream = read_recording(phys_path, phys_type, None, band="lf")
     if rec_lf is not None:
