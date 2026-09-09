@@ -2,6 +2,7 @@
 
 import json
 import re
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,9 +46,7 @@ def _stream_candidates(stream_names, phys_type: str, band: str):
     if band == "adc":
         # OpenEphys: '...ProbeA-ADC' on a OneBox, or a separate DAQ stream.
         return [
-            s
-            for s in stream_names
-            if re.search(r"[-_.]adc$", s, flags=re.IGNORECASE)
+            s for s in stream_names if re.search(r"[-_.]adc$", s, flags=re.IGNORECASE)
         ]
 
     # OpenEphys names the AP band after the probe -- e.g.
@@ -59,9 +58,7 @@ def _stream_candidates(stream_names, phys_type: str, band: str):
     if band == "ap":
         return [s for s in probe_streams if not band_suffix.search(s)]
     return [
-        s
-        for s in probe_streams
-        if re.search(r"[-_.](lfp|lf)$", s, flags=re.IGNORECASE)
+        s for s in probe_streams if re.search(r"[-_.](lfp|lf)$", s, flags=re.IGNORECASE)
     ]
 
 
@@ -100,6 +97,94 @@ def infer_stream_name(
     return matches[0]
 
 
+def sync_clock_problem(rec, sample: int = 100_000) -> str | None:
+    """Why this recording's time vector cannot be trusted, or None if it can.
+
+    Open Ephys writes ``timestamps.npy`` per stream, but a stream that was
+    never synchronized to the software clock gets a file of ``-1.0`` rather
+    than no file at all. spikeinterface hands those straight back, so
+    ``load_sync_timestamps=True`` on an unsynced stream silently timestamps
+    every sample at -1 second. Checked here rather than trusted, because the
+    failure is invisible downstream: shutter edges all land at -1, no analysis
+    errors, and every spike is credited to the wrong heading.
+
+    The endpoints and a stride through the middle are enough -- a time vector
+    can be tens of gigabytes, and a partial monotonicity check that costs
+    nothing is worth more than a total one nobody runs.
+    """
+    for segment in range(rec.get_num_segments()):
+        times = rec.get_times(segment_index=segment)
+        if len(times) == 0:
+            continue
+        first, last = float(times[0]), float(times[-1])
+        if not (np.isfinite(first) and np.isfinite(last)):
+            return f"segment {segment} has non-finite timestamps"
+        if first < 0:
+            return (
+                f"segment {segment} starts at t={first:g}s -- this stream was "
+                "never synchronized, so Open Ephys filled timestamps.npy with -1"
+            )
+        if last <= first:
+            return f"segment {segment} does not advance ({first:g}s to {last:g}s)"
+        step = max(1, len(times) // sample)
+        if not np.all(np.diff(times[::step]) > 0):
+            return f"segment {segment} timestamps are not increasing"
+    return None
+
+
+def read_openephys_synced(folder, stream_name, require_sync: bool = False):
+    """Open Ephys on the acquisition clock, not on one inferred from the rate.
+
+    Every Open Ephys read in this package goes through here, because the two
+    clocks are not interchangeable and the difference is not small. A OneBox
+    ADC stream declares 30300.5 Hz in structure.oebin and actually runs at
+    about 30303 Hz: 83 ppm, which is two full seconds over a six-hour session,
+    or a hundred-odd camera frames of error by the end of it. Timestamps
+    inferred from the declared rate also ignore that each stream starts at its
+    own offset on the shared clock, so the ADC and the probe drift apart from
+    the first sample.
+
+    Where the stream carries no sync (see :func:`sync_clock_problem`) this
+    falls back to the inferred clock and says so loudly -- an unsynced session
+    is still worth scoring, but nobody should discover afterwards that its
+    camera alignment was the version with the drift in it. Pass
+    ``require_sync=True`` to refuse instead.
+    """
+    rec = si.read_openephys(
+        folder_path=folder, stream_name=stream_name, load_sync_timestamps=True
+    )
+    problem = sync_clock_problem(rec)
+    if problem is None:
+        return rec
+
+    message = (
+        f"{stream_name!r} has no usable synchronized clock: {problem}. "
+        "Falling back to timestamps inferred from the declared sampling rate, "
+        "which drift against the other streams -- times from this stream "
+        "should not be compared with times from a synced one."
+    )
+    if require_sync:
+        raise ValueError(message.replace("Falling back to", "Refusing to use"))
+    warnings.warn(message, stacklevel=2)
+    return si.read_openephys(
+        folder_path=folder, stream_name=stream_name, load_sync_timestamps=False
+    )
+
+
+def open_stream(folder, phys_type: str, stream_name: str):
+    """Open one named stream, on the acquisition clock where there is one.
+
+    The single place either acquisition system is handed to spikeinterface, so
+    that "always use the synchronized timestamps" is a property of the package
+    rather than a habit each call site has to remember.
+    """
+    if phys_type == "spikeglx":
+        return si.read_spikeglx(folder_path=folder, stream_name=stream_name)
+    if phys_type == "openephysbinary":
+        return read_openephys_synced(folder, stream_name)
+    raise ValueError(f"Unsupported phys_type: {phys_type!r}")
+
+
 def read_recording(
     phys_path,
     phys_type: str | None = None,
@@ -122,14 +207,7 @@ def read_recording(
     if stream_name is None:
         return None, phys_type, None
 
-    if phys_type == "spikeglx":
-        rec = si.read_spikeglx(folder_path=folder, stream_name=stream_name)
-    elif phys_type == "openephysbinary":
-        rec = si.read_openephys(folder_path=folder, stream_name=stream_name)
-    else:
-        raise ValueError(f"Unsupported phys_type: {phys_type!r}")
-
-    return rec, phys_type, stream_name
+    return open_stream(folder, phys_type, stream_name), phys_type, stream_name
 
 
 def write_channel_map(rec, output_dir: Path, channel_rows=None) -> Path:
@@ -156,8 +234,7 @@ def write_channel_map(rec, output_dir: Path, channel_rows=None) -> Path:
     positions = channel_positions(rec)
     if len(rows) != len(positions):
         raise ValueError(
-            f"channel_rows has {len(rows)} entries for "
-            f"{len(positions)} channels."
+            f"channel_rows has {len(rows)} entries for {len(positions)} channels."
         )
     scipy.io.savemat(
         str(output_dir / CHANMAP_NAME),
@@ -184,9 +261,7 @@ def _openephys_source_binary(folder: Path, stream_name: str):
     # 'Record Node 101#Neuropix-PXI-100.ProbeA' lives in
     # .../continuous/Neuropix-PXI-100.ProbeA/continuous.dat
     leaf = stream_name.split("#")[-1]
-    matches = [
-        p for p in folder.rglob("continuous.dat") if p.parent.name == leaf
-    ]
+    matches = [p for p in folder.rglob("continuous.dat") if p.parent.name == leaf]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -201,6 +276,62 @@ def locate_source_binary(phys_path: Path, phys_type: str, stream_name: str):
     if phys_type == "openephysbinary":
         return _openephys_source_binary(folder, stream_name)
     return None
+
+
+def _first_timestamp(sidecar: Path):
+    """The first entry of an Open Ephys timestamps.npy, if it is a real time.
+
+    Memory-mapped: these files run to gigabytes and one element is wanted.
+    """
+    if not sidecar.exists():
+        return None
+    first = float(np.load(sidecar, mmap_mode="r")[0])
+    return None if not np.isfinite(first) or first < 0 else first
+
+
+def probe_start_time(phys_path, phys_type: str):
+    """When the sorted stream's first sample happened, on the acquisition clock.
+
+    This is the number that converts between the two clocks the pipeline uses.
+    Spike times out of kilosort, and the state-scoring bin grid, both count
+    from the sorted stream's first sample -- zero. Anything read through
+    :func:`read_openephys_synced` instead counts from the acquisition system's
+    own epoch, which is several seconds earlier. Subtract this from one to get
+    the other.
+
+    Found by walking the recording's own layout rather than by asking
+    spikeinterface to enumerate streams: that opens the whole dataset through
+    neo, which is a great deal of work to read one float, and it fails on a
+    tree that has the continuous data but not every sidecar. Returns None when
+    there is no synchronized clock to speak of, so callers can leave times
+    where they are instead of shifting them by a guess.
+    """
+    if phys_type != "openephysbinary":
+        return None
+
+    phys_path = Path(phys_path)
+    folder = phys_path.parent if phys_path.is_file() else phys_path
+    streams = {
+        p.parent.name: p.parent
+        for p in folder.rglob("continuous.dat")
+        if p.parent.parent.name == "continuous"
+    }
+    probes = _stream_candidates(list(streams), phys_type, band="ap")
+    if len(probes) != 1:
+        return None
+    return _first_timestamp(streams[probes[0]] / "timestamps.npy")
+
+
+def stream_start_time(phys_path, phys_type: str, stream_name: str):
+    """When one named stream's first sample happened, on the acquisition clock.
+
+    See :func:`probe_start_time`, which is the same question asked of whichever
+    stream was sorted.
+    """
+    binary = locate_source_binary(Path(phys_path), phys_type, stream_name)
+    if binary is None or phys_type != "openephysbinary":
+        return None
+    return _first_timestamp(binary.parent / "timestamps.npy")
 
 
 def check_source_binary(rec, path: Path, dtype="int16", n_check_samples=30000):
@@ -305,7 +436,9 @@ def load_concatenated(output_dir: Path):
         if info.get("offset_to_uV") is not None:
             rec.set_property("offset_to_uV", np.asarray(info["offset_to_uV"]))
 
-    rec = rec.set_probegroup(probeinterface.read_probeinterface(output_dir / PROBE_NAME))
+    rec = rec.set_probegroup(
+        probeinterface.read_probeinterface(output_dir / PROBE_NAME)
+    )
     return rec, info
 
 
@@ -411,9 +544,7 @@ class StateScoring:
         original = np.where(changed, self.codes_before_veto, -1)
         return [
             e
-            for e in state_epochs(
-                original, self.times, self.state_codes, self.step_s
-            )
+            for e in state_epochs(original, self.times, self.state_codes, self.step_s)
             if e.state != "?"
         ]
 
@@ -425,9 +556,13 @@ class StateScoring:
         )
 
 
-def load_states(states_path, session: str | None = None,
-                optitrack_csv=None, frame_times=None,
-                rigid_body=None) -> StateScoring:
+def load_states(
+    states_path,
+    session: str | None = None,
+    optitrack_csv=None,
+    frame_times=None,
+    rigid_body=None,
+) -> StateScoring:
     """Load one session's scoring from a states/ directory or a _states.json.
 
     With several sessions in the directory, name one -- returning an arbitrary

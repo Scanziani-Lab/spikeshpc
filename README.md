@@ -92,6 +92,31 @@ sway — which keep movement well off zero — are handled without a hand-tuned 
 `spikeshpc/tracking.py` reads the Motive CSV directly; the `optitrack` package is not
 a dependency.
 
+## Head-direction decoding
+
+`spikeshpc/decoder.py` decodes head direction from head-direction-tuned units: a
+sorted-spikes point-process decoder on a ring, with the units' own tuning curves as
+the encoding model, a Poisson likelihood per time bin and a Gaussian random walk for
+the dynamics. `run_decoder()` trains on wake, tests on held-out wake against a
+shuffle control, and then decodes REM, where there is no camera heading to recover.
+
+```python
+run = run_decoder(analyzer, hd_unit_ids, heading_deg, shutter_close_times,
+                  scoring.intervals, test_fraction=0.3)
+print(run.summary())
+```
+
+Time bins are whole numbers of camera frames, so bin edges are measured
+shutter-closure timestamps and nothing is interpolated between the camera and the
+decoder. The two shuffle controls answer different questions: shifting the spike
+train against the heading tests whether the decoder tracks the animal (wake), while
+permuting tuning curves across units tests whether the population code is real at
+all (REM, where nothing can be misaligned). See `2_train_test_decoder.ipynb`.
+
+The method follows Moritz's `run_decoder.py`, which used
+`replay_trajectory_classification`; that package is unmaintained and does not install
+here, and its linearized-track machinery is scaffolding a circle does not need.
+
 ## Utilities
 
 - `spikeshpc-drift <output_dir>` — kilosort's drift step across each concatenation

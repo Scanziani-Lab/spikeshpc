@@ -103,8 +103,8 @@ def log_spectrogram(sig, fs, window_s, step_s, freq_range, n_freqs):
 
     Returns (times, freqs, spec) with spec shaped (n_freqs, n_windows).
     """
-    nwin = int(round(window_s * fs))
-    nstep = int(round(step_s * fs))
+    nwin = round(window_s * fs)
+    nstep = round(step_s * fs)
     if len(sig) < nwin:
         raise ValueError(
             f"Recording is {len(sig) / fs:.1f} s, shorter than the "
@@ -192,7 +192,7 @@ def emg_from_lfp(
     sos = butter(
         4, [band[0] / nyquist, band[1] / nyquist], btype="bandpass", output="sos"
     )
-    nwin = int(round(window_s * fs))
+    nwin = round(window_s * fs)
     half = nwin // 2
     n_total = sub.get_num_frames()
     centres = np.clip((times * fs).round().astype(int), half, n_total - (nwin - half))
@@ -257,7 +257,7 @@ def enforce_min_duration(codes, step_s, min_duration_s):
     survive by sitting between two other brief flickers.
     """
     codes = np.asarray(codes).copy()
-    min_len = int(round(min_duration_s / step_s))
+    min_len = round(min_duration_s / step_s)
     if min_len <= 1:
         return codes
 
@@ -331,8 +331,15 @@ def held_frames(position) -> np.ndarray:
     return held
 
 
-def binned_speed(frame_times, position, times, step_s, max_gap_s=0.5,
-                 interpolate_gaps_s=2.0, verbose=True):
+def binned_speed(
+    frame_times,
+    position,
+    times,
+    step_s,
+    max_gap_s=0.5,
+    interpolate_gaps_s=2.0,
+    verbose=True,
+):
     """Mean speed per state bin, from tracked position sampled at frame_times.
 
     Frames that are non-finite, or held over from a dropout
@@ -384,9 +391,11 @@ def binned_speed(frame_times, position, times, step_s, max_gap_s=0.5,
     empty = int(np.isnan(out).sum())
     filled = interpolate_gaps(out, step_s, interpolate_gaps_s)
     if verbose and (dropped or empty):
-        print(f"      tracking: {dropped} held frame(s) "
-              f"({dropped / max(len(position), 1):.2%}) treated as dropouts; "
-              f"{empty} bin(s) left empty, {filled} interpolated")
+        print(
+            f"      tracking: {dropped} held frame(s) "
+            f"({dropped / max(len(position), 1):.2%}) treated as dropouts; "
+            f"{empty} bin(s) left empty, {filled} interpolated"
+        )
     return out
 
 
@@ -405,7 +414,7 @@ def interpolate_gaps(values, step_s, max_gap_s=2.0) -> int:
     if not missing.any() or missing.all():
         return 0
 
-    max_bins = int(round(max_gap_s / step_s))
+    max_bins = round(max_gap_s / step_s)
     edges = np.flatnonzero(np.diff(np.r_[0, missing.astype(int), 0]))
     starts, stops = edges[::2], edges[1::2]
 
@@ -565,7 +574,7 @@ def load_movement(
 
 # ── top level ────────────────────────────────────────────────────────────
 def _smooth(x, step_s, smooth_s):
-    width = max(int(round(smooth_s / step_s)), 1)
+    width = max(round(smooth_s / step_s), 1)
     if width <= 1:
         return x
     kernel = np.ones(width) / width
@@ -698,7 +707,7 @@ def _resample_to(rec, rate):
             "using it as is"
         )
         return rec
-    return si.resample(rec, int(round(rate)))
+    return si.resample(rec, round(rate))
 
 
 def score_session(
@@ -744,8 +753,8 @@ def score_session(
     if movement_cfg.get("enabled"):
         n = rec_lfp.get_num_frames()
         fs = rec_lfp.get_sampling_frequency()
-        nwin = int(round(config["window_s"] * fs))
-        nstep = int(round(config["step_s"] * fs))
+        nwin = round(config["window_s"] * fs)
+        nstep = round(config["step_s"] * fs)
         n_windows = 1 + (n - nwin) // nstep
         grid = (np.arange(n_windows) * nstep + nwin / 2.0) / fs
         speed = load_movement(
@@ -767,13 +776,13 @@ def score_session(
 
     states_dir = output_dir / STATES_DIRNAME
     states_dir.mkdir(parents=True, exist_ok=True)
-    arrays = dict(
-        times=result["times"],
-        broadband=result["broadband"],
-        theta=result["theta"],
-        emg=result["emg"],
-        codes=result["codes"],
-    )
+    arrays = {
+        "times": result["times"],
+        "broadband": result["broadband"],
+        "theta": result["theta"],
+        "emg": result["emg"],
+        "codes": result["codes"],
+    }
     if result.get("speed") is not None:
         arrays["speed"] = result["speed"]
     # what the LFP alone called, before movement overruled it -- the only way
@@ -970,8 +979,8 @@ def slice_recording_to_states(
     for start, stop in sorted(spans):
         if stop - start < min_duration_s:
             continue
-        a = max(int(round(start * fs)), 0)
-        b = min(int(round(stop * fs)), n)
+        a = max(round(start * fs), 0)
+        b = min(round(stop * fs), n)
         if b > a:
             pieces.append(recording.frame_slice(a, b))
     if not pieces:

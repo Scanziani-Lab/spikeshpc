@@ -74,6 +74,66 @@ def pick_ttl_channel(events, channel_id=None, min_rail_fraction: float = 0.8):
     return ttls[0]["channel_id"]
 
 
+def _report_clock(events):
+    """Print the clock the shutter times will be on, and what it cost to get it.
+
+    The declared and realised rates differ by enough to matter, so the log
+    should carry both: a future run whose ADC quietly falls back to the
+    inferred clock is then one grep away rather than a mystery in a tuning
+    curve months later.
+    """
+    times = events.get_times(segment_index=0)
+    if len(times) < 2:
+        return
+    span = float(times[-1]) - float(times[0])
+    declared = events.get_sampling_frequency()
+    realised = (len(times) - 1) / span if span > 0 else float("nan")
+    drift = (len(times) - 1) / declared - span
+    print(
+        f"        clock: starts at {float(times[0]):.3f}s, "
+        f"declared {declared:.1f} Hz, realised {realised:.4f} Hz "
+        f"({drift:+.3f}s over the run if timed from the declared rate)"
+    )
+
+
+def _to_probe_clock(times, phys_path, phys_type, folder, config):
+    """Move shutter times onto the clock the spikes are on.
+
+    The ADC and the probe are timestamped against the same acquisition epoch,
+    but nothing downstream uses that epoch. Kilosort counts from the sorted
+    stream's first sample, and the state-scoring grid counts from the same
+    place, so both start at zero several seconds after the acquisition clock
+    did. Leaving the shutter times on the acquisition clock puts every camera
+    frame that many seconds late against every spike.
+
+    On this rig the gap is 9.81s, which is not subtle: realigning it takes the
+    best-tuned unit in a session from a mean vector length of 0.23 to 0.66.
+    The error is a pure offset, so it does not break anything loudly -- it just
+    smears every tuning curve toward flat, which looks like weakly tuned units
+    rather than like a bug.
+
+    Where the probe stream has no synchronized clock the times are left alone,
+    since both stream and probe are then on inferred clocks that share an
+    origin anyway.
+    """
+    from .io import probe_start_time, stream_start_time
+
+    probe_stream = config.get("ap_stream_name")
+    t0 = (
+        stream_start_time(phys_path, phys_type, probe_stream)
+        if probe_stream
+        else probe_start_time(phys_path, phys_type)
+    )
+    if t0 is None:
+        print("        probe stream has no synchronized clock; "
+              "leaving times as they are")
+        return times
+
+    print(f"        origin: the sorted stream starts {t0:.3f}s into the "
+          "acquisition clock; shifting shutter times onto the spike clock")
+    return times - t0
+
+
 def derive_shutter_times(
     phys_path,
     output_dir: Path,
@@ -87,7 +147,7 @@ def derive_shutter_times(
     Returns the path to the saved .npy, or None if the TTL could not be used.
     Re-running is cheap: an existing cache is returned untouched.
     """
-    import spikeinterface.full as si
+    from .io import open_stream
 
     states_dir = Path(output_dir) / STATES_DIRNAME
     cached = states_dir / f"{session}_shutter_close_times.npy"
@@ -100,14 +160,18 @@ def derive_shutter_times(
         print("      shutter: no ADC stream on this recording, skipping")
         return None
 
+    # Through open_stream, so the ADC lands on the acquisition system's own
+    # clock. Timing it from the declared sampling rate instead is how a shutter
+    # train ends up stretched: the OneBox ADC declares 30300.5 Hz and runs at
+    # roughly 30303, which is a two-second error by the end of a six-hour
+    # session -- more than a hundred frames, on the one array whose whole job
+    # is to say when each frame happened.
     phys_path = Path(phys_path)
     folder = phys_path.parent if phys_path.is_file() else phys_path
-    if phys_type == "spikeglx":
-        events = si.read_spikeglx(folder_path=folder, stream_name=stream)
-    else:
-        events = si.read_openephys(folder_path=folder, stream_name=stream)
+    events = open_stream(folder, phys_type, stream)
     print(f"      shutter: ADC stream {stream!r}, "
           f"{events.get_num_channels()} channels")
+    _report_clock(events)
 
     try:
         channel = pick_ttl_channel(events, config.get("adc_channel"))
@@ -115,6 +179,8 @@ def derive_shutter_times(
     except ValueError as e:
         print(f"      shutter: {e} -- skipping")
         return None
+
+    times = _to_probe_clock(times, phys_path, phys_type, folder, config)
 
     print(f"      shutter: {len(times)} falling edges on {channel!r}")
     if len(times) > 1:
