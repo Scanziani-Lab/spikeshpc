@@ -42,6 +42,7 @@ from .decoder import (
     split_train_test,
     state_interval_mask,
 )
+from .decoder_widget import DecodedWidget, show_decoded
 from .drift import drift_at_junction, plot_drift
 from .editor import StateEditor, show_state_editor
 from .io import (
@@ -72,6 +73,7 @@ from .widgets import show_state_epochs
 __all__ = [
     "DEFAULT_PIPELINE",
     "Decoded",
+    "DecodedWidget",
     "DecoderData",
     "DecoderRun",
     "EncodingModel",
@@ -105,6 +107,7 @@ __all__ = [
     "save_splits",
     "score_recording",
     "score_session",
+    "show_decoded",
     "show_state_editor",
     "show_state_epochs",
     "shuffle_test",

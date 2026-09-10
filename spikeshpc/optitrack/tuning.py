@@ -150,6 +150,9 @@ class HDTuningStats:
     mvl_threshold: float
     significant: bool
     too_quiet: bool = False
+    null_band: np.ndarray | None = None  # (n_percentiles, n_bins), Hz
+    null_bin_centers_deg: np.ndarray | None = None
+    null_percentiles: tuple = ()
 
     def __str__(self) -> str:
         return (
@@ -175,6 +178,7 @@ def compute_hd_tuning_significance(
     seed: int = 0,
     interval_mask=None,
     min_peak_rate_hz: float = 0.0,
+    null_percentiles=(2.5, 50.0, 97.5),
 ) -> dict:
     """Test each unit's tuning curve against a shifted-spike-train null.
 
@@ -206,6 +210,18 @@ def compute_hd_tuning_significance(
     not wrong, it is simply an estimate from almost nothing, and it carries
     nearly no information into a decoder's likelihood. Default 0.0 keeps every
     unit the test passes; 1 Hz is a reasonable floor for decoding.
+
+    ``null_percentiles`` keeps the shuffled *curves* as well as their summary
+    statistic, as a per-bin envelope on ``HDTuningStats.null_band`` -- what a
+    chance curve looks like for this unit's own spike count and the animal's
+    own occupancy. Drawing it under the real curve
+    (:func:`optitrack.widgets.show_hd_tuning_widget`) turns "p = 0.002" back
+    into something that can be looked at, which matters most for the sparse
+    units where a p-value is least intuitive. Pass ``()`` to skip it.
+
+    Read that band as pointwise, not simultaneous: across 36 bins, a real
+    curve poking above the 97.5th percentile in one of them is unremarkable.
+    The MVL p-value is still the test; the band is for seeing what it tested.
     """
     if len(heading_deg) != len(frame_times):
         raise ValueError(
@@ -248,6 +264,7 @@ def compute_hd_tuning_significance(
         )
         mvl, preferred_deg = compute_mean_vector_length(bin_centers, rate)
 
+        band = None
         if np.isnan(mvl):  # silent unit: no curve to test
             p_value, threshold, significant = 1.0, float("nan"), False
         else:
@@ -255,24 +272,29 @@ def compute_hd_tuning_significance(
             # per-shuffle copy, and the occupancy denominator stays put with the
             # heading, which is what the shifted train is being tested against.
             doubled = np.concatenate([spike_counts, spike_counts])
-            null_mvl = np.array(
+            null_curves = np.array(
                 [
-                    compute_mean_vector_length(
-                        bin_centers,
-                        _occupancy_normalized_rate(
-                            bin_idx,
-                            doubled[shift : shift + n_intervals],
-                            summed_occupancy,
-                            n_bins,
-                            smooth_sigma_deg,
-                        ),
-                    )[0]
+                    _occupancy_normalized_rate(
+                        bin_idx,
+                        doubled[shift : shift + n_intervals],
+                        summed_occupancy,
+                        n_bins,
+                        smooth_sigma_deg,
+                    )
                     for shift in shifts
                 ]
+            )
+            null_mvl = np.array(
+                [compute_mean_vector_length(bin_centers, c)[0] for c in null_curves]
             )
             p_value = (1 + np.count_nonzero(null_mvl >= mvl)) / (n_shuffles + 1)
             threshold = float(np.percentile(null_mvl, 100 * (1 - alpha)))
             significant = p_value <= alpha
+            if null_percentiles:
+                # only the envelope is kept: the curves themselves are
+                # n_shuffles x n_bins per unit, which for a whole probe is
+                # hundreds of megabytes to describe a shaded region
+                band = np.percentile(null_curves, list(null_percentiles), axis=0)
 
         too_quiet = bool(rate.max() < min_peak_rate_hz)
         significant = bool(significant and not too_quiet)
@@ -287,6 +309,9 @@ def compute_hd_tuning_significance(
             mvl_threshold=threshold,
             significant=significant,
             too_quiet=too_quiet,
+            null_band=band,
+            null_bin_centers_deg=bin_centers if band is not None else None,
+            null_percentiles=tuple(null_percentiles) if band is not None else (),
         )
     return stats
 

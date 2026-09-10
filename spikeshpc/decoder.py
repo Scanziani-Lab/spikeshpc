@@ -154,6 +154,28 @@ def _as_sorting(obj):
     return obj.sorting if hasattr(obj, "sorting") else obj
 
 
+def _frames_per_bin(bin_s: float, frame_s: float, tolerance: float = 0.01) -> int:
+    """How many camera frames fit in ``bin_s``, forgiving a near-miss.
+
+    Truncating the ratio is the obvious thing and it is wrong exactly where it
+    is most often used. Asking for a bin of a whole number of frames -- 1/60 s
+    on a 120 fps camera, say -- puts the ratio on a knife edge, and a camera
+    that actually runs at 119.99 Hz drops it to 1.9998, which truncates to one
+    frame and silently halves every bin. Real cameras are never on their
+    nominal rate: this rig's are 120.008 and 59.9989 Hz.
+
+    So a ratio within ``tolerance`` of a whole number is taken as that whole
+    number, and anything else still rounds down. Asking for 1.5 frames still
+    gets one; asking for what you thought was two gets two; asking for less
+    than a frame gets one, since a bin has to hold something.
+    """
+    ratio = bin_s / frame_s
+    nearest = int(round(ratio))
+    if nearest >= 1 and abs(ratio - nearest) <= tolerance * nearest:
+        return nearest
+    return max(1, int(ratio))
+
+
 def prepare_decoder_data(
     sorting,
     unit_ids,
@@ -188,7 +210,7 @@ def prepare_decoder_data(
         raise ValueError("no units to decode from")
 
     frame_s = float(np.median(np.diff(frame_times)))
-    bin_frames = max(1, int(bin_s / frame_s))
+    bin_frames = _frames_per_bin(bin_s, frame_s)
     n_bins = (len(frame_times) - 1) // bin_frames
     if n_bins < 2:
         raise ValueError(
@@ -202,9 +224,7 @@ def prepare_decoder_data(
     # heading of each bin: the circular mean of the frames it spans. Frames
     # past the last whole bin are dropped rather than folded into a short one.
     used = heading_deg[: n_bins * bin_frames].reshape(n_bins, bin_frames)
-    binned_heading = (
-        used[:, 0] if bin_frames == 1 else circular_mean(used, axis=1)
-    )
+    binned_heading = used[:, 0] if bin_frames == 1 else circular_mean(used, axis=1)
 
     counts = np.empty((n_bins, len(unit_ids)), dtype=np.int32)
     for j, unit_id in enumerate(unit_ids):
@@ -439,9 +459,7 @@ def movement_variance(
     if mask is None:
         return float(per_100hz) * data.bin_s * 100.0
 
-    steps = circular_difference(
-        data.heading_deg[mask][1:], data.heading_deg[mask][:-1]
-    )
+    steps = circular_difference(data.heading_deg[mask][1:], data.heading_deg[mask][:-1])
     # only steps between adjacent bins are one bin's worth of movement
     adjacent = np.diff(np.flatnonzero(mask)) == 1
     steps = steps[adjacent]
@@ -607,8 +625,7 @@ class Decoded:
 
     def __repr__(self) -> str:
         head = (
-            f"Decoded({self.label}: {self.n_decoded} bins, "
-            f"{self.duration_s.sum():.0f}s"
+            f"Decoded({self.label}: {self.n_decoded} bins, {self.duration_s.sum():.0f}s"
         )
         if "median_abs_error_deg" in self.metrics:
             head += f", median error {self.metrics['median_abs_error_deg']:.1f} deg"
@@ -683,9 +700,7 @@ def decode(
             f"(after dropping bins longer than max_gap_s={max_gap_s})"
         )
 
-    log_likelihood = poisson_log_likelihood(
-        data.counts, data.duration_s, model.rate_hz
-    )
+    log_likelihood = poisson_log_likelihood(data.counts, data.duration_s, model.rate_hz)
 
     posteriors, indices, run_ids = [], [], []
     for run_id, (a, b) in enumerate(runs):
@@ -794,9 +809,7 @@ def shuffle_test(
         data, model, mask, keep_posterior=False, label="observed", **decode_kwargs
     )
     if metric not in observed.metrics:
-        raise ValueError(
-            f"metric {metric!r} is not one of {sorted(observed.metrics)}"
-        )
+        raise ValueError(f"metric {metric!r} is not one of {sorted(observed.metrics)}")
 
     null = np.empty(n_shuffles)
     for i in range(n_shuffles):
@@ -882,8 +895,12 @@ class DecoderRun:
             f"test {self.data.duration_s[self.test_mask].sum():.0f}s",
             f"  test: {self.test}",
         ]
-        for key in ("median_abs_error_deg", "rmse_deg", "frac_within_deg",
-                    "circular_correlation"):
+        for key in (
+            "median_abs_error_deg",
+            "rmse_deg",
+            "frac_within_deg",
+            "circular_correlation",
+        ):
             if key in self.test.metrics:
                 lines.append(f"    {key} = {self.test.metrics[key]:.3f}")
         if self.test_shuffle is not None:
@@ -909,7 +926,7 @@ def run_decoder(
     heading_deg,
     frame_times,
     intervals,
-    bin_s: float = 0.05,
+    bin_s: float = (1 / 60),
     n_angle_bins: int = 180,
     smooth_sigma_deg: float = 10.0,
     min_rate_hz: float = 0.1,
@@ -918,7 +935,7 @@ def run_decoder(
     block_s: float = 60.0,
     movement_var_deg2: float | str | None = None,
     acausal: bool = True,
-    tolerance_deg: float = 30.0,
+    tolerance_deg: float = 10.0,
     n_shuffles: int = 100,
     min_shift_s: float = 30.0,
     decode_rem: bool = True,
@@ -928,19 +945,132 @@ def run_decoder(
 ) -> DecoderRun:
     """Train on wake, test on held-out wake against a shuffle, then decode REM.
 
-    ``sorting`` may be a sorting or a sorting analyzer; ``unit_ids`` are the
-    head-direction-tuned units you selected. ``heading_deg`` and
-    ``frame_times`` are the shutter-aligned pair, and ``intervals`` is
-    ``scoring.intervals`` from :func:`spikeshpc.load_states`.
+    ``sorting``: may be a sorting or a sorting analyzer
 
-    ``movement_var_deg2`` may be a number, ``"estimate"`` to measure it from
-    the training heading, ``np.inf`` for no dynamics prior, or None for the
-    default convention.
+    ``unit_ids``: the head-direction-tuned units you selected
 
-    The REM decode runs regardless of how the test scored -- it is your call
-    whether to believe it -- but read ``run.test.metrics`` first. A decoder
-    that cannot recover a heading the animal is visibly holding has no standing
-    to report one it is only dreaming.
+    ``heading_deg`` and ``frame_times`` are the shutter-aligned pair
+
+    ``intervals``: ``scoring.intervals`` from :func:`spikeshpc.load_states`
+
+    ``bin_s``: bin size in seconds. To set to camera frame rate, use (1/frame rate). Default 1/60
+
+    ``n_angle_bins``: number of bins to devide heading space into. Default 180
+
+    ``smooth_sigma_deg``: how much to smooth tuning curves. Default 10 degrees
+
+    ``min_rate_hz``: applies this floor to tuning curves to avoid overweighting random spikes. Default 0.1 hz
+
+    ``test_fraction``: test/train split. Default 0.3
+
+    ``split_mode``: how to split the wake data into train/test chunks. Can be 'blocks' or 'contiguous'. Default 'blocks'
+
+    ``block_s``: if 'blocks' mode is used, how long in seconds the blocks should be. Default 60
+
+    ``movement_var_deg2``: maximum degrees/bin to allow for heading changes/bin.
+      ``None`` = (2 deg^2 per 10 ms bin, scaled to ``bin_s``) per convention. Default
+      ``'estimate'`` = estimate from the actual heading
+      ``np.inf`` = remove limit completely
+      ``number`` = fix at this value
+
+    ``acausal``: whether to use causal or acausal decoder. Default True (acausal)
+
+    ``tolerance_deg``: for evaluating model. Acceptable variance from true heading. Default 10 degrees
+
+    ``n_shuffles``: number of shuffles for control analysis. Default 100
+
+    ``min_shift_s``: amount to shift spike trains vs heading for shuffle analysis. Default 30 s
+
+    ``decode_rem``: whether or not to run decoder on REM data. Default True. Set False for fine-tuning model
+
+    ``keep_posterior``: whether to save posteriors for REM analysis. Default True
+
+    ``seed``: seed for generating the random train/test split. Default 0
+
+    ``verbose``: print progress on model generation. Default True
+
+    Tuning guide
+    ------------
+    The knob that matters most is not in this list: it is which units you pass
+    in. A decoder is a weighted vote of tuning curves, so adding a unit with a
+    weak or unstable curve costs more than any parameter here will win back.
+    Start there, then:
+
+    **bin_s** (0.05) -- decoder time bin, rounded *down* to a whole number of
+      camera frames, so at 120 fps 0.05 becomes exactly 6 frames. Longer bins
+      collect more spikes and give a sharper posterior, at the price of
+      smearing fast head turns: the animal's heading has to be roughly constant
+      within a bin for the Poisson likelihood to mean anything. Shorter bins
+      track turns but lean harder on the random-walk prior to fill in. If the
+      decode looks noisy, try 0.1 before anything else; if it lags real turns,
+      try 0.025. Cost is linear in 1/bin_s.
+
+    **n_angle_bins** (180) -- resolution of the state space, so 2 degrees per
+      bin. Rarely worth changing: below the tracking noise it buys nothing and
+      costs time quadratically in the transition matrix. It does interact with
+      ``movement_var_deg2`` -- see the warning :func:`ring_transition` raises
+      when the random walk is too tight for the bins to represent.
+
+    **smooth_sigma_deg** (10.0) -- circular smoothing of the tuning curves that
+      form the encoding model. This is a bias/variance dial on the model
+      itself: too small and each curve carries the sampling noise of its own
+      training bins into every decode; too large and genuinely sharp cells are
+      flattened and stop discriminating. Raise it when training data is thin.
+
+    **min_rate_hz** (0.1) -- floor under the tuning curves. Without it, a
+      heading a unit never happened to fire at has rate zero, its
+      log-likelihood is -inf, and one spike there vetoes that heading outright
+      however much the rest of the population likes it. Raise it to make the
+      population more forgiving of surprising spikes, lower it to let confident
+      units veto more strongly. Sensitive to your unit count: with few units, a
+      higher floor is safer.
+
+    **test_fraction** (0.3) and **split_mode** ("blocks") / **block_s** (60.0)
+      -- how much wake is held out and how it is carved. ``"blocks"`` scatters
+      whole 60 s blocks across the session; ``"contiguous"`` holds out the tail
+      in one piece. See :func:`split_train_test` for why blocks, and why
+      contiguous is the harder and more honest question if you mean to apply
+      the model to REM later. Expect contiguous to score worse; if it scores
+      *much* worse, the tuning is drifting over the session and that is worth
+      knowing before you trust a REM decode from the same model.
+
+    **movement_var_deg2** (None) -- how far the head is assumed to move per
+      bin, as the variance of a random walk on the ring. This is the strongest
+      prior in the model and the easiest one to fool yourself with. A number
+      sets it directly; ``"estimate"`` measures it from the training heading,
+      which is the principled choice; ``None`` uses the convention carried over
+      from ``run_decoder.py`` (2 deg^2 per 10 ms bin, scaled to ``bin_s``);
+      ``np.inf`` removes the prior entirely and decodes each bin from its own
+      spikes alone.
+
+      Too small and the posterior becomes sticky -- it will lag real turns and
+      produce smooth trajectories whatever the spikes say, which looks like a
+      good decode and is not. Run ``np.inf`` once as a control: if the decode
+      still tracks the animal without any dynamics, the smoothness was real.
+
+    **acausal** (True) -- use spikes from after each bin as well as before.
+      Strictly better offline and the right default. Set False when the decoded
+      trajectory has to be readable as a prediction, or to check that a result
+      does not depend on the smoother.
+
+    **tolerance_deg** (30.0) -- only affects the reported
+      ``frac_within_deg``; it changes no decode.
+
+    **n_shuffles** (100) and **min_shift_s** (30.0) -- the control. The
+      p-value's floor is ``1 / (n_shuffles + 1)``, so 100 shuffles cannot report
+      better than p = 0.0099; raise it if you need a smaller number, set 0 to
+      skip the controls while tinkering. ``min_shift_s`` keeps a shift from
+      landing back near register.
+
+    **decode_rem** (True) / **keep_posterior** (True) -- set ``decode_rem``
+      False while tuning on wake, since REM costs a second decode and its own
+      shuffles. ``keep_posterior`` False drops the full posterior from the
+      result, which is what :func:`plot_decoded` shades; it is the memory the
+      run holds, roughly ``n_bins x n_angle_bins x 4`` bytes.
+
+    **seed** (0) -- fixes both the train/test split and the shuffles. Vary it
+      to check a result is not an artefact of one particular split; if the
+      metrics move a lot across seeds, the test set is too small.
     """
     data = prepare_decoder_data(sorting, unit_ids, heading_deg, frame_times, bin_s)
     if verbose:
@@ -981,7 +1111,11 @@ def run_decoder(
         tolerance_deg=tolerance_deg,
     )
     test = decode(
-        data, model, test_mask, keep_posterior=keep_posterior, label="wake test",
+        data,
+        model,
+        test_mask,
+        keep_posterior=keep_posterior,
+        label="wake test",
         **shared,
     )
     if verbose:
@@ -992,9 +1126,15 @@ def run_decoder(
         if verbose:
             print(f"  {n_shuffles} shifted-spike shuffles...")
         test_shuffle = shuffle_test(
-            data, model, test_mask, kind="shift",
-            metric="median_abs_error_deg", n_shuffles=n_shuffles,
-            min_shift_s=min_shift_s, seed=seed, **shared,
+            data,
+            model,
+            test_mask,
+            kind="shift",
+            metric="median_abs_error_deg",
+            n_shuffles=n_shuffles,
+            min_shift_s=min_shift_s,
+            seed=seed,
+            **shared,
         )
         if verbose:
             print(f"    {test_shuffle}")
@@ -1007,8 +1147,13 @@ def run_decoder(
             rem_mask = None
         else:
             rem = decode(
-                data, model, rem_mask, keep_posterior=keep_posterior,
-                with_metrics=False, label="REM", **shared,
+                data,
+                model,
+                rem_mask,
+                keep_posterior=keep_posterior,
+                with_metrics=False,
+                label="REM",
+                **shared,
             )
             if verbose:
                 print(f"  {rem}")
@@ -1016,9 +1161,15 @@ def run_decoder(
                 # no heading to be wrong about in REM, so the null has to break
                 # the population code rather than its alignment in time
                 rem_shuffle = shuffle_test(
-                    data, model, rem_mask, kind="units",
-                    metric="mean_posterior_max", n_shuffles=n_shuffles,
-                    seed=seed, with_metrics=False, **shared,
+                    data,
+                    model,
+                    rem_mask,
+                    kind="units",
+                    metric="mean_posterior_max",
+                    n_shuffles=n_shuffles,
+                    seed=seed,
+                    with_metrics=False,
+                    **shared,
                 )
                 if verbose:
                     print(f"    {rem_shuffle}")
@@ -1047,8 +1198,10 @@ def plot_encoding_model(model: EncodingModel, sort_by_preferred: bool = True, ax
     """
     import matplotlib.pyplot as plt
 
-    order = np.argsort(model.preferred_deg) if sort_by_preferred else np.arange(
-        len(model.unit_ids)
+    order = (
+        np.argsort(model.preferred_deg)
+        if sort_by_preferred
+        else np.arange(len(model.unit_ids))
     )
     peak = model.rate_hz.max(axis=1, keepdims=True)
     normalized = model.rate_hz / np.where(peak > 0, peak, 1.0)
@@ -1064,7 +1217,9 @@ def plot_encoding_model(model: EncodingModel, sort_by_preferred: bool = True, ax
         interpolation="nearest",
     )
     ax.set_xlabel("head direction (deg)")
-    ax.set_ylabel("unit (sorted by preferred direction)" if sort_by_preferred else "unit")
+    ax.set_ylabel(
+        "unit (sorted by preferred direction)" if sort_by_preferred else "unit"
+    )
     ax.set_xticks(np.arange(0, 361, 90))
     ax.set_title(
         f"encoding model: {len(model.unit_ids)} units, "
@@ -1083,10 +1238,27 @@ def plot_decoded(
 ):
     """Decoded vs. actual heading over a window, on top of the posterior.
 
-    Points are drawn rather than joined: a line across the 0/360 wrap is a lie
-    about a jump the animal never made. The posterior underneath is the honest
-    version of the decode -- the MAP is only its brightest pixel, and a broad
-    or split posterior means the population was not committing.
+    The static version of :func:`spikeshpc.decoder_widget.show_decoded`, for
+    saving a figure. Note it plots against the *recording* clock, so a blocked
+    test set leaves the axis mostly empty; the widget lays the decoded bins end
+    to end instead.
+
+    Lines are cut rather than joined wherever a join would be a lie: across the
+    0/360 seam, where one step on the ring is a full-height plunge on a linear
+    axis, and across a splice between non-adjacent stretches. The posterior
+    underneath is the honest version of the decode -- the MAP is only its
+    darkest pixel, and a broad or split posterior means the population was not
+    committing.
+
+    ``t0`` defaults to the *first decoded bin*, so with the default
+    ``window_s`` equal to ``split_train_test``'s ``block_s`` the figure shows
+    exactly the first held-out block. Changing ``test_fraction`` often leaves
+    that block unchanged -- the split draws blocks in a fixed order and takes a
+    longer prefix, so a larger fraction adds blocks rather than reshuffling
+    them -- and the window then contains identical ground truth and a decoded
+    trace differing by an angle bin or so. Pass ``t0`` explicitly, or compare
+    ``run.test.metrics``, rather than reading two such figures as evidence that
+    nothing changed.
     """
     import matplotlib.pyplot as plt
 
@@ -1099,30 +1271,61 @@ def plot_decoded(
     if ax is None:
         _, ax = plt.subplots(figsize=(11, 4))
 
+    from .decoder_widget import ACTUAL_COLOR, DECODED_COLOR, break_at
+
     time = decoded.time_s[window]
     if show_posterior and decoded.posterior is not None and len(time) > 1:
         step = np.median(np.diff(time))
         angle_width = 360.0 / len(decoded.bin_centers_deg)
+        posterior = decoded.posterior[window]
         ax.pcolormesh(
             np.r_[time - step / 2, time[-1] + step / 2],
             np.r_[
                 decoded.bin_centers_deg - angle_width / 2,
                 decoded.bin_centers_deg[-1] + angle_width / 2,
             ],
-            decoded.posterior[window].T,
-            cmap="magma",
+            posterior.T,
+            cmap="Blues",
             shading="flat",
+            vmin=0.0,
+            vmax=max(float(np.percentile(posterior, 99.5)), 1e-6),
         )
-    ax.plot(time, decoded.actual_deg[window], ".", ms=3, color="#4daf4a", label="actual")
+
+    # Lines, not points, but cut wherever a join would be a lie: across the
+    # 0/360 seam, and across a splice between non-adjacent stretches.
+    breaks = np.flatnonzero(np.diff(decoded.run_index[window]) != 0) + 1
     ax.plot(
-        time, decoded.decoded_deg[window], ".", ms=2.5, color="#e41a1c", label="decoded"
+        *break_at(time, decoded.actual_deg[window], breaks),
+        color=ACTUAL_COLOR, lw=1.3, label="actual", zorder=3,
     )
+    ax.plot(
+        *break_at(time, decoded.decoded_deg[window], breaks),
+        color=DECODED_COLOR, lw=1.3, label="decoded", zorder=4,
+    )
+    ax.set_facecolor("white")
     ax.set_xlim(t0, t0 + window_s)
     ax.set_ylim(0, 360)
     ax.set_yticks(np.arange(0, 361, 90))
     ax.set_xlabel("time (s)")
     ax.set_ylabel("head direction (deg)")
-    ax.set_title(decoded.label)
+
+    # Which run this is, on the figure. Two decodes from different train/test
+    # splits routinely produce a window that looks identical -- the split
+    # assigns whole blocks, so the first test block is often the same one, and
+    # inside it the ground truth is the same by construction while the decoded
+    # trace moves by an angle bin or two. Without the window and the score
+    # written down, those figures are indistinguishable by eye and invite the
+    # conclusion that a parameter did nothing.
+    subtitle = (
+        f"{window.sum()} of {decoded.n_decoded} decoded bins, "
+        f"{t0:.0f}-{t0 + window_s:.0f}s"
+    )
+    if "median_abs_error_deg" in decoded.metrics:
+        subtitle += (
+            f" | whole set: median {decoded.metrics['median_abs_error_deg']:.1f} deg, "
+            f"{decoded.duration_s.sum():.0f}s"
+        )
+    ax.set_title(f"{decoded.label}\n{subtitle}", fontsize=10)
     ax.legend(loc="upper right", markerscale=4, framealpha=0.85)
     return ax
 
@@ -1160,8 +1363,12 @@ def plot_error(decoded: Decoded, axes=None):
     with np.errstate(invalid="ignore"):
         counts = counts / counts.sum(axis=1, keepdims=True)
     image = right.imshow(
-        counts.T, origin="lower", extent=(0, 360, 0, 360), cmap="magma",
-        aspect="equal", interpolation="nearest",
+        counts.T,
+        origin="lower",
+        extent=(0, 360, 0, 360),
+        cmap="magma",
+        aspect="equal",
+        interpolation="nearest",
     )
     right.plot([0, 360], [0, 360], color="w", lw=0.6, alpha=0.5)
     right.set_xlabel("actual (deg)")

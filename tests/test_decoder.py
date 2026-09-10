@@ -39,10 +39,19 @@ BASELINE_HZ = 0.5
 KAPPA = 4.0
 WALK_STEP_DEG = 3.0  # per camera frame
 BIN_FRAMES = 6  # 50 ms at 120 fps
-# variance of the step between consecutive block means of a random walk
-BLOCK_MEAN_STEP_VAR = (
-    BIN_FRAMES * WALK_STEP_DEG**2 * (2 * BIN_FRAMES**2 + 1) / (3 * BIN_FRAMES**2)
-)
+
+
+def block_mean_step_var(bin_frames, step_deg=WALK_STEP_DEG):
+    """Variance of the step between consecutive block means of a random walk.
+
+    Derived from bin_frames rather than hard-coded, so a test that does not
+    itself choose bin_s cannot be broken by someone changing the default.
+    """
+    k = bin_frames
+    return k * step_deg**2 * (2 * k**2 + 1) / (3 * k**2)
+
+
+BLOCK_MEAN_STEP_VAR = block_mean_step_var(BIN_FRAMES)
 
 
 class FakeSorting:
@@ -223,6 +232,41 @@ def test_every_spike_is_counted_once(session, data):
     assert data.counts.sum() == within
 
 
+@pytest.mark.parametrize(
+    "camera_hz,bin_s,expected",
+    [
+        (120.0, 1 / 60, 2),        # exactly two frames
+        (119.99, 1 / 60, 2),       # a slow camera must not halve the bin
+        (120.008, 1 / 60, 2),      # or a fast one lengthen it
+        (59.9989, 2 / 60, 2),      # this rig's other camera
+        (120.0, 0.05, 6),
+        (120.0, 1 / 120, 1),
+        (120.0, 1 / 240, 1),       # asking for less than a frame still gets one
+        (120.0, 0.0125, 1),        # 1.5 frames: a real request, rounded down
+    ],
+)
+def test_a_bin_is_the_number_of_frames_you_meant(camera_hz, bin_s, expected):
+    """Truncating the ratio halves bins exactly where it is most often used.
+
+    A whole number of frames is the natural thing to ask for, and it is
+    precisely where a camera off its nominal rate flips the truncation.
+    """
+    from spikeshpc.decoder import _frames_per_bin
+
+    assert _frames_per_bin(bin_s, 1.0 / camera_hz) == expected
+
+
+def test_a_slightly_slow_camera_does_not_halve_the_bin(session):
+    """End to end, on frame times that are not on an exact grid."""
+    frame_times = np.arange(len(session["frame_times"])) / 119.99
+    data = prepare_decoder_data(
+        session["sorting"], session["unit_ids"], session["heading_deg"],
+        frame_times, bin_s=1 / 60,
+    )
+    assert data.bin_frames == 2
+    assert data.bin_s == pytest.approx(2 / 119.99, rel=1e-6)
+
+
 def test_mismatched_heading_and_frame_times_is_rejected(session):
     with pytest.raises(ValueError, match="same length"):
         prepare_decoder_data(
@@ -283,6 +327,41 @@ def test_blocks_mode_samples_the_whole_session(data, split):
     train, test = split
     assert data.time_s[test].min() < 120.0
     assert data.time_s[test].max() > 480.0
+
+
+def test_a_bigger_test_fraction_adds_blocks_rather_than_reshuffling(data, session):
+    """Why two split sizes can plot the same window.
+
+    The block order depends on the seed alone, and the test set is a prefix of
+    it, so the sets are nested. A larger fraction therefore often keeps the
+    same earliest block -- and plot_decoded starts at the first decoded bin.
+    """
+    wake = state_interval_mask(data, session["intervals"], "WAKE")
+    small = np.flatnonzero(split_train_test(data, wake, 0.2, block_s=30.0, seed=4)[1])
+    large = np.flatnonzero(split_train_test(data, wake, 0.6, block_s=30.0, seed=4)[1])
+
+    assert set(small) < set(large), "the smaller test set should be nested inside"
+    assert data.time_s[large].min() <= data.time_s[small].min()
+
+
+def test_the_same_window_still_holds_a_different_decode(data, split, session):
+    """Identical-looking is not identical: the model behind it changed."""
+    wake = state_interval_mask(data, session["intervals"], "WAKE")
+    a_train, a_test = split_train_test(data, wake, 0.3, block_s=30.0, seed=7)
+    b_train, b_test = split_train_test(data, wake, 0.6, block_s=30.0, seed=7)
+
+    a = decode(data, fit_encoding_model(data, a_train), a_test)
+    b = decode(data, fit_encoding_model(data, b_train), b_test)
+
+    shared = np.intersect1d(a.bin_index, b.bin_index)
+    assert shared.size > 100, "no overlap to compare"
+    in_a = np.isin(a.bin_index, shared)
+    in_b = np.isin(b.bin_index, shared)
+
+    # same bins, so the ground truth is identical -- that is the green trace
+    np.testing.assert_allclose(a.actual_deg[in_a], b.actual_deg[in_b])
+    # but the encoding models differ, so the decode does too
+    assert not np.array_equal(a.decoded_deg[in_a], b.decoded_deg[in_b])
 
 
 def test_a_bad_test_fraction_is_rejected(data, session):
@@ -651,7 +730,9 @@ def test_estimating_the_movement_variance_works_end_to_end(session):
         decode_rem=False,
         verbose=False,
     )
-    assert run.movement_var_deg2 == pytest.approx(BLOCK_MEAN_STEP_VAR, rel=0.15)
+    assert run.movement_var_deg2 == pytest.approx(
+        block_mean_step_var(run.data.bin_frames), rel=0.15
+    )
     assert run.test.metrics["median_abs_error_deg"] < 10.0
 
 
@@ -695,6 +776,12 @@ def test_the_plots_draw(full_run):
         plot_error,
         plot_shuffle,
     )
+
+    axis = plot_decoded(full_run.test, window_s=30.0)
+    title = axis.get_title()
+    # the figure has to say which run it is, or two splits look the same
+    assert "decoded bins" in title and "median" in title
+    plt.close(axis.figure)
 
     for make in (
         lambda: plot_encoding_model(full_run.model),

@@ -127,8 +127,25 @@ def save_hd_tuning(
     columns = {
         name: np.array([getattr(stats[u], name) for u in unit_ids]) for name in _STAT_FIELDS
     }
+
+    # the shuffled envelope, if the significance test kept it. Stored only when
+    # every unit has one of the same shape -- a ragged stack would have to be
+    # an object array, and that means allow_pickle on the way back in.
+    bands = [getattr(stats[u], "null_band", None) for u in unit_ids]
+    extra = {}
+    if all(b is not None for b in bands) and len({np.shape(b) for b in bands}) == 1:
+        first = stats[unit_ids[0]]
+        extra = {
+            "null_band": np.stack([np.asarray(b, dtype=float) for b in bands]),
+            "null_bin_centers_deg": np.asarray(
+                first.null_bin_centers_deg, dtype=float
+            ),
+            "null_percentiles": np.asarray(first.null_percentiles, dtype=float),
+        }
+
     np.savez_compressed(
         path,
+        **extra,
         session=np.array(session),
         heading_deg=np.asarray(heading_deg, dtype=np.float32),
         bin_centers_deg=bin_centers,
@@ -184,16 +201,19 @@ def load_hd_tuning(path) -> HDTuning:
         arrays = {k: saved[k] for k in saved.files}
 
     unit_ids = arrays["unit_ids"]
-    stats = {
-        unit: HDTuningStats(
-            **{
-                name: _plain(arrays[name][i])
-                for name in _STAT_FIELDS
-                if name in arrays
-            }
-        )
-        for i, unit in enumerate(unit_ids)
-    }
+    has_band = "null_band" in arrays
+    stats = {}
+    for i, unit in enumerate(unit_ids):
+        fields = {
+            name: _plain(arrays[name][i]) for name in _STAT_FIELDS if name in arrays
+        }
+        if has_band:
+            fields.update(
+                null_band=arrays["null_band"][i],
+                null_bin_centers_deg=arrays["null_bin_centers_deg"],
+                null_percentiles=tuple(arrays["null_percentiles"].tolist()),
+            )
+        stats[unit] = HDTuningStats(**fields)
     return HDTuning(
         session=str(arrays["session"]),
         heading_deg=arrays["heading_deg"],
