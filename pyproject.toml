@@ -19,6 +19,7 @@ dependencies = [
     # this package calls settled.
     "spikeinterface[full]>=0.104",
     "probeinterface",
+    "ipykernel>=7.3.0",
 ]
 
 [project.optional-dependencies]

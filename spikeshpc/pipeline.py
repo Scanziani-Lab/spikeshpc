@@ -119,6 +119,7 @@ def run_pipeline(
                     phys_type=phys_type,
                     stream_name=stream_name,
                     exclude_channels=pipeline.get("bad_channels") or [],
+                    session=(pipeline.get("session_names") or {}).get(str(path)),
                 )
             )
         print("[1/4] state scoring complete.")
@@ -197,7 +198,15 @@ def run_pipeline(
     # reference to the recording, and re-opening keeps that pointed at the
     # on-disk binary regardless of which stages ran.
     rec, _ = load_concatenated(output_dir)
-    analyzer = postprocess(rec, output_dir, pipeline["postprocessing"], bad_channel_ids)
+    analyzer_cfg = pipeline.get("analyzer") or {}
+    analyzer = postprocess(
+        rec,
+        output_dir,
+        pipeline["postprocessing"],
+        bad_channel_ids,
+        bandpass=analyzer_cfg.get("bandpass"),
+        use_KS_positions=analyzer_cfg.get("use_KS_positions", True),
+    )
     print("[4/4] analyzer saved.")
 
     print("\n✓ Pipeline complete.")

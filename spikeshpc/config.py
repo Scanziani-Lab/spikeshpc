@@ -152,6 +152,22 @@ DEFAULT_PIPELINE = {
     # the recording and should not be set here. Sorting parameters can also be
     # set from pipeline_config.json
     "sorting": {},
+    # Override the inferred session name per recording, as {phys_path: name}.
+    # Normally unnecessary -- see spikeshpc.states.session_name -- but it is the
+    # escape hatch when a path's own folders cannot say which session it is.
+    "session_names": {},
+    # How the sorting analyzer is built, as opposed to what it computes.
+    "analyzer": {
+        # Spike band for waveform extraction. kilosort filters internally, so
+        # the binary it sorted is raw; handing that to the analyzer makes every
+        # waveform-derived extension a measurement of the DC offset instead of
+        # the spike. Set to false only if the binary is already filtered.
+        "bandpass": {"freq_min": 300.0, "freq_max": 6000.0},
+        # Take spike_locations from kilosort's own spike_positions.npy rather
+        # than spending a full pass over the recording recomputing it -- about
+        # two hours on a 6.6 h session, for a quantity kilosort already has.
+        "use_KS_positions": True,
+    },
     "postprocessing": {
         "random_spikes": {},
         "noise_levels": {},

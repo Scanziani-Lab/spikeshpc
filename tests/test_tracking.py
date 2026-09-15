@@ -199,8 +199,12 @@ def test_load_movement_reports_a_bad_csv_without_raising(tmp_path, capsys):
         "optitrack_csv": str(tmp_path / "{session}.csv"),
         "frame_times": str(tmp_path / "{session}.npy"),
     }
-    assert load_movement(cfg, "s1", np.arange(10.0), 1.0) is None
-    assert "skipping the veto" in capsys.readouterr().out
+    info = {}
+    assert load_movement(cfg, "s1", np.arange(10.0), 1.0, info=info) is None
+    printed = capsys.readouterr().out
+    assert "skipping" in printed and "Motive CSV export" in printed
+    # and the reason survives into the saved scoring, not just the job log
+    assert "Motive CSV export" in info["reason"]
 
 
 def test_optitrack_is_a_subpackage_not_an_outside_dependency():

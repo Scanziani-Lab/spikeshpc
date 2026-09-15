@@ -30,7 +30,7 @@ and it has not been validated against hand-scored data. Known differences:
     Nyquist. We resample to 2500 Hz first (`emg_rate`).
   * buzcode applies per-state minimum durations and transition rules; here a
     single `min_state_duration_s` is enforced for every state.
-  * The paper curates the automatic scoring by hand afterwards. Treat this
+  * The panper curates the automatic scorig by hand afterwards. Treat this
     output as a starting point -- every metric is saved alongside the states
     so you can re-threshold without recomputing.
 """
@@ -50,6 +50,36 @@ from .optitrack.io import read_rigid_body_track
 # buzcode's SleepState convention.
 STATE_CODES = {"WAKE": 1, "NREM": 3, "REM": 5}
 CODE_NAMES = {v: k for k, v in STATE_CODES.items()}
+
+# Folder names that describe what is inside them rather than which recording it
+# is. A phys_path may point at any depth -- ".../session7/Record Node 101" or
+# ".../session8/raw" -- and the leaf is only sometimes the session.
+CONTAINER_DIRNAMES = ("raw", "ephys", "physiology", "continuous", "data")
+
+
+def session_name(phys_path) -> str:
+    """Which recording this is, from the path the pipeline was pointed at.
+
+    The leaf directory is the obvious answer and is wrong whenever the raw data
+    sits in a subfolder: ".../session8/raw" names the session "raw", and every
+    "{session}" template and cached shutter file then resolves to a name
+    nothing else uses. That failure is silent -- the movement veto simply never
+    runs, and the scoring looks complete.
+
+    So a leaf that describes its contents rather than the recording is skipped,
+    as is an Open Ephys record-node folder. Pass `session=` to score_session to
+    override this entirely.
+    """
+    path = Path(phys_path)
+    parts = [p for p in path.parts if p not in ("/", "\\")]
+    for name in reversed(parts):
+        lowered = name.lower()
+        if lowered in CONTAINER_DIRNAMES or lowered.startswith("record node"):
+            continue
+        if name.endswith(":"):  # a bare drive letter is not a session
+            break
+        return name
+    return path.stem or path.name
 
 
 # ── channel selection ────────────────────────────────────────────────────
@@ -507,7 +537,8 @@ def apply_movement_veto(
 
 
 def load_movement(
-    config, session, times, step_s, phys_path=None, output_dir=None, phys_type=None
+    config, session, times, step_s, phys_path=None, output_dir=None, phys_type=None,
+    info=None,
 ):
     """Per-bin speed for `session`, or None when tracking is unavailable.
 
@@ -517,16 +548,31 @@ def load_movement(
     `frame_times` may be left unset: the shutter TTL is then extracted from
     the recording's own ADC stream and cached, so a session can be scored
     straight off the rig without a notebook step first.
+
+    `info`, if given, is filled with a "reason" whenever this returns None, so
+    the saved scoring can say why it has no movement rather than merely not
+    having any.
     """
+    def skip(reason):
+        """Record why there is no movement, not just that there is none.
+
+        A veto that never ran leaves a scoring that looks complete: states,
+        thresholds, fractions, and no movement panel to notice the absence of.
+        The reason belongs in the saved summary, where it is still there weeks
+        later, rather than only in the job's log.
+        """
+        print(f"      movement: {reason}, skipping")
+        if info is not None:
+            info["reason"] = reason
+        return None
+
     csv_template = config.get("optitrack_csv")
     if not csv_template:
-        print("      movement: no optitrack_csv configured, skipping")
-        return None
+        return skip("no optitrack_csv configured")
 
     csv_path = Path(str(csv_template).format(session=session))
     if not csv_path.exists():
-        print(f"      movement: no OptiTrack CSV for {session}, skipping")
-        return None
+        return skip(f"no OptiTrack CSV at {csv_path}")
 
     times_template = config.get("frame_times")
     times_path = (
@@ -534,18 +580,14 @@ def load_movement(
     )
     if times_path is None or not times_path.exists():
         if phys_path is None or output_dir is None:
-            print(
-                "      movement: no frame_times and nothing to derive them "
-                "from, skipping"
-            )
-            return None
+            return skip("no frame_times and nothing to derive them from")
         from .shutter import derive_shutter_times
 
         times_path = derive_shutter_times(
             phys_path, output_dir, session, config, phys_type, csv_path
         )
         if times_path is None:
-            return None
+            return skip("the shutter TTL could not be used")
 
     frame_times = np.load(times_path)
     try:
@@ -553,17 +595,14 @@ def load_movement(
     except ValueError as e:
         # A malformed or ambiguous export is worth reporting, but not worth
         # losing a sorting job over an optional signal.
-        print(f"      movement: {e} -- skipping the veto")
-        return None
+        return skip(str(e))
 
     position = track.position
     if len(frame_times) != len(position):
-        print(
-            f"      movement: {len(frame_times)} frame times but "
-            f"{len(position)} tracked frames for {session}; skipping rather "
-            "than guessing the alignment"
+        return skip(
+            f"{len(frame_times)} frame times but {len(position)} tracked "
+            f"frames for {session}; not guessing the alignment"
         )
-        return None
 
     print(
         f"      movement: {track.name!r}, {len(position)} frames from "
@@ -581,11 +620,14 @@ def _smooth(x, step_s, smooth_s):
     return np.convolve(x, kernel, mode="same").astype(np.float32)
 
 
-def score_recording(rec_lfp, rec_emg, config, exclude_channels=(), speed=None):
+def score_recording(
+    rec_lfp, rec_emg, config, exclude_channels=(), speed=None, speed_info=None
+):
     """Compute the three signals and the state sequence for one recording.
 
     `speed` is an optional per-bin movement trace on the same time base; see
-    :func:`apply_movement_veto` for how it is used.
+    :func:`apply_movement_veto` for how it is used. `speed_info` carries why
+    there is none, when there is none, into the saved summary.
     """
     step_s = float(config["step_s"])
 
@@ -651,7 +693,7 @@ def score_recording(rec_lfp, rec_emg, config, exclude_channels=(), speed=None):
     codes = classify_states(broadband_s, theta_s, emg_s, thresholds)
     codes = enforce_min_duration(codes, step_s, config["min_state_duration_s"])
 
-    movement_info = {"applied": False}
+    movement_info = {"applied": False, **(speed_info or {})}
     if speed is not None:
         mv = config.get("movement") or {}
         codes, movement_info = apply_movement_veto(
@@ -717,17 +759,22 @@ def score_session(
     phys_type=None,
     stream_name=None,
     exclude_channels=(),
+    session=None,
 ):
     """Score one recording and write states/<session>_states.json + _metrics.npz.
 
     Uses the acquisition system's LF band when it has one, otherwise resamples
     the AP band down. Returns the result dict, with 'session' and 'duration_s'
     added.
+
+    `session` names the recording for every file this writes and for the
+    "{session}" templates in the movement config; left None it is inferred by
+    :func:`session_name`.
     """
     from .channels import drop_sync_channels
 
     phys_path = Path(phys_path)
-    session = phys_path.stem or phys_path.name
+    session = session or session_name(phys_path)
 
     # Resolved once, here, because it is passed on to load_movement and from
     # there to the shutter extraction. read_recording would detect it too, but
@@ -756,8 +803,10 @@ def score_session(
     # The bin grid is fixed by the spectrogram, so derive it the same way here
     # rather than duplicating the arithmetic inside score_recording.
     speed = None
+    movement_note = {"reason": "movement.enabled is false in the config"}
     movement_cfg = config.get("movement") or {}
     if movement_cfg.get("enabled"):
+        movement_note = {}
         n = rec_lfp.get_num_frames()
         fs = rec_lfp.get_sampling_frequency()
         nwin = round(config["window_s"] * fs)
@@ -772,9 +821,13 @@ def score_session(
             phys_path=phys_path,
             output_dir=output_dir,
             phys_type=phys_type,
+            info=movement_note,
         )
 
-    result = score_recording(rec_lfp, rec_emg, config, exclude_channels, speed=speed)
+    result = score_recording(
+        rec_lfp, rec_emg, config, exclude_channels,
+        speed=speed, speed_info=movement_note,
+    )
     result["session"] = session
     result["phys_path"] = str(phys_path.resolve())
     result["duration_s"] = float(
