@@ -99,7 +99,7 @@ def run_pipeline(
     print(f"tmp_dir    : {tmp_dir}")
 
     # ── 1/4 Brain-state scoring ──────────────────────────────────────────
-    # Deliberately before concatenation: the 10 s spectrogram window and the
+    # Deliberately before concatenation: the 5 s spectrogram window and the
     # EMG correlation window would otherwise straddle session junctions and
     # smear one recording's LFP into its neighbour's states.
     state_cfg = pipeline.get("state_scoring") or {}

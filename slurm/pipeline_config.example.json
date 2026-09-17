@@ -23,7 +23,14 @@
     "align_tolerance_um": 1.0,
     "sampling_frequency_max_diff": 0.0
   },
-  "preprocessing": {},
+  "preprocessing": {
+    "phase_shift": {},
+    "center": {"mode": "mean"},
+    "common_reference": {
+      "reference": "global",
+      "operator": "median"
+    }
+  },
   "state_scoring": {
     "enabled": true,
     "lfp_rate": 1250.0,
@@ -50,6 +57,7 @@
     "seed": 0
   },
   "sorting": {
-    "nblocks": 5
+    "nblocks": 5,
+    "do_CAR": false
   }
 }

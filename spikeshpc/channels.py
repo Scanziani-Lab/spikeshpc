@@ -46,13 +46,13 @@ def drop_sync_channels(rec):
 def align_channels_by_location(recs, tolerance_um: float = 1.0):
     """Reorder recordings so channel i is the same electrode site in all of them.
 
-    SpikeGLX and OpenEphys name and order channels completely differently, and
-    even two SpikeGLX runs will disagree if the imro table changed between
-    them -- channel 'AP100' is a slot, not a site. spikeinterface's
+    SpikeGLX and OpenEphys name and order channels differently, and even two
+    SpikeGLX runs will disagree if the imro table changed between them
+    -- channel 'AP100' is a slot, not a site. spikeinterface's
     concatenate_recordings only checks that the channel *id arrays* are equal,
-    so it will happily stack mismatched sites (or refuse outright across
-    systems). Matching on the probe geometry instead is what actually makes
-    channel i mean one thing for the whole concatenated recording.
+    so it will stack mismatched sites (or refuse outright across systems).
+    Matching on the probe geometry instead makes channel i mean the same thing
+    for the whole concatenated recording.
 
     Each recording is matched to the first one by nearest contact position,
     accepting pairs within `tolerance_um`. Sites missing from any recording
@@ -208,8 +208,7 @@ def resolve_bad_channels(bad_channels, info: dict):
 
     Entries may be channel ids as written in concat_info.json (preferred --
     stable across re-runs and readable) or plain ints, which are taken as
-    0-based row indices into concatenated.bin. Unrecognised entries raise
-    rather than being skipped: a typo'd channel name should not cost a GPU job.
+    0-based row indices into concatenated.bin.
 
     Returns (indices, ids) for the resolved channels, both in row order.
     """
