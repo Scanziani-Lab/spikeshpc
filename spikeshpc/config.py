@@ -99,6 +99,20 @@ DEFAULT_PIPELINE = {
         "n_sw_channels": 8,
         "n_theta_channels": 8,
         "n_emg_channels": 8,
+        # Choose the slow-wave and theta channels by searching for the most
+        # two-moded ones, the way buzcode does, instead of spreading them
+        # evenly along the probe. Label-free, so it cannot be tuned to states
+        # that have not been scored yet; on session8 its ranking correlated
+        # +0.87 with how well each channel really separated REM from NREM, and
+        # the chosen channels scored 0.943 against 0.927 for evenly spaced.
+        # Named sw_channels/theta_channels still win over the search.
+        "channel_search": {
+            "enabled": False,
+            # every Nth channel is scored; neighbouring contacts see the same
+            # field, so a finer search mostly rediscovers that
+            "candidate_step": 4,
+            "n_windows": 240,
+        },
         # Volume conduction correlates nearby sites regardless of muscle tone,
         # so EMG pairs closer than this are dropped.
         "emg_min_distance_um": 100.0,

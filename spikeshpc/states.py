@@ -110,6 +110,162 @@ def pick_channels(rec, n, explicit=None, exclude=()):
     return [ordered[i] for i in np.unique(idx)]
 
 
+def bimodality_score(values, seed=0) -> float:
+    """How two-moded a distribution is, as a two-component Gaussian mixture.
+
+    The distance between the component means in pooled standard deviations. A
+    signal can only carry a threshold if it has two modes to put one between,
+    so this is what buzcode's channel search is really maximising and what
+    :func:`bimodal_threshold` needs in order to return anything meaningful.
+
+    Two properties make the absolute number close to meaningless, so compare
+    channels and never a threshold.
+
+    The floor is not zero: fitting two components to one Gaussian still splits
+    it, scoring about 1.5. A score of 2 means "about as two-moded as noise".
+
+    And rare modes are penalised. On this rig REM is ~9% of sleep, so theta
+    scores near 1 over all of sleep and near 2.6 over balanced REM/NREM -- the
+    same signal, the same channels, a different denominator.
+    """
+    from sklearn.mixture import GaussianMixture
+
+    x = np.asarray(values, dtype=float)
+    x = x[np.isfinite(x)]
+    if len(x) < 50 or np.ptp(x) == 0:
+        return float("nan")
+    model = GaussianMixture(2, n_init=3, random_state=seed).fit(x[:, None])
+    means = model.means_.ravel()
+    sds = np.sqrt(model.covariances_.ravel())
+    pooled = np.sqrt((sds[0] ** 2 + sds[1] ** 2) / 2)
+    return float(abs(means[0] - means[1]) / max(pooled, 1e-12))
+
+
+def sampled_spectra(rec, channel_ids, config, n_windows=240, seed=0):
+    """Log-spaced power spectra on `n_windows` windows spread through `rec`.
+
+    The same frequency grid :func:`log_spectrogram` builds, so the signals
+    derived from it here are the ones scoring would derive later -- the channel
+    search must rank channels by the quantity that will actually be
+    thresholded, not by a convenient proxy for it.
+
+    Windows are evenly spaced rather than random, so a channel's score does not
+    depend on the seed, and so the sample spans sleep and waking in whatever
+    proportion the recording does.
+
+    Returns (freqs, spec) with spec shaped (n_channels, n_freqs, n_windows).
+    """
+    sub = rec.select_channels(list(channel_ids))
+    fs = sub.get_sampling_frequency()
+    nwin = round(float(config["window_s"]) * fs)
+    total = sub.get_num_frames()
+    if total < nwin * 2:
+        raise ValueError(
+            f"recording is {total / fs:.1f}s, too short to sample "
+            f"{config['window_s']}s windows from"
+        )
+
+    n_windows = int(min(n_windows, max(total // nwin, 2)))
+    starts = np.linspace(0, total - nwin - 1, n_windows).astype(np.int64)
+
+    freq_range, n_freqs = config["freq_range"], int(config["n_freqs"])
+    freqs = np.logspace(np.log10(freq_range[0]), np.log10(freq_range[1]), n_freqs)
+    fft_freqs = np.fft.rfftfreq(nwin, 1.0 / fs)
+    taper = np.hanning(nwin).astype(np.float32)
+
+    spec = np.empty((len(list(channel_ids)), n_freqs, n_windows), dtype=np.float32)
+    for w, start in enumerate(starts):
+        traces = sub.get_traces(
+            start_frame=int(start), end_frame=int(start + nwin), return_in_uV=True
+        )
+        power = np.abs(np.fft.rfft(np.asarray(traces, np.float32) * taper[:, None],
+                                   axis=0)) ** 2
+        for c in range(power.shape[1]):
+            spec[c, :, w] = np.interp(freqs, fft_freqs, power[:, c])
+    return freqs, spec
+
+
+def rank_channels_by_bimodality(rec, channel_ids, config, signal, n_windows=240,
+                                seed=0):
+    """Bimodality of `signal` on each of `channel_ids`, best first.
+
+    `signal` is "slow_wave" or "theta"; each channel is scored on exactly the
+    quantity scoring would threshold -- PC1 of its own z-scored log
+    spectrogram, or its own log theta ratio.
+
+    Returns a list of (channel_id, score), NaN scores last.
+    """
+    channel_ids = list(channel_ids)
+    freqs, spec = sampled_spectra(rec, channel_ids, config, n_windows, seed)
+
+    scores = []
+    for c, channel in enumerate(channel_ids):
+        if signal == "slow_wave":
+            values = broadband_slow_wave(spec[c], freqs, config["slow_wave_max_hz"])
+        elif signal == "theta":
+            ratio = theta_ratio(
+                spec[c], freqs, config["theta_band"], config["theta_ref_band"]
+            )
+            values = np.log10(np.maximum(ratio, np.finfo(np.float32).tiny))
+        else:
+            raise ValueError(f"signal must be 'slow_wave' or 'theta', got {signal!r}")
+        scores.append((channel, bimodality_score(values, seed)))
+
+    scores.sort(key=lambda s: -s[1] if np.isfinite(s[1]) else 1)
+    return scores
+
+
+def pick_bimodal_channels(rec, n, config, signal, exclude=(), candidate_step=4,
+                          n_windows=240, seed=0, verbose=True):
+    """The `n` channels whose `signal` is most two-moded, buzcode-style.
+
+    buzcode searches for the single most bimodal channel; this keeps the
+    pipeline's habit of averaging several, because averaging the best few beat
+    the single best one when measured against labels the signal had no part in
+    making (0.943 vs 0.941 AUC on session8). What it replaces is *which* few:
+    evenly spaced channels scored 0.927 on the same test, and the worst
+    channels on that probe scored 0.835, so the choice is worth making.
+
+    Candidates are every `candidate_step`-th channel rather than all of them.
+    The bimodality of neighbouring contacts is nearly identical -- they see
+    the same field -- so a finer search costs time to rediscover that.
+
+    The search is label-free by construction, which is the whole point: it
+    cannot be tuned to states that have not been scored yet. On session8 its
+    ranking correlated +0.87 with how well each channel actually separated REM
+    from NREM.
+    """
+    excluded = {str(c) for c in exclude}
+    available = [c for c in rec.channel_ids if str(c) not in excluded]
+    if not available:
+        raise ValueError("No channels left after excluding bad channels.")
+    if n >= len(available):
+        return available
+
+    candidates = available[:: max(int(candidate_step), 1)]
+    if len(candidates) < n:
+        candidates = available
+
+    ranked = rank_channels_by_bimodality(rec, candidates, config, signal,
+                                         n_windows, seed)
+    usable = [(c, s) for c, s in ranked if np.isfinite(s)]
+    if len(usable) < n:
+        if verbose:
+            print(f"      {signal}: only {len(usable)} channels scored; "
+                  "falling back to evenly spaced")
+        return pick_channels(rec, n, None, exclude)
+
+    chosen = [c for c, _ in usable[:n]]
+    if verbose:
+        best, worst = usable[0][1], usable[-1][1]
+        print(f"      {signal}: searched {len(candidates)} channels, "
+              f"bimodality {worst:.2f}-{best:.2f}, kept "
+              f"{[str(c) for c in chosen]}")
+    # back into probe order, so the mean trace is not depth-shuffled
+    order = {str(c): i for i, c in enumerate(rec.channel_ids)}
+    return sorted(chosen, key=lambda c: order[str(c)])
+
+
 def _mean_trace(rec, channel_ids, chunk_s=120.0):
     """Mean trace (uV) across `channel_ids`, accumulated chunk by chunk."""
     sub = rec.select_channels(channel_ids)
@@ -631,12 +787,26 @@ def score_recording(
     """
     step_s = float(config["step_s"])
 
-    sw_ids = pick_channels(
-        rec_lfp, config["n_sw_channels"], config["sw_channels"], exclude_channels
-    )
-    theta_ids = pick_channels(
-        rec_lfp, config["n_theta_channels"], config["theta_channels"], exclude_channels
-    )
+    # Named channels always win; the search only decides what is otherwise
+    # picked by spreading evenly along the probe. EMG is never searched: it is
+    # an inter-site correlation, so it wants channels far apart rather than
+    # channels that happen to be bimodal.
+    search = config.get("channel_search") or {}
+    searching = bool(search.get("enabled"))
+
+    def choose(signal, n_key, explicit_key):
+        explicit = config[explicit_key]
+        if explicit or not searching:
+            return pick_channels(rec_lfp, config[n_key], explicit, exclude_channels)
+        return pick_bimodal_channels(
+            rec_lfp, config[n_key], config, signal,
+            exclude=exclude_channels,
+            candidate_step=int(search.get("candidate_step", 4)),
+            n_windows=int(search.get("n_windows", 240)),
+        )
+
+    sw_ids = choose("slow_wave", "n_sw_channels", "sw_channels")
+    theta_ids = choose("theta", "n_theta_channels", "theta_channels")
     emg_ids = pick_channels(
         rec_emg, config["n_emg_channels"], config["emg_channels"], exclude_channels
     )
@@ -732,6 +902,15 @@ def score_recording(
             "slow_wave": [str(c) for c in sw_ids],
             "theta": [str(c) for c in theta_ids],
             "emg": [str(c) for c in emg_ids],
+            # how they were chosen, so a saved scoring can say whether a
+            # different channel set is worth re-running for
+            "method": {
+                "slow_wave": "named" if config["sw_channels"] else (
+                    "bimodal" if searching else "spread"),
+                "theta": "named" if config["theta_channels"] else (
+                    "bimodal" if searching else "spread"),
+                "emg": "named" if config["emg_channels"] else "spread",
+            },
         },
         "lfp_rate": float(fs),
         "emg_rate": float(rec_emg.get_sampling_frequency()),
