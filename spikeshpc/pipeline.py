@@ -139,6 +139,9 @@ def run_pipeline(
             sampling_frequency_max_diff=(
                 pipeline["concatenation"]["sampling_frequency_max_diff"]
             ),
+            # Only the manually-listed ones: auto-detection (below) runs on
+            # this preprocessed recording, so it cannot also gate it.
+            bad_channels=pipeline.get("bad_channels") or [],
         )
         print("[2/4] pre-processing complete.")
 

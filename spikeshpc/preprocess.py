@@ -5,11 +5,13 @@ from pathlib import Path
 
 import numpy as np
 import spikeinterface.full as si
+from spikeinterface.core.baserecording import BaseRecording, BaseRecordingSegment
 
 from .channels import (
     align_channels_by_location,
     check_gain_consistency,
     drop_sync_channels,
+    resolve_bad_channels,
 )
 from .config import CONCAT_BIN_NAME, CONCAT_INFO_NAME, PROBE_NAME
 from .io import (
@@ -19,6 +21,144 @@ from .io import (
     read_recording,
     write_channel_map,
 )
+
+
+class _InterleavedSegment(BaseRecordingSegment):
+    """Traces assembled from two parent segments, in an arbitrary order.
+
+    Exists because `si.aggregate_channels` cannot be trusted with this:
+    its own segment (`ChannelsAggregationRecordingSegment.get_traces`, as of
+    spikeinterface 0.104.8) groups a requested `channel_indices` by which
+    source recording each one came from and concatenates the groups in
+    first-encountered order -- silently discarding the caller's requested
+    order whenever that order interleaves the two sources, which a request
+    for the original channel order always does unless every bad channel
+    happens to be a trailing block. Confirmed directly: asking a
+    good-then-bad aggregate for its channels back in original order returns
+    each channel's neighbour's data, not its own.
+
+    This does the same per-source batching -- one get_traces call per
+    parent, not one per channel, so it costs nothing extra -- but scatters
+    each source's columns back into the positions actually requested.
+    """
+
+    def __init__(self, segments, source, source_index, times_kwargs):
+        BaseRecordingSegment.__init__(self, **times_kwargs)
+        self._segments = segments
+        self._source = np.asarray(source)
+        self._source_index = np.asarray(source_index)
+
+    def get_num_samples(self) -> int:
+        return self._segments[0].get_num_samples()
+
+    def get_traces(self, start_frame=None, end_frame=None, channel_indices=None):
+        n_total = len(self._source)
+        if channel_indices is None:
+            wanted = np.arange(n_total)
+        elif isinstance(channel_indices, slice):
+            wanted = np.arange(n_total)[channel_indices]
+        else:
+            wanted = np.asarray(channel_indices)
+
+        out = None
+        for which, segment in enumerate(self._segments):
+            mask = self._source[wanted] == which
+            if not np.any(mask):
+                continue
+            parent_indices = self._source_index[wanted[mask]]
+            traces = segment.get_traces(start_frame, end_frame, parent_indices)
+            if out is None:
+                out = np.empty((traces.shape[0], len(wanted)), dtype=traces.dtype)
+            out[:, mask] = traces
+        return out
+
+
+def _interleave_channels(processed, raw, channel_order):
+    """`processed` and `raw`'s channels, recombined in `channel_order`.
+
+    `channel_order` is a permutation of `processed.channel_ids +
+    raw.channel_ids` combined (every id from both, each exactly once) -- the
+    original, pre-split channel order, normally.
+
+    Metadata (probe geometry, gains, `is_filtered`, ...) is taken from
+    `si.aggregate_channels`, which gets that part right -- it is only the
+    *trace* reordering that cannot be trusted for an interleaved request (see
+    `_InterleavedSegment`). `copy_metadata` maps every property across by id,
+    so it does not matter that the aggregate's own channel order differs
+    from `channel_order`.
+    """
+    combined = si.aggregate_channels([processed, raw])
+    result = BaseRecording(
+        processed.get_sampling_frequency(), channel_order, processed.get_dtype()
+    )
+    combined.copy_metadata(result, only_main=False, ids=list(channel_order))
+
+    processed_ids = list(map(str, processed.channel_ids))
+    raw_ids = list(map(str, raw.channel_ids))
+    source = np.array(
+        [0 if str(c) in processed_ids else 1 for c in channel_order]
+    )
+    source_index = np.array(
+        [
+            processed_ids.index(str(c)) if s == 0 else raw_ids.index(str(c))
+            for c, s in zip(channel_order, source)
+        ]
+    )
+    for seg_p, seg_r in zip(
+        processed._recording_segments, raw._recording_segments
+    ):
+        result.add_recording_segment(
+            _InterleavedSegment(
+                (seg_p, seg_r), source, source_index, seg_p.get_times_kwargs()
+            )
+        )
+    return result
+
+
+def _apply_preprocessing(rec, preprocessing: dict, bad_ids: list):
+    """Run `preprocessing` on `rec`, without letting `bad_ids` take part in it.
+
+    Filters that pool information across channels are only as robust as the
+    minority of contamination they can tolerate: a global median (common
+    reference) shrugs off a handful of outliers, but a per-channel filter
+    like phase_shift has no such protection, since it never sees the other
+    channels at all. A channel pinned at a rail value can come back from a
+    fractional-sample-delay filter swinging far outside its original range at
+    every processing boundary -- measured on real data, a channel that was a
+    constant -30690 for an entire 976s recording came back from phase_shift
+    swinging from -30928 to +32277.
+
+    kilosort already excludes bad_channels from every one of its own
+    computations (it slices to `chanMap` before any filtering, CAR, or
+    whitening -- see BinaryFiltered.filter() in kilosort's own source), so
+    leaving them out here changes nothing about the sort. What it buys is a
+    written binary that does not carry manufactured nonsense on rows nothing
+    is *supposed* to read the wrong way, and it means a QC plot of a "bad"
+    channel still shows the real signal that made it bad, not an artifact of
+    correcting it as though it were good.
+
+    Their rows are put back afterward, raw and in their original position, so
+    the channel count/order/chanMap the rest of this function relies on are
+    unaffected -- only the SAMPLES on those specific rows differ from what an
+    unguarded `si.apply_preprocessing_pipeline` would have produced.
+    """
+    if not bad_ids:
+        return si.apply_preprocessing_pipeline(rec, preprocessing)
+
+    bad_set = set(bad_ids)
+    good_ids = [c for c in rec.channel_ids if str(c) not in bad_set]
+    print(f"    excluding {len(bad_ids)} bad channel(s) from preprocessing: {bad_ids}")
+
+    processed = si.apply_preprocessing_pipeline(rec.select_channels(good_ids), preprocessing)
+    raw = rec.select_channels(bad_ids)
+    if raw.get_dtype() != processed.get_dtype():
+        raw = si.astype(raw, processed.get_dtype())
+
+    result = _interleave_channels(processed, raw, list(rec.channel_ids))
+    # aggregate_channels (inside _interleave_channels) does not carry this
+    # annotation over from its inputs the way copy_metadata carries the rest.
+    result.annotate(is_filtered=processed.is_filtered())
+    return result
 
 
 def preprocess(
@@ -31,8 +171,15 @@ def preprocess(
     align_tolerance_um: float = 1.0,
     sampling_frequency_max_diff: float = 0.0,
     reuse_source: bool = True,
+    bad_channels=None,
 ) -> dict:
     """Load, sync-strip, align, concatenate and write the binary + metadata.
+
+    `bad_channels` are excluded from `preprocessing` itself (see
+    :func:`_apply_preprocessing`) -- they are resolved against this
+    recording's own channel ids, which is the same set `concat_info.json`
+    ends up recording, so entries may be given exactly as they will be passed
+    to the sorting stage.
 
     Returns the concat_info dict, which is also written to concat_info.json
     and is everything the sorting/post-processing stages need.
@@ -65,7 +212,10 @@ def preprocess(
 
     if preprocessing:
         print(f"    applying preprocessing: {list(preprocessing)}")
-        rec = si.apply_preprocessing_pipeline(rec, preprocessing)
+        _, bad_ids = resolve_bad_channels(
+            bad_channels, {"channel_ids": [str(c) for c in rec.channel_ids]}
+        )
+        rec = _apply_preprocessing(rec, preprocessing, bad_ids)
 
     try:
         probegroup = rec.get_probegroup()

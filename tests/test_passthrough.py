@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from spikeshpc import io as IO
-from spikeshpc.config import CONCAT_INFO_NAME
+from spikeshpc.config import CONCAT_BIN_NAME, CONCAT_INFO_NAME
 from spikeshpc.preprocess import preprocess
 
 FS = 30000.0
@@ -160,7 +160,7 @@ def test_preprocess_reuses_the_source_and_writes_no_copy(tmp_path):
     assert info["file_num_channels"] == NCH + 1     # what kilosort reads per sample
     assert info["num_channels"] == NCH              # what we actually sort
     assert info["channel_rows"] == list(range(NCH))
-    assert not (out / "concatenated.bin").exists(), "a copy was written anyway"
+    assert not (out / CONCAT_BIN_NAME).exists(), "a copy was written anyway"
 
 
 def test_reloaded_recording_matches_the_source(tmp_path):
@@ -218,7 +218,7 @@ def test_falls_back_to_writing_when_it_must(tmp_path, kwargs, reason):
         info = preprocess([src], out, **call)
 
     assert info["sorted_in_place"] is False, reason
-    assert (out / "concatenated.bin").exists()
+    assert (out / CONCAT_BIN_NAME).exists()
     assert info["channel_rows"] is None
     # and it still reloads correctly
     reloaded, _ = IO.load_concatenated(out)
