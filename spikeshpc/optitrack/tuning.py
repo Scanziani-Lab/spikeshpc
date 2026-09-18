@@ -244,7 +244,7 @@ def compute_hd_tuning_significance(
     summed_occupancy = np.bincount(bin_idx, weights=occupancy_time, minlength=n_bins)
 
     mean_interval = occupancy_time.mean()
-    min_shift = int(round(min_shift_s / mean_interval))
+    min_shift = round(min_shift_s / mean_interval)
     if 2 * min_shift >= n_intervals:
         raise ValueError(
             f"min_shift_s={min_shift_s} leaves no room to shift a recording of "

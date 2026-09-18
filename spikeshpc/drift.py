@@ -45,15 +45,15 @@ def _verdict(step_um, sig_interp, pitch):
     if step_um <= 2 * sig_interp:
         return (
             "marginal",
-            "Past sig_interp. Check that units are tracked across the junction "
-            "before trusting cross-session comparisons.",
+            ("Past sig_interp. Check that units are tracked across the junction "
+            "before trusting cross-session comparisons."),
         )
     return (
         "beyond correction",
-        f"More than 2x sig_interp ({sig_interp:.0f} um). Correcting this "
+        (f"More than 2x sig_interp ({sig_interp:.0f} um). Correcting this "
         "synthesises each channel from contacts several rows away, so the "
         "same neuron yields different templates either side of the junction. "
-        "Sort the sessions separately and match units post hoc instead.",
+        "Sort the sessions separately and match units post hoc instead."),
     )
 
 

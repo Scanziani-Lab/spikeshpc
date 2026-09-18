@@ -11,7 +11,6 @@ single source of truth instead of restating every path in the slurm script.
 import json
 import shlex
 import sys
-from pathlib import Path
 
 from .config import DEFAULT_PIPELINE, deep_merge
 
@@ -36,9 +35,7 @@ def _template_root(template: str) -> str | None:
 
 def _is_ancestor(parent: str, child: str) -> bool:
     parent = parent.rstrip("/\\")
-    return child == parent or child.startswith(parent + "/") or child.startswith(
-        parent + "\\"
-    )
+    return child == parent or child.startswith((parent + "/", parent + "\\"))
 
 
 def bind_paths(pipeline: dict) -> list[str]:

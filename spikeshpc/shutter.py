@@ -210,7 +210,7 @@ def derive_shutter_times(
     if optitrack_csv is not None and Path(optitrack_csv).exists():
         try:
             stats = cross_check_with_optitrack_csv(times, optitrack_csv)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"        cross-check failed: {e}")
             return None
         print(f"        CSV frames {stats['optitrack_total_frames']}, "
@@ -239,7 +239,7 @@ def derive_shutter_times(
 
             plt.close(fig)
             print(f"        sanity plot -> {png.name}")
-        except Exception as e:  # a missing plot must not fail a sorting job
+        except Exception as e:  # a missing plot must not fail a sorting job  # noqa: BLE001
             print(f"        (sanity plot skipped: {e})")
 
     print(f"      shutter: cached -> {cached.name}")

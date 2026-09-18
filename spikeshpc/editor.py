@@ -54,7 +54,7 @@ class StateEditor:
                  robust=(0.5, 99.5)):
         import matplotlib.pyplot as plt
         from matplotlib.gridspec import GridSpec
-        from matplotlib.offsetbox import AnchoredOffsetbox, HPacker, TextArea
+        from matplotlib.offsetbox import AnchoredOffsetbox, HPacker
 
         warn_if_noninteractive_backend()
         self.scoring = scoring
@@ -191,8 +191,8 @@ class StateEditor:
     def _title_part(self, key, text, color="black", weight="normal"):
         from matplotlib.offsetbox import TextArea
 
-        area = TextArea(text, textprops=dict(color=color, fontsize=11,
-                                             fontweight=weight))
+        area = TextArea(text, textprops={"color": color, "fontsize": 11,
+                                             "fontweight": weight})
         self._title_parts[key] = area
         return area
 

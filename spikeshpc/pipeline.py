@@ -9,10 +9,8 @@ import spikeinterface.full as si
 
 from .channels import detect_bad_channels_auto, resolve_bad_channels
 from .config import (
-    ANALYZER_NAME,
     BAD_CHANNELS_NAME,
     DEFAULT_PIPELINE,
-    STATES_DIRNAME,
     deep_merge,
 )
 from .drift import drift_at_junction

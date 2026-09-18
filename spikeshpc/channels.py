@@ -44,14 +44,14 @@ def drop_sync_channels(rec):
 
 
 def align_channels_by_location(recs, tolerance_um: float = 1.0):
-    """Reorder recordings so channel i is the same electrode site in all of them.
+    """Reorder recordings so channel [i] is the same electrode site in all of them.
 
     SpikeGLX and OpenEphys name and order channels differently, and even two
     SpikeGLX runs will disagree if the imro table changed between them
     -- channel 'AP100' is a slot, not a site. spikeinterface's
     concatenate_recordings only checks that the channel *id arrays* are equal,
     so it will stack mismatched sites (or refuse outright across systems).
-    Matching on the probe geometry instead makes channel i mean the same thing
+    Matching on the probe geometry instead makes channel [i] mean the same thing
     for the whole concatenated recording.
 
     Each recording is matched to the first one by nearest contact position,

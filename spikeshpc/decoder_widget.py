@@ -40,7 +40,7 @@ def break_at(x, y, breaks, wrap_threshold: float = 180.0):
     if len(y) < 2:
         return x, y
 
-    cuts = set(int(i) for i in breaks)
+    cuts = {int(i) for i in breaks}
     cuts.update((np.flatnonzero(np.abs(np.diff(y)) > wrap_threshold) + 1).tolist())
     if not cuts:
         return x, y

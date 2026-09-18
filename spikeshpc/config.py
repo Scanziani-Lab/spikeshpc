@@ -3,7 +3,7 @@
 import copy
 
 # ── Files written into output_dir ────────────────────────────────────────
-CONCAT_BIN_NAME = "concatenated.bin"
+CONCAT_BIN_NAME = "preprocessed.bin"
 CONCAT_INFO_NAME = "concat_info.json"
 CHANMAP_NAME = "chanMap.mat"
 PROBE_NAME = "probe.json"
@@ -29,7 +29,11 @@ DEFAULT_PIPELINE = {
         "skip_sorting": False,
         "skip_postprocessing": False,
     },
-    "job_kwargs": dict(n_jobs=16, chunk_duration="1s", progress_bar=True),
+    "job_kwargs": {
+        "n_jobs": 16,
+        "chunk_duration": "1s",
+        "progress_bar": True,
+    },
     # Optional spikeinterface steps applied *before* the concatenated binary
     # is written. Empty by default: kilosort4 does its own highpass filtering,
     # CAR and whitening, so filtering twice is usually not what you want.
@@ -133,9 +137,9 @@ DEFAULT_PIPELINE = {
             # so a session can be scored without a notebook step first.
             "frame_times": None,
             "adc_stream_name": None,  # null = auto-detect the ADC stream
-            "adc_channel": None,      # null = auto-detect the channel with a TTL
+            "adc_channel": None,  # null = auto-detect the channel with a TTL
             "save_sanity_plot": True,
-            "rigid_body": None,      # null = the take's only rigid body
+            "rigid_body": None,  # null = the take's only rigid body
             # Motive repeats the last known position when it loses the body,
             # which reads as perfect stillness and then as a burst when it
             # reacquires. Those frames are dropped; a displacement spanning
@@ -144,7 +148,7 @@ DEFAULT_PIPELINE = {
             "max_gap_s": 0.5,
             "interpolate_gaps_s": 2.0,
             "veto": ["NREM", "REM"],
-            "threshold": None,       # null = bimodal split on log10 speed
+            "threshold": None,  # null = bimodal split on log10 speed
         },
     },
     # Channels to exclude from sorting -- dead/broken sites, or anything out of

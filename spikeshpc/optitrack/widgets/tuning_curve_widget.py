@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import numpy as np
-
 import matplotlib.pyplot as plt
+import numpy as np
 
 from ._backend import warn_if_noninteractive_backend
 

@@ -49,23 +49,23 @@ from .optitrack.tuning import (
 from .states import frames_in_states
 
 __all__ = [
-    "DecoderData",
     "Decoded",
-    "EncodingModel",
+    "DecoderData",
     "DecoderRun",
+    "EncodingModel",
     "ShuffleTest",
-    "prepare_decoder_data",
-    "state_interval_mask",
-    "split_train_test",
-    "fit_encoding_model",
-    "ring_transition",
     "decode",
-    "shuffle_test",
-    "run_decoder",
-    "plot_encoding_model",
+    "fit_encoding_model",
     "plot_decoded",
+    "plot_encoding_model",
     "plot_error",
     "plot_shuffle",
+    "prepare_decoder_data",
+    "ring_transition",
+    "run_decoder",
+    "shuffle_test",
+    "split_train_test",
+    "state_interval_mask",
 ]
 
 
@@ -170,7 +170,7 @@ def _frames_per_bin(bin_s: float, frame_s: float, tolerance: float = 0.01) -> in
     than a frame gets one, since a bin has to hold something.
     """
     ratio = bin_s / frame_s
-    nearest = int(round(ratio))
+    nearest = round(ratio)
     if nearest >= 1 and abs(ratio - nearest) <= tolerance * nearest:
         return nearest
     return max(1, int(ratio))
@@ -313,7 +313,7 @@ def split_train_test(
                 stacklevel=2,
             )
         order = np.random.default_rng(seed).permutation(n_blocks)
-        n_test = max(1, int(round(test_fraction * n_blocks)))
+        n_test = max(1, round(test_fraction * n_blocks))
         is_test = np.isin(block, order[:n_test])
     else:
         raise ValueError(f"mode must be 'blocks' or 'contiguous', got {mode!r}")
@@ -814,7 +814,7 @@ def shuffle_test(
     null = np.empty(n_shuffles)
     for i in range(n_shuffles):
         if kind == "shift":
-            min_shift = max(1, int(round(min_shift_s / data.bin_s)))
+            min_shift = max(1, round(min_shift_s / data.bin_s))
             if 2 * min_shift >= data.n_bins:
                 raise ValueError(
                     f"min_shift_s={min_shift_s} leaves no room to shift "
@@ -891,8 +891,8 @@ class DecoderRun:
     def summary(self) -> str:
         lines = [
             f"{self.model}",
-            f"  train {self.data.duration_s[self.train_mask].sum():.0f}s / "
-            f"test {self.data.duration_s[self.test_mask].sum():.0f}s",
+            (f"  train {self.data.duration_s[self.train_mask].sum():.0f}s / "
+            f"test {self.data.duration_s[self.test_mask].sum():.0f}s"),
             f"  test: {self.test}",
         ]
         for key in (
@@ -1105,11 +1105,11 @@ def run_decoder(
             f"{1e3 * data.bin_s:.0f} ms bin"
         )
 
-    shared = dict(
-        movement_var_deg2=movement_var_deg2,
-        acausal=acausal,
-        tolerance_deg=tolerance_deg,
-    )
+    shared = {
+        "movement_var_deg2": movement_var_deg2,
+        "acausal": acausal,
+        "tolerance_deg": tolerance_deg,
+    }
     test = decode(
         data,
         model,

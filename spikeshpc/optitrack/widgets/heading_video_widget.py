@@ -44,7 +44,7 @@ class HeadingVideoWidget:
         warn_if_noninteractive_backend()
         self.cap = cv2.VideoCapture(str(video_path))
         if not self.cap.isOpened():
-            raise IOError(f"Could not open video: {video_path}")
+            raise OSError(f"Could not open video: {video_path}")
         self.n_video_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         if take is not None and self.n_video_frames != len(take.frame_numbers):

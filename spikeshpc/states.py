@@ -720,7 +720,6 @@ def load_movement(
         print(f"      movement: {reason}, skipping")
         if info is not None:
             info["reason"] = reason
-        return None
 
     csv_template = config.get("optitrack_csv")
     if not csv_template:

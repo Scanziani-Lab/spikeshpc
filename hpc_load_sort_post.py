@@ -13,8 +13,8 @@ from pathlib import Path
 # own directory is what makes `import spikeshpc` resolve without an install.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from spikeshpc.cli import main  # noqa: E402
-from spikeshpc.pipeline import run_pipeline  # noqa: E402,F401  (re-export)
+from spikeshpc.cli import main
+from spikeshpc.pipeline import run_pipeline  # noqa: F401  (re-export)
 
 if __name__ == "__main__":
     main()

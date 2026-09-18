@@ -31,7 +31,7 @@ import numpy as np
 
 from .tuning import HDTuningStats
 
-__all__ = ["HDTuning", "save_hd_tuning", "load_hd_tuning"]
+__all__ = ["HDTuning", "load_hd_tuning", "save_hd_tuning"]
 
 # the per-unit statistic columns, in the order they are stored
 _STAT_FIELDS = (
@@ -163,7 +163,7 @@ def save_hd_tuning(
         "session": session,
         "n_units": len(unit_ids),
         "n_tuned": int(columns["significant"].sum()),
-        "n_frames": int(len(heading_deg)),
+        "n_frames": len(heading_deg),
         "parameters": parameters or {},
         "units": {
             str(u): {k: _plain(getattr(stats[u], k)) for k in _STAT_FIELDS}

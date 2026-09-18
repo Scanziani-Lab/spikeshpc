@@ -101,7 +101,7 @@ def attach_spike_locations(analyzer, located: np.ndarray):
     extension = get_extension_class(SPIKE_LOCATIONS)(analyzer)
     extension.set_params(save=True, method="kilosort_spike_positions")
     extension.data[SPIKE_LOCATIONS] = located
-    extension.run_info = dict(run_completed=True, runtime_s=0.0)
+    extension.run_info = {"run_completed": True, "runtime_s": 0.0}
     analyzer.extensions[SPIKE_LOCATIONS] = extension
     extension.save()
     return extension
