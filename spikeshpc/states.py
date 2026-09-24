@@ -185,8 +185,14 @@ def sampled_spectra(rec, channel_ids, config, n_windows=240, seed=0):
     return freqs, spec
 
 
-def rank_channels_by_bimodality(rec, channel_ids, config, signal, n_windows=240,
-                                seed=0):
+def rank_channels_by_bimodality(
+        rec,
+        channel_ids,
+        config,
+        signal,
+        n_windows=240,
+        seed=0
+):
     """Bimodality of `signal` on each of `channel_ids`, best first.
 
     `signal` is "slow_wave" or "theta"; each channel is scored on exactly the
@@ -215,8 +221,17 @@ def rank_channels_by_bimodality(rec, channel_ids, config, signal, n_windows=240,
     return scores
 
 
-def pick_bimodal_channels(rec, n, config, signal, exclude=(), candidate_step=4,
-                          n_windows=240, seed=0, verbose=True):
+def pick_bimodal_channels(
+        rec,
+        n,
+        config,
+        signal,
+        exclude=(),
+        candidate_step=4,
+        n_windows=240,
+        seed=0,
+        verbose=True
+):
     """The `n` channels whose `signal` is most two-moded, buzcode-style.
 
     buzcode searches for the single most bimodal channel; this keeps the
@@ -693,8 +708,14 @@ def apply_movement_veto(
 
 
 def load_movement(
-    config, session, times, step_s, phys_path=None, output_dir=None, phys_type=None,
-    info=None,
+        config,
+        session,
+        times,
+        step_s,
+        phys_path=None,
+        output_dir=None,
+        phys_type=None,
+        info=None,
 ):
     """Per-bin speed for `session`, or None when tracking is unavailable.
 
@@ -776,7 +797,12 @@ def _smooth(x, step_s, smooth_s):
 
 
 def score_recording(
-    rec_lfp, rec_emg, config, exclude_channels=(), speed=None, speed_info=None
+        rec_lfp,
+        rec_emg,
+        config,
+        exclude_channels=(),
+        speed=None,
+        speed_info=None
 ):
     """Compute the three signals and the state sequence for one recording.
 
@@ -1192,7 +1218,10 @@ def frames_in_states(frame_times, intervals, states=("WAKE",)):
 
 
 def slice_recording_to_states(
-    recording, intervals, states=("WAKE",), min_duration_s=0.0
+        recording,
+        intervals,
+        states=("WAKE",),
+        min_duration_s=0.0
 ):
     """The recording restricted to `states`, as one concatenated segment.
 

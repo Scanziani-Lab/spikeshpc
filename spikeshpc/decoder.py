@@ -1,10 +1,10 @@
 """Bayesian decoding of head direction from head-direction-tuned units.
 
-The method is the one in Moritz's ``run_decoder.py``: a sorted-spikes point
-process decoder on a ring state space. Per-unit tuning curves are the encoding
-model, the likelihood of a time bin is Poisson given those curves, and a
-Gaussian random walk on the ring supplies the dynamics that carry belief from
-one bin to the next. The readout is the MAP of the posterior.
+Taken from Moritz's ``run_decoder.py``: a sorted-spikes point process decoder
+on a ring state space. Per-unit tuning curves are the encoding model, the
+likelihood of a time bin is Poisson given those curves, and a Gaussian random
+walk on the ring supplies the dynamics that carry belief from one bin to the next.
+The readout is the MAP of the posterior.
 
 It is reimplemented here rather than delegated to
 ``replay_trajectory_classification``, which supplied the decoder there. RTC is
