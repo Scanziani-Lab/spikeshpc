@@ -44,6 +44,8 @@ _STAT_FIELDS = (
     "mvl_threshold",
     "significant",
     "too_quiet",
+    "weakly_tuned",  # absent from files saved before the MVL cut existed
+    "mvl_cutoff",
 )
 
 

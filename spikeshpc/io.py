@@ -379,12 +379,70 @@ def check_source_binary(rec, path: Path, dtype="int16", n_check_samples=30000):
     return int(n_file), rows
 
 
+def _stream_timestamps(phys_path, phys_type: str, stream_name: str):
+    """Full per-sample timestamps.npy for one stream's source binary.
+
+    On the acquisition clock, as Open Ephys saved it -- not the uniform grid
+    `sampling_frequency` alone would imply. None when `phys_type` isn't
+    openephysbinary (SpikeGLX carries no such sidecar) or the source binary
+    or its timestamps.npy cannot be found. Memory-mapped: see
+    :func:`_first_timestamp` -- these run to gigabytes for one session.
+    """
+    if phys_type != "openephysbinary":
+        return None
+    binary = locate_source_binary(Path(phys_path), phys_type, stream_name)
+    if binary is None:
+        return None
+    sidecar = binary.parent / "timestamps.npy"
+    if not sidecar.exists():
+        return None
+    return np.load(sidecar, mmap_mode="r")
+
+
+def _concatenated_sync_times(info: dict):
+    """The real, saved acquisition-clock times for load_concatenated's binary.
+
+    Open Ephys writes one timestamp per sample to timestamps.npy, on the
+    hardware-synchronized clock. Deriving times from `sampling_frequency`
+    instead assumes every sample is exactly 1/fs after the last -- which
+    quietly closes up the real gap between concatenated sessions and any
+    within-session clock jitter.
+
+    Returns None (the caller then falls back to that estimate) when the
+    source isn't Open Ephys, a session's sidecar is missing, or a session's
+    saved timestamp count disagrees with what preprocess() recorded for it
+    -- concatenating past a mismatch would silently mis-time every later
+    sample rather than just this one session's worth.
+    """
+    if info["phys_type"] != "openephysbinary":
+        return None
+    paths = info.get("phys_paths") or []
+    num_samples = info["num_samples"]
+    if len(paths) != len(num_samples):
+        return None
+
+    per_session = []
+    for path, n in zip(paths, num_samples):
+        times = _stream_timestamps(path, info["phys_type"], info["stream_name"])
+        if times is None or len(times) != n:
+            return None
+        per_session.append(times)
+
+    return per_session[0] if len(per_session) == 1 else np.concatenate(per_session)
+
+
 def load_concatenated(output_dir: Path):
     """Re-open the binary written by preprocess(), probe and gains restored.
 
     This is what makes --skip_preprocessing work: the sorting and
     post-processing stages read the recording back from disk rather than
     re-deriving it from the raw session folders.
+
+    `rec.get_times()` comes from each session's own timestamps.npy where that
+    is still available (see :func:`_concatenated_sync_times`), falling back
+    to spikeinterface's own sample-rate estimate -- silently, with a warning
+    -- when a raw session folder has moved or been cleaned up since
+    preprocessing ran.
     """
     import probeinterface
 
@@ -439,6 +497,24 @@ def load_concatenated(output_dir: Path):
     rec = rec.set_probegroup(
         probeinterface.read_probeinterface(output_dir / PROBE_NAME)
     )
+
+    # Must come after set_probegroup: with matching channel ids it clones the
+    # recording via to_dict()/from_dict(), which drops any time_vector set
+    # in-memory before the clone rather than carrying it over.
+    sync_times = _concatenated_sync_times(info)
+    if sync_times is not None:
+        rec.set_times(np.asarray(sync_times), segment_index=0, with_warning=False)
+    elif info["phys_type"] == "openephysbinary":
+        warnings.warn(
+            f"Could not recover synchronized timestamps for {output_dir}; "
+            "falling back to times estimated from sampling_frequency, which "
+            "will not reflect gaps between concatenated sessions or clock "
+            "jitter within one. This usually means a raw session folder in "
+            "concat_info.json's phys_paths has moved or been removed since "
+            "preprocessing ran.",
+            stacklevel=2,
+        )
+
     return rec, info
 
 

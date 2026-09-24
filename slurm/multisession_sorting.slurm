@@ -34,7 +34,7 @@ REPO_DIR=/home/remote/davcollins/spikeshpc
 # Single combined image (spikeinterface + kilosort4 + CUDA).
 SI_SIF=/scratch/user/davcollins/containers/si_kilosort4.sif
 
-# See slurm/pipeline_config.example.json.
+# See pipeline_config.example.json at the repo root.
 PIPELINE_CONFIG=/scratch/user/davcollins/runs/session6a.json
 
 # Apptainer's own cache/tmp default to ~/.apptainer, which is on the home

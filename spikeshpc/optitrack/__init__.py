@@ -39,12 +39,15 @@ from .sync import (
 )
 from .tuning import (
     HDTuningStats,
+    apply_mvl_cutoff,
     compute_all_units_tuning_curves,
     compute_frame_firing_rates,
     compute_hd_tuning_curve,
     compute_hd_tuning_significance,
     compute_mean_vector_length,
+    find_bimodal_threshold,
     get_unit_depths,
+    plot_hd_tuning_population,
 )
 
 __version__ = "0.1.0"
@@ -58,6 +61,7 @@ __all__ = [
     "PositionTrack",
     "RigidBodyTrack",
     "align_frames_to_shutter_events",
+    "apply_mvl_cutoff",
     "calibrate_head_frame",
     "compute_all_units_tuning_curves",
     "compute_frame_firing_rates",
@@ -70,9 +74,11 @@ __all__ = [
     "cross_check_with_optitrack_csv",
     "describe_analog_channels",
     "extract_shutter_close_times",
+    "find_bimodal_threshold",
     "get_unit_depths",
     "load_hd_tuning",
     "load_optitrack_csv",
+    "plot_hd_tuning_population",
     "plot_shutter_close_sanity_check",
     "rail_fraction",
     "read_rigid_body_track",

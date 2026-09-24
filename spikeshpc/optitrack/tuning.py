@@ -4,11 +4,13 @@ Firing rate is computed per inter-frame interval (the gaps between
 consecutive shutter-closure timestamps), then binned by the heading at the
 start of each interval into a circular, occupancy-normalized tuning curve.
 Whether a curve is more directional than chance is decided by a shuffle test
-(:func:`compute_hd_tuning_significance`).
+(:func:`compute_hd_tuning_significance`), optionally followed by a population-
+level cut on how directional (:func:`apply_mvl_cutoff`).
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -139,6 +141,11 @@ class HDTuningStats:
     below by ``1 / (n_shuffles + 1)``. ``mvl_threshold`` is the corresponding
     critical value: the ``100 * (1 - alpha)``th percentile of this unit's own
     null distribution.
+
+    ``weakly_tuned`` marks a unit that passed the shuffle test and the rate
+    floor but fell below the population MVL cut, ``mvl_cutoff`` (NaN when no
+    cut was applied); see :func:`apply_mvl_cutoff`. Such a unit is not
+    ``significant``.
     """
 
     mean_vector_length: float
@@ -150,6 +157,8 @@ class HDTuningStats:
     mvl_threshold: float
     significant: bool
     too_quiet: bool = False
+    weakly_tuned: bool = False
+    mvl_cutoff: float = float("nan")
     null_band: np.ndarray | None = None  # (n_percentiles, n_bins), Hz
     null_bin_centers_deg: np.ndarray | None = None
     null_percentiles: tuple = ()
@@ -161,8 +170,84 @@ class HDTuningStats:
             f"peak {self.peak_rate_hz:.1f} Hz, mean {self.mean_rate_hz:.1f} Hz, "
             f"p={self.p_value:.4f}"
             f"{' (too quiet)' if self.too_quiet else ''}"
+            f"{' (weakly tuned)' if self.weakly_tuned else ''}"
             f"{' *' if self.significant else ''}"
         )
+
+
+def find_bimodal_threshold(values) -> float:
+    """The cut that best splits ``values`` into a low group and a high group.
+
+    Otsu's method, done exactly: every split between consecutive sorted values
+    is tried and the one maximizing the between-group variance wins, which is
+    the same as the best two-cluster k-means. The threshold is the midpoint of
+    the gap it picks. No histogram binning, so it behaves with a few dozen
+    values, which is what a probe's worth of tuned units amounts to.
+
+    It always returns a split, bimodal or not -- look at the distribution
+    before trusting it on a new dataset.
+    """
+    v = np.sort(np.asarray(values, dtype=float))
+    v = v[np.isfinite(v)]
+    if len(v) < 2 or v[0] == v[-1]:
+        raise ValueError(f"need at least two distinct finite values, got {len(v)}")
+
+    n = len(v)
+    k = np.arange(1, n)  # size of the low group
+    csum = np.cumsum(v)
+    mean_low = csum[:-1] / k
+    mean_high = (csum[-1] - csum[:-1]) / (n - k)
+    between = (k / n) * (1 - k / n) * (mean_low - mean_high) ** 2
+    between[v[1:] == v[:-1]] = -np.inf  # a tie cannot be split
+    best = int(np.argmax(between))
+    return float((v[best] + v[best + 1]) / 2)
+
+
+def apply_mvl_cutoff(stats: dict, min_mvl) -> float:
+    """Drop significant units whose mean vector length is below a cut. In place.
+
+    ``min_mvl`` is None (no cut), a float (the cut itself), or ``"bimodal"``
+    (the cut :func:`find_bimodal_threshold` picks from the MVLs of the units
+    that passed the shuffle test and the rate floor). Units below the cut are
+    flagged ``weakly_tuned`` and lose ``significant``; everything else is left
+    as it was. Returns the cut used, NaN for none.
+
+    The shuffle test only asks whether a curve beats chance, and with enough
+    spikes a barely-directional curve does. Among tuned units the MVLs tend to
+    split into a weak group just clearing the shuffle and a strong group of
+    clear head-direction cells; this keeps the second.
+
+    ``"bimodal"`` is population-level, so the cut depends on which units are in
+    ``stats``. It can be re-run on stats that were already cut (e.g. a loaded
+    ``HDTuning.stats``) to try a different ``min_mvl`` without redoing the
+    shuffles: the candidates are the units that were significant *before* any
+    earlier cut, and ``None`` restores them.
+    """
+    candidates = [s for s in stats.values() if s.significant or s.weakly_tuned]
+
+    if min_mvl is None:
+        cutoff = float("nan")
+    elif isinstance(min_mvl, str):
+        if min_mvl != "bimodal":
+            raise ValueError(f"min_mvl must be None, 'bimodal' or a float, not {min_mvl!r}")
+        mvls = [s.mean_vector_length for s in candidates]
+        if len(set(mvls)) < 2:
+            warnings.warn(
+                f"min_mvl='bimodal' needs at least two tuned units to split, got "
+                f"{len(candidates)}; no MVL cut applied."
+            )
+            cutoff = float("nan")
+        else:
+            cutoff = find_bimodal_threshold(mvls)
+    else:
+        cutoff = float(min_mvl)
+
+    for s in stats.values():
+        s.mvl_cutoff = cutoff
+    for s in candidates:
+        s.weakly_tuned = bool(s.mean_vector_length < cutoff)  # False for a NaN cutoff
+        s.significant = not s.weakly_tuned
+    return cutoff
 
 
 def compute_hd_tuning_significance(
@@ -179,6 +264,7 @@ def compute_hd_tuning_significance(
     interval_mask=None,
     min_peak_rate_hz: float = 0.0,
     null_percentiles=(2.5, 50.0, 97.5),
+    min_mvl=None,
 ) -> dict:
     """Test each unit's tuning curve against a shifted-spike-train null.
 
@@ -211,6 +297,13 @@ def compute_hd_tuning_significance(
     nearly no information into a decoder's likelihood. Default 0.0 keeps every
     unit the test passes; 1 Hz is a reasonable floor for decoding.
 
+    ``min_mvl`` then cuts, among the units still significant, the ones whose
+    mean vector length is low: None (default) for no cut, a float to use as
+    the cut, or ``"bimodal"`` to pick it from the tuned units' MVL
+    distribution. They are flagged ``weakly_tuned``; the cut used is on every
+    unit's ``mvl_cutoff``. See :func:`apply_mvl_cutoff`, which can also re-cut
+    saved stats without recomputing them.
+
     ``null_percentiles`` keeps the shuffled *curves* as well as their summary
     statistic, as a per-bin envelope on ``HDTuningStats.null_band`` -- what a
     chance curve looks like for this unit's own spike count and the animal's
@@ -228,6 +321,8 @@ def compute_hd_tuning_significance(
             f"heading_deg ({len(heading_deg)}) and frame_times ({len(frame_times)}) "
             "must be the same length"
         )
+    if isinstance(min_mvl, str) and min_mvl != "bimodal":  # before the slow part
+        raise ValueError(f"min_mvl must be None, 'bimodal' or a float, not {min_mvl!r}")
 
     sorting = analyzer.sorting
     if unit_ids is None:
@@ -313,6 +408,8 @@ def compute_hd_tuning_significance(
             null_bin_centers_deg=bin_centers if band is not None else None,
             null_percentiles=tuple(null_percentiles) if band is not None else (),
         )
+    if min_mvl is not None:
+        apply_mvl_cutoff(stats, min_mvl)
     return stats
 
 
@@ -380,3 +477,91 @@ def compute_all_units_tuning_curves(
             smooth_sigma_deg=smooth_sigma_deg,
         )
     return curves
+
+
+def plot_hd_tuning_population(
+    hd_tuning,
+    significant_only: bool = True,
+    cmap="hsv",
+    n_hist_bins: int = 36,
+    figsize=(10.0, 4.5),
+):
+    """Where the population's tuning peaks: a histogram and every curve overlaid.
+
+    ``hd_tuning`` is an :class:`optitrack.store.HDTuning` (from
+    ``load_hd_tuning``). ``significant_only`` restricts to its ``tuned_ids``.
+
+    Left: how many units peak in each of ``n_hist_bins`` heading bins, where a
+    unit's peak is the argmax of its saved curve -- the direction of maximal
+    firing, not the MVL's preferred direction, which a skewed curve pulls off
+    the peak. Each unit is its own block in the stack, in its own color.
+    Right: every curve on a polar axis, each divided by its own peak so all
+    of them reach 1.
+
+    Colors are ``cmap`` sampled evenly across the units in order of peak
+    direction, so each is distinct and the same unit has the same color in both
+    panels. ``cmap`` is anything ``matplotlib.colormaps`` takes; the default
+    ``"hsv"`` is cyclic, like heading. Units that never fire have no peak and
+    are left out.
+
+    Returns ``(fig, (ax_hist, ax_polar))``.
+    """
+    import matplotlib
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
+
+    unit_ids = hd_tuning.tuned_ids if significant_only else hd_tuning.unit_ids
+    bin_centers = np.asarray(hd_tuning.bin_centers_deg, dtype=float)
+    curves = np.array([hd_tuning.curve(u)[1] for u in unit_ids], dtype=float)
+    if curves.size:
+        firing = curves.max(axis=1) > 0
+        unit_ids, curves = np.asarray(unit_ids)[firing], curves[firing]
+    if len(unit_ids) == 0:
+        raise ValueError(
+            "no units to plot" + (" -- none are significantly tuned" if significant_only else "")
+        )
+
+    peak_deg = bin_centers[np.argmax(curves, axis=1)]
+    order = np.argsort(peak_deg, kind="stable")
+    unit_ids, curves, peak_deg = unit_ids[order], curves[order], peak_deg[order]
+    normalized = curves / curves.max(axis=1, keepdims=True)
+    n = len(unit_ids)
+    # bin centers, not 0..1 inclusive: a cyclic map's two ends are one color
+    colors = matplotlib.colormaps.get_cmap(cmap)((np.arange(n) + 0.5) / n)
+
+    fig = plt.figure(figsize=figsize)
+    ax_hist = fig.add_subplot(1, 2, 1)
+    ax_polar = fig.add_subplot(1, 2, 2, projection="polar")
+
+    edges = np.linspace(0.0, 360.0, n_hist_bins + 1)
+    hist_idx = np.clip(np.digitize(peak_deg, edges) - 1, 0, n_hist_bins - 1)
+    stack = np.zeros(n_hist_bins)
+    for i, color in zip(hist_idx, colors):
+        ax_hist.bar(
+            edges[i], 1, width=edges[1] - edges[0], bottom=stack[i], align="edge",
+            color=color, edgecolor="white", linewidth=0.5,
+        )
+        stack[i] += 1
+    ax_hist.set_xlim(0, 360)
+    ax_hist.set_xticks(np.arange(0, 361, 90))
+    ax_hist.yaxis.set_major_locator(MaxNLocator(integer=True))
+    ax_hist.set_xlabel("Heading of peak firing (degrees)")
+    ax_hist.set_ylabel("Units")
+    ax_hist.spines[["top", "right"]].set_visible(False)
+
+    theta = np.deg2rad(np.r_[bin_centers, bin_centers[0]])  # closed loop
+    for rate, color, unit in zip(normalized, colors, unit_ids):
+        ax_polar.plot(theta, np.r_[rate, rate[0]], color=color, lw=1.3, label=str(unit))
+    spokes = np.arange(0, 360, 30)
+    ax_polar.set_thetagrids(spokes, labels=[f"{a}" if a % 90 == 0 else "" for a in spokes])
+    ax_polar.set_ylim(0, 1.0)
+    ax_polar.set_yticks([0.5, 1.0])
+    ax_polar.set_yticklabels(["", "1"], fontsize=8, color="gray")
+    ax_polar.set_rlabel_position(45)
+    ax_polar.grid(color="0.85", lw=0.6)
+    ax_polar.set_title("Normalized firing rate", fontsize=10, pad=14)
+
+    which = "significantly tuned units" if significant_only else "units"
+    fig.suptitle(f"{hd_tuning.session}: {n} {which}", fontsize=11)
+    fig.tight_layout()
+    return fig, (ax_hist, ax_polar)

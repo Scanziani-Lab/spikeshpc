@@ -206,7 +206,7 @@ def test_the_example_config_is_valid_and_complete(tmp_path, captured):
     import pathlib
 
     example = (pathlib.Path(__file__).resolve().parent.parent
-               / "slurm" / "pipeline_config.example.json")
+               / "pipeline_config.example.json")
     cfg = json.loads(example.read_text())
     assert set(cfg) <= set(DEFAULT_PIPELINE), set(cfg) - set(DEFAULT_PIPELINE)
 

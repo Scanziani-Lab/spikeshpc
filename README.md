@@ -19,27 +19,62 @@ can be re-run on its own against an existing `--output_dir`.
 
 ```
 pyproject.toml
-hpc_load_sort_post.py     entry point that needs no install
-spikeshpc/                the package
-slurm/                    multisession_sorting.slurm, pipeline_config.example.json
-containers/               si_kilosort4.def (apptainer image definition)
+pipeline_config.example.json   example run config -- works locally and on the cluster
+hpc_load_sort_post.py          entry point that needs no install
+spikeshpc/                     the package
+slurm/                         multisession_sorting.slurm (cluster job wrapper)
+containers/                    si_kilosort4.def (apptainer image definition)
 tests/
 ```
 
-## Install
+## The run config
+
+One JSON file per run. The same file can drive a local run or a slurm job.
+Start from [`pipeline_config.example.json`](pipeline_config.example.json):
+
+- **`run`** — *which* data: `phys_paths` (one or more recording directories or raw
+  binaries; several are concatenated), `output_dir`, `tmp_dir`, the four
+  `skip_*` stage flags, and `bind_paths` (cluster only, see below). `phys_type` and
+  `stream_name` may also go here; both are auto-detected when left out.
+- **everything else** — *how* to process it: `job_kwargs`, `preprocessing`,
+  `state_scoring`, `bad_channels`, `detect_bad_channels`, `sorting` (kilosort4
+  settings), and so on. These are deep-merged onto `spikeshpc.config.DEFAULT_PIPELINE`,
+  so a config only needs the keys it changes. A misspelled top-level key is an error
+  rather than silently ignored.
+
+Paths are written for whichever machine will run the job, so in practice you keep one
+config per run per machine. Copy the example rather than editing it —
+`pipeline_config.json` at the repo root is git-ignored for exactly this, or keep run
+configs next to the data. Before a first run, check at least:
+
+- `run.phys_paths`, `run.output_dir`, `run.tmp_dir`
+- `job_kwargs.n_jobs` — no more than the cores you have (on slurm, `--cpus-per-task`)
+- `state_scoring.movement` — the example enables the OptiTrack movement veto with a
+  cluster path; point `optitrack_csv` at your tracking files or set `"enabled": false`
+
+Anything given on the command line overrides the `run` block, so a config can be
+reused for a one-off (e.g. `--skip_sorting`) without editing it.
+
+## Running locally
+
+### Install
 
 ```bash
 pip install -e .              # numpy, scipy, spikeinterface[full], probeinterface
 pip install -e ".[sorting]"   # ...plus kilosort4
 ```
 
-kilosort4 and torch are large and CUDA-specific; on the cluster they come from the
-container image rather than pip, which is why they sit in an optional extra.
+kilosort4 and torch are large and CUDA-specific, which is why they sit in an optional
+extra. If `pip` gives you a CPU-only torch, install the CUDA build from [pytorch.org](https://pytorch.org/get-started/locally/)
+first. State scoring and pre-processing alone need neither.
 
-No install is needed to run from a checkout — `hpc_load_sort_post.py` puts the repo
-root on `sys.path` itself, which is how the slurm jobs invoke it inside the container.
+### Run
 
-## Use
+```bash
+spikeshpc --pipeline_config pipeline_config.json
+```
+
+or, without a config, give the recordings and flags directly:
 
 ```bash
 # whole pipeline; acquisition system and stream auto-detected
@@ -54,13 +89,89 @@ spikeshpc /data/m1_g0 /data/m1_g1 --output_dir /scratch/m1 \
     --skip_preprocessing --skip_sorting --skip_postprocessing
 ```
 
-`python -m spikeshpc` and `python hpc_load_sort_post.py` are equivalent entry points.
+`python -m spikeshpc` and `python hpc_load_sort_post.py` are equivalent entry points;
+the latter needs no install, since it puts the repo root on `sys.path` itself.
+`spikeshpc --help` lists every flag.
 
-Parameters live in `spikeshpc.config.DEFAULT_PIPELINE` and are overridden per run with
-`--pipeline_config` (see `slurm/pipeline_config.example.json`) or as kwargs to
-`run_pipeline()` from a notebook.
+On Windows, write paths in the JSON with forward slashes (`"D:/data/m1_g0"`) or
+doubled backslashes (`"D:\\data\\m1_g0"`) — a single backslash is invalid JSON.
 
-On the cluster, see `slurm/multisession_sorting.slurm`.
+From a notebook, call `run_pipeline()` with the same pieces as keyword arguments:
+
+```python
+from spikeshpc.pipeline import run_pipeline
+
+run_pipeline(
+    ["/data/m1_g0", "/data/m1_g1"],
+    output_dir="/scratch/m1",
+    skip_statescoring=True,
+    sorting={"nblocks": 5},          # any top-level config key other than "run"
+)
+```
+
+## Running on an HPC (slurm + apptainer)
+
+On the cluster nothing is pip-installed: the job runs `hpc_load_sort_post.py` from a
+clone of this repo inside a container that provides spikeinterface, kilosort4 and CUDA.
+
+**1. Clone the repo** somewhere the compute nodes can see (home is fine — it only
+holds code):
+
+```bash
+git clone https://github.com/Scanziani-Lab/spikeshpc.git ~/spikeshpc
+```
+
+**2. Build the container** once, on a Linux host with fakeroot such as the login node,
+and keep the `.sif` on scratch:
+
+```bash
+apptainer build --fakeroot /scratch/user/$USER/containers/si_kilosort4.sif containers/si_kilosort4.def
+```
+
+The header of [`containers/si_kilosort4.def`](containers/si_kilosort4.def) has a
+check to run on a GPU node afterwards; it matters for newer (Blackwell) cards.
+
+**3. Write the run config** — copy [`pipeline_config.example.json`](pipeline_config.example.json)
+to scratch (e.g. `/scratch/user/$USER/runs/m1.json`) and fill in the cluster paths as
+[above](#the-run-config). Keep `run.tmp_dir` and `run.output_dir` off `/home`:
+kilosort's intermediates are roughly the size of the recording, and overrunning the
+home quota kills the job with no traceback. For a multi-session run, `output_dir` also
+needs room for `concatenated.bin`, a copy of every session combined.
+
+The container can only see directories that are bind-mounted into it. The job derives
+those from the config — recordings, output and scratch directories, and the OptiTrack
+path templates — so `run.bind_paths` can normally stay empty. Set it only if something
+lives outside those, e.g. behind a symlink.
+
+**4. Edit [`slurm/multisession_sorting.slurm`](slurm/multisession_sorting.slurm)** —
+only the deployment details live there:
+
+- `REPO_DIR` — the clone from step 1
+- `SI_SIF` — the image from step 2
+- `PIPELINE_CONFIG` — the config from step 3
+- the `#SBATCH` header: partition, `--cpus-per-task` (keep `job_kwargs.n_jobs` at or
+  below it), memory, time, and the `--output`/`--error` log directory, which must
+  already exist
+- `APPTAINER_CACHEDIR` / `APPTAINER_TMPDIR`, which also need to be off `/home`
+
+**5. Submit:**
+
+```bash
+sbatch slurm/multisession_sorting.slurm
+```
+
+The script checks that the config, the image and every recording exist before
+launching, so a typo fails immediately instead of after a GPU has been allocated.
+
+To re-run part of the pipeline, set the matching `run.skip_*` flags (or change
+`bad_channels`, sorting settings, …) in the config and submit again; each stage reads
+what the earlier ones left in `output_dir`. The same config can also be run by hand
+inside the container from an interactive GPU session:
+
+```bash
+apptainer exec --nv --bind /scratch/user/$USER /scratch/user/$USER/containers/si_kilosort4.sif \
+    python -u ~/spikeshpc/hpc_load_sort_post.py --pipeline_config /scratch/user/$USER/runs/m1.json
+```
 
 ## Brain-state scoring
 

@@ -112,6 +112,8 @@ class HDTuningCurveWidget:
             verdict = "tuned" if stat.significant else "not tuned"
             if getattr(stat, "too_quiet", False):
                 verdict = "too quiet"
+            elif getattr(stat, "weakly_tuned", False):
+                verdict = f"weakly tuned (MVL cut {stat.mvl_cutoff:.3f})"
             title += (
                 f"\nMVL {stat.mean_vector_length:.3f} "
                 f"(chance {stat.mvl_threshold:.3f}), p = {stat.p_value:.4f}, "
