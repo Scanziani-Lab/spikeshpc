@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from spikeshpc.optitrack.tuning import (
     compute_hd_tuning_curve,
     compute_hd_tuning_significance,
     compute_mean_vector_length,
+    plot_tuning_comparison,
 )
 
 
@@ -124,3 +126,35 @@ def test_hd_significance_handles_silent_unit():
     assert np.isnan(silent.mean_vector_length)
     assert silent.p_value == 1.0
     assert not silent.significant
+
+
+def test_tuning_comparison_draws_each_shared_unit_under_every_condition():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    heading_deg = np.arange(3600) % 360.0
+
+    def curves(preferred_by_unit):
+        return {
+            unit: compute_hd_tuning_curve(
+                heading_deg, _bump_firing_rate(heading_deg, preferred), n_bins=36
+            )
+            for unit, preferred in preferred_by_unit.items()
+        }
+
+    fig, axes = plot_tuning_comparison(
+        {"moving": curves({1: 90.0, 2: 200.0, 3: 300.0}),
+         "still": curves({1: 90.0, 2: 250.0})},
+        ncols=2,
+    )
+    try:
+        drawn = [ax for ax in axes.flat if ax.get_visible()]
+        assert len(drawn) == 2  # unit 3 has no "still" curve to compare
+        assert len(drawn[0].lines) == 2
+        assert drawn[0].get_title().startswith("unit 1") and "MVL" in drawn[0].get_title()
+    finally:
+        plt.close(fig)
+
+    with pytest.raises(ValueError, match="every condition"):
+        plot_tuning_comparison({"a": curves({1: 0.0}), "b": curves({2: 0.0})})

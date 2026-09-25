@@ -1217,6 +1217,102 @@ def frames_in_states(frame_times, intervals, states=("WAKE",)):
     return frame_mask, intervals_between_frames(frame_mask)
 
 
+def movement_intervals(scoring, threshold=None, verbose=True) -> dict:
+    """Moving and still spans from the scoring's movement trace, as intervals.
+
+    Returns ``{"MOVING": [[start, stop], ...], "STILL": [[start, stop], ...]}``
+    on the scoring's own clock -- the same shape as ``scoring.intervals``, so
+    everything that takes intervals takes these: :func:`frames_in_states` for a
+    tuning curve's interval mask, the decoder's ``state_interval_mask`` for its
+    bins, :func:`times_in_states` for anything else. AND the result with a
+    state's mask to ask about, say, moving WAKE.
+
+    ``threshold`` is in the speed trace's units (mm/s). Left None it is the one
+    the movement veto used, read back from the saved scoring: the trough
+    between the immobility and locomotion modes of log speed. Only if the veto
+    never ran is it recomputed, by the same bimodal split
+    (:func:`movement_threshold`). Movement above it proves the animal awake;
+    being below it proves nothing, so "STILL" is what the tracker saw and not
+    a claim about the brain.
+
+    Bins without tracking (NaN speed) are in neither.
+    """
+    speed = getattr(scoring, "speed", None)
+    if speed is None:
+        raise ValueError(
+            f"{scoring.session!r} has no movement trace to split. Load it with "
+            "load_states(..., optitrack_csv=...) to compute one from the "
+            "tracking (see attach_movement)."
+        )
+    speed = np.asarray(speed, dtype=float)
+
+    if threshold is not None:
+        threshold, source = float(threshold), "given"
+    else:
+        saved = (getattr(scoring, "metadata", None) or {}).get("movement") or {}
+        if saved.get("threshold_speed") is not None:
+            threshold, source = float(saved["threshold_speed"]), "the movement veto's"
+        else:
+            log_threshold = movement_threshold(speed)
+            if log_threshold is None:
+                raise ValueError(
+                    f"{scoring.session!r} has too few tracked bins to find a "
+                    "movement threshold; pass threshold= explicitly."
+                )
+            threshold, source = float(10**log_threshold), "bimodal split of log speed"
+
+    tracked = np.isfinite(speed)
+    labels = np.zeros(len(speed), dtype=np.int16)  # 0: untracked, in neither
+    labels[tracked & (speed > threshold)] = 1
+    labels[tracked & (speed <= threshold)] = 2
+
+    spans = {"MOVING": [], "STILL": []}
+    for epoch in state_epochs(
+        labels, scoring.times, {"MOVING": 1, "STILL": 2}, scoring.step_s,
+        states=("MOVING", "STILL"),
+    ):
+        spans[epoch.state].append([epoch.start, epoch.stop])
+
+    if verbose:
+        moving_s = sum(b - a for a, b in spans["MOVING"])
+        tracked_s = moving_s + sum(b - a for a, b in spans["STILL"])
+        print(
+            f"    movement: threshold {threshold:.1f} mm/s ({source}); "
+            f"{moving_s / max(tracked_s, 1e-12):.1%} of {tracked_s:.0f}s tracked "
+            f"is moving, in {len(spans['MOVING'])} bouts"
+        )
+    return spans
+
+
+def seconds_since(query_times, spans) -> np.ndarray:
+    """How long before each of `query_times` the most recent of `spans` ended.
+
+    0 inside a span, inf before the first one. With the MOVING spans of
+    :func:`movement_intervals` it is how long the animal has been still; with a
+    scoring's NREM and REM spans, how long it has been awake. Either is a
+    sharper axis than a still/moving split for asking whether an effect is
+    sleep: the animal cannot be asleep two seconds after it last moved, and is
+    at its drowsiest just after it woke.
+
+    `spans` is [start, stop] pairs on the same clock as `query_times`; they need
+    not be sorted or disjoint.
+    """
+    query_times = np.asarray(query_times, dtype=float)
+    since = np.full(len(query_times), np.inf)
+    spans = np.asarray(spans, dtype=float).reshape(-1, 2)
+    if spans.size == 0:
+        return since
+
+    spans = spans[np.argsort(spans[:, 0], kind="stable")]
+    # the latest stop seen so far, so a short span nested inside a long one
+    # cannot make the long one look as if it had already ended
+    ends = np.maximum.accumulate(spans[:, 1])
+    idx = np.searchsorted(spans[:, 0], query_times, side="right") - 1
+    seen = idx >= 0
+    since[seen] = np.maximum(query_times[seen] - ends[idx[seen]], 0.0)
+    return since
+
+
 def slice_recording_to_states(
         recording,
         intervals,

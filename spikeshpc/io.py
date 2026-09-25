@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import spikeinterface.full as si
 
-from .config import CHANMAP_NAME, CONCAT_INFO_NAME, PROBE_NAME
+from .config import CHANMAP_NAME, CONCAT_INFO_NAME, PROBE_NAME, SYNC_TIMES_NAME
 
 
 def detect_phys_type(phys_path: Path) -> str:
@@ -132,6 +132,40 @@ def sync_clock_problem(rec, sample: int = 100_000) -> str | None:
     return None
 
 
+def _attach_sync_times(rec) -> bool:
+    """Set each segment's times from its timestamps.npy, memory-mapped.
+
+    What ``load_sync_timestamps=True`` does, except that spikeinterface
+    np.load()s the file whole: one float64 per sample, which is gigabytes per
+    hour of recording held in RAM for the life of the object. Mapped, only the
+    pages actually indexed are ever read.
+
+    Relies on the extractor's ``_stream_folders``; returns False, attaching
+    nothing, when that or any segment's sidecar is missing, so the caller can
+    fall back to spikeinterface's own loading.
+    """
+    folders = getattr(rec, "_stream_folders", None)
+    if not folders or len(folders) != rec.get_num_segments():
+        return False
+    sidecars = []
+    for folder in folders:
+        folder = Path(folder)
+        if (folder / "sample_numbers.npy").is_file():  # Open Ephys >= 0.6
+            sidecar = folder / "timestamps.npy"
+        else:
+            sidecar = folder / "synchronized_timestamps.npy"
+        if not sidecar.is_file():
+            return False
+        sidecars.append(sidecar)
+    for segment, sidecar in enumerate(sidecars):
+        times = np.load(sidecar, mmap_mode="r")
+        if len(times) != rec.get_num_samples(segment_index=segment):
+            rec.reset_times()
+            return False
+        rec.set_times(times, segment_index=segment, with_warning=False)
+    return True
+
+
 def read_openephys_synced(folder, stream_name, require_sync: bool = False):
     """Open Ephys on the acquisition clock, not on one inferred from the rate.
 
@@ -149,10 +183,17 @@ def read_openephys_synced(folder, stream_name, require_sync: bool = False):
     is still worth scoring, but nobody should discover afterwards that its
     camera alignment was the version with the drift in it. Pass
     ``require_sync=True`` to refuse instead.
+
+    The timestamps are memory-mapped rather than read into RAM (see
+    :func:`_attach_sync_times`) -- at 30 kHz they are 11 GB for 12.75 hours.
     """
     rec = si.read_openephys(
-        folder_path=folder, stream_name=stream_name, load_sync_timestamps=True
+        folder_path=folder, stream_name=stream_name, load_sync_timestamps=False
     )
+    if not _attach_sync_times(rec):
+        rec = si.read_openephys(
+            folder_path=folder, stream_name=stream_name, load_sync_timestamps=True
+        )
     problem = sync_clock_problem(rec)
     if problem is None:
         return rec
@@ -399,7 +440,7 @@ def _stream_timestamps(phys_path, phys_type: str, stream_name: str):
     return np.load(sidecar, mmap_mode="r")
 
 
-def _concatenated_sync_times(info: dict):
+def _concatenated_sync_times(info: dict, output_dir: Path | None = None):
     """The real, saved acquisition-clock times for load_concatenated's binary.
 
     Open Ephys writes one timestamp per sample to timestamps.npy, on the
@@ -413,6 +454,10 @@ def _concatenated_sync_times(info: dict):
     saved timestamp count disagrees with what preprocess() recorded for it
     -- concatenating past a mismatch would silently mis-time every later
     sample rather than just this one session's worth.
+
+    Memory-mapped either way: one session's sidecar directly, several via
+    :func:`_concatenate_to_disk` into `output_dir` -- joined in RAM they are
+    gigabytes per hour of recording.
     """
     if info["phys_type"] != "openephysbinary":
         return None
@@ -428,7 +473,45 @@ def _concatenated_sync_times(info: dict):
             return None
         per_session.append(times)
 
-    return per_session[0] if len(per_session) == 1 else np.concatenate(per_session)
+    if len(per_session) == 1:
+        return per_session[0]
+    if output_dir is not None:
+        try:
+            return _concatenate_to_disk(per_session, Path(output_dir) / SYNC_TIMES_NAME)
+        except OSError as err:
+            warnings.warn(
+                f"Could not write {SYNC_TIMES_NAME} to {output_dir} ({err}); "
+                "joining the sessions' timestamps in memory instead.",
+                stacklevel=3,
+            )
+    return np.concatenate(per_session)
+
+
+def _concatenate_to_disk(per_session, path: Path):
+    """The sessions' timestamps end to end in one .npy, opened memory-mapped.
+
+    Written a slice at a time, so no more than `chunk` samples are ever in
+    RAM, and reused as-is on later loads when its length and ends still match.
+    """
+    total = sum(len(t) for t in per_session)
+    if path.exists():
+        cached = np.load(path, mmap_mode="r")
+        if (cached.shape == (total,) and cached.dtype == np.float64
+                and cached[0] == per_session[0][0]
+                and cached[-1] == per_session[-1][-1]):
+            return cached
+        del cached
+    chunk = 10_000_000
+    out = np.lib.format.open_memmap(path, mode="w+", dtype="float64", shape=(total,))
+    at = 0
+    for times in per_session:
+        for i in range(0, len(times), chunk):
+            block = times[i : i + chunk]
+            out[at : at + len(block)] = block
+            at += len(block)
+    out.flush()
+    del out
+    return np.load(path, mmap_mode="r")
 
 
 def load_concatenated(output_dir: Path):
@@ -501,9 +584,9 @@ def load_concatenated(output_dir: Path):
     # Must come after set_probegroup: with matching channel ids it clones the
     # recording via to_dict()/from_dict(), which drops any time_vector set
     # in-memory before the clone rather than carrying it over.
-    sync_times = _concatenated_sync_times(info)
+    sync_times = _concatenated_sync_times(info, output_dir)
     if sync_times is not None:
-        rec.set_times(np.asarray(sync_times), segment_index=0, with_warning=False)
+        rec.set_times(sync_times, segment_index=0, with_warning=False)
     elif info["phys_type"] == "openephysbinary":
         warnings.warn(
             f"Could not recover synchronized timestamps for {output_dir}; "

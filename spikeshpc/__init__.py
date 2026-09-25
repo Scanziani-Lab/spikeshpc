@@ -32,9 +32,11 @@ from .decoder import (
     ShuffleTest,
     decode,
     fit_encoding_model,
+    metrics_by_group,
     plot_decoded,
     plot_encoding_model,
     plot_error,
+    plot_metrics_by_group,
     plot_shuffle,
     prepare_decoder_data,
     run_decoder,
@@ -62,12 +64,15 @@ from .split import SessionSplit, save_splits, split_run
 from .states import (
     attach_movement,
     frames_in_states,
+    movement_intervals,
     rescore_movement,
     score_recording,
     score_session,
+    seconds_since,
     slice_recording_to_states,
     times_in_states,
 )
+from .traces import get_traces, plot_traces, time_range_to_frames
 from .widgets import show_state_epochs
 
 __all__ = [
@@ -88,15 +93,20 @@ __all__ = [
     "detect_phys_type",
     "drift_at_junction",
     "fit_encoding_model",
+    "get_traces",
     "frames_in_states",
     "load_concatenated",
     "load_states",
+    "metrics_by_group",
+    "movement_intervals",
     "open_stream",
     "plot_decoded",
     "plot_drift",
     "plot_encoding_model",
     "plot_error",
+    "plot_metrics_by_group",
     "plot_shuffle",
+    "plot_traces",
     "prepare_decoder_data",
     "probe_start_time",
     "read_openephys_synced",
@@ -107,6 +117,7 @@ __all__ = [
     "save_splits",
     "score_recording",
     "score_session",
+    "seconds_since",
     "show_decoded",
     "show_state_editor",
     "show_state_epochs",
@@ -116,5 +127,6 @@ __all__ = [
     "split_train_test",
     "state_interval_mask",
     "sync_clock_problem",
+    "time_range_to_frames",
     "times_in_states",
 ]

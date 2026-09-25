@@ -7,6 +7,7 @@ CONCAT_BIN_NAME = "preprocessed.bin"
 CONCAT_INFO_NAME = "concat_info.json"
 CHANMAP_NAME = "chanMap.mat"
 PROBE_NAME = "probe.json"
+SYNC_TIMES_NAME = "sync_timestamps.npy"
 BAD_CHANNELS_NAME = "bad_channels.json"
 STATES_DIRNAME = "states"
 STATES_CONCAT_NAME = "states_concatenated.json"
@@ -206,6 +207,14 @@ DEFAULT_PIPELINE = {
     },
 }
 
+# ── Files written into output_dir ────────────────────────────────────────
+BOMBCELL_KEYS = {
+    -1: "NA",
+    0: "NOISE",
+    1: "GOOD",
+    2: "MUA",
+    3: "NON-SOMA"
+}
 
 def deep_merge(base: dict, overrides: dict) -> dict:
     """Recursively merge `overrides` onto a copy of `base`."""

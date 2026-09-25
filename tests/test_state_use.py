@@ -9,6 +9,8 @@ from spikeshpc.io import StateScoring, load_states
 from spikeshpc.states import (
     frames_in_states,
     intervals_between_frames,
+    movement_intervals,
+    seconds_since,
     slice_recording_to_states,
     state_epochs,
     times_in_states,
@@ -172,6 +174,84 @@ def test_frames_in_states_returns_both_masks():
 def test_intervals_between_frames_on_degenerate_input():
     assert len(intervals_between_frames(np.array([True]))) == 0
     assert len(intervals_between_frames(np.array([], dtype=bool))) == 0
+
+
+# ── movement as intervals, for downstream masks ─────────────────────────
+def _scoring_with_speed(speed, threshold=None, step_s=1.0):
+    """A scoring whose movement veto ran with `threshold` (None: never ran)."""
+    speed = np.asarray(speed, dtype=float)
+    n = len(speed)
+    movement = {} if threshold is None else {"movement": {"threshold_speed": threshold}}
+    return StateScoring(
+        session="m1",
+        times=np.arange(n) * step_s + step_s / 2,
+        codes=np.ones(n, dtype=np.int16),
+        speed=speed,
+        step_s=step_s,
+        metadata=movement,
+    )
+
+
+def test_movement_intervals_split_tracked_time_at_the_threshold():
+    s = _scoring_with_speed([50, 50, 2, 2, 2, 30, np.nan, np.nan, 1], threshold=10.0)
+    spans = movement_intervals(s, verbose=False)
+    assert spans["MOVING"] == [[0.0, 2.0], [5.0, 6.0]]
+    # the untracked 6-8 s is in neither: no tracking is not stillness
+    assert spans["STILL"] == [[2.0, 5.0], [8.0, 9.0]]
+
+
+def test_movement_intervals_default_to_the_veto_threshold():
+    s = _scoring_with_speed([5, 15, 25], threshold=20.0)
+    assert movement_intervals(s, verbose=False)["MOVING"] == [[2.0, 3.0]]
+    # but an explicit threshold wins
+    assert movement_intervals(s, threshold=10.0, verbose=False)["MOVING"] == [[1.0, 3.0]]
+
+
+def test_movement_intervals_find_their_own_threshold_without_a_veto():
+    """No saved threshold: split the breathing floor from locomotion."""
+    rng = np.random.default_rng(0)
+    still = 10 ** rng.normal(np.log10(3.0), 0.15, 300)
+    moving = 10 ** rng.normal(np.log10(40.0), 0.25, 300)
+    spans = movement_intervals(_scoring_with_speed(np.r_[still, moving]), verbose=False)
+    called_moving = times_in_states(np.arange(600) + 0.5, spans, "MOVING")
+    assert called_moving[:300].mean() < 0.02 and called_moving[300:].mean() > 0.98
+
+
+def test_movement_intervals_need_a_movement_trace():
+    s = StateScoring(session="m2", times=np.arange(3) + 0.5, codes=np.ones(3))
+    with pytest.raises(ValueError, match="optitrack_csv"):
+        movement_intervals(s)
+
+
+def test_moving_spans_mask_frames_like_any_other_state():
+    spans = movement_intervals(
+        _scoring_with_speed([50, 50, 2, 2, 50], threshold=10.0), verbose=False
+    )
+    frame_times = np.arange(0, 5, 0.25)
+    frames, ivals = frames_in_states(frame_times, spans, "MOVING")
+    assert frames[:8].all() and not frames[8:16].any() and frames[16:].all()
+    # no inter-frame interval bridges the still gap
+    assert not ivals[7] and not ivals[15]
+
+
+def test_seconds_since_is_zero_inside_and_counts_up_after():
+    spans = [[10.0, 20.0], [30.0, 40.0]]
+    q = np.array([15.0, 20.0, 25.0, 30.0, 45.0])
+    np.testing.assert_allclose(seconds_since(q, spans), [0.0, 0.0, 5.0, 0.0, 5.0])
+
+
+def test_seconds_since_is_infinite_before_the_first_span():
+    got = seconds_since(np.array([0.0, 5.0, 12.0]), [[10.0, 20.0]])
+    assert np.isinf(got[:2]).all() and got[2] == 0.0
+    assert np.isinf(seconds_since(np.array([1.0]), [])).all()
+
+
+def test_seconds_since_counts_from_the_latest_end_whatever_the_order():
+    """A short span nested in a long one must not end the long one early."""
+    nested = [[0.0, 50.0], [10.0, 12.0]]
+    np.testing.assert_allclose(seconds_since(np.array([30.0, 60.0]), nested), [0.0, 10.0])
+    unsorted = [[30.0, 40.0], [0.0, 5.0]]
+    np.testing.assert_allclose(seconds_since(np.array([45.0]), unsorted), [5.0])
 
 
 # ── recording slicing ───────────────────────────────────────────────────

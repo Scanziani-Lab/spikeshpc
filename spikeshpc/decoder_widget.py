@@ -25,6 +25,8 @@ __all__ = ["DecodedWidget", "show_decoded"]
 
 ACTUAL_COLOR = "black"
 DECODED_COLOR = "#00a000"
+MARK_COLOR = "0.45"
+MARK_ALPHA = 0.18
 
 
 def break_at(x, y, breaks, wrap_threshold: float = 180.0):
@@ -57,6 +59,11 @@ class DecodedWidget:
     window. ``home`` / ``end`` jump to the first and last decoded bin, and the
     slider at the bottom goes anywhere in between.
 
+    ``mark`` is an optional boolean per decoded bin, shaded gray behind the
+    traces and named ``mark_label`` in the legend -- the bins where the animal
+    was still, say, so a failure can be seen against what the animal was doing
+    rather than inferred from the heading trace going flat.
+
     Requires an interactive matplotlib backend (``%matplotlib widget`` or
     ``%matplotlib qt``) and the figure to have keyboard focus: click it once.
     """
@@ -69,17 +76,33 @@ class DecodedWidget:
         cmap: str = "Blues",
         min_window_s: float = 1.0,
         max_window_s: float | None = None,
+        mark=None,
+        mark_label: str = "still",
     ):
         import matplotlib.pyplot as plt
+        from matplotlib.patches import Patch
         from matplotlib.widgets import Slider
 
         warn_if_noninteractive_backend()
         if decoded.n_decoded < 2:
             raise ValueError(f"{decoded.label!r} holds {decoded.n_decoded} bins")
+        if mark is not None:
+            mark = np.asarray(mark, dtype=bool)
+            if mark.shape != (decoded.n_decoded,):
+                raise ValueError(
+                    f"mark has {mark.shape} entries but {decoded.label!r} has "
+                    f"{decoded.n_decoded} decoded bins"
+                )
 
         self.decoded = decoded
         self.show_posterior = show_posterior and decoded.posterior is not None
         self.cmap = cmap
+        self.mark = mark
+        self.mark_label = mark_label
+        self._mark_patches = []
+        self._mark_handle = Patch(
+            facecolor=MARK_COLOR, alpha=MARK_ALPHA, label=mark_label
+        )
 
         # decoded time: the bins laid end to end, so no pixel is spent on the
         # data that was held back for training
@@ -190,6 +213,9 @@ class DecodedWidget:
         for line in self._break_lines:
             line.remove()
         self._break_lines = []
+        for patch in self._mark_patches:
+            patch.remove()
+        self._mark_patches = []
 
         if not window.any():
             self.ax.set_xlim(self.t0, stop)
@@ -234,9 +260,30 @@ class DecodedWidget:
                 )
             )
 
+        # above the posterior, below the traces; one span per marked run, and
+        # the window is a contiguous range of bins so a run is too
+        handles = [self.actual_line, self.decoded_line]
+        if self.mark is not None:
+            handles.append(self._mark_handle)
+            edges = np.diff(np.r_[0, self.mark[index].astype(int), 0])
+            for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+                self._mark_patches.append(
+                    self.ax.axvspan(
+                        self.edges[index[a]],
+                        self.edges[index[b - 1] + 1],
+                        color=MARK_COLOR,
+                        alpha=MARK_ALPHA,
+                        lw=0,
+                        zorder=2,
+                    )
+                )
+
         self.ax.set_xlim(self.t0, stop)
         self._set_title(index)
-        self.ax.legend(loc="upper right", fontsize=8, framealpha=0.9, ncol=2)
+        self.ax.legend(
+            handles=handles, loc="upper right", fontsize=8, framealpha=0.9,
+            ncol=len(handles),
+        )
         self.fig.canvas.draw_idle()
 
     def _set_title(self, index):
@@ -259,6 +306,8 @@ class DecodedWidget:
         )
         if n_breaks:
             title += f" | {n_breaks} splice{'s' if n_breaks > 1 else ''} (dashed)"
+        if self.mark is not None:
+            title += f" | {self.mark_label} {self.mark[index].mean():.0%} of window"
         self.ax.set_title(title, fontsize=10)
 
 
@@ -268,6 +317,7 @@ def show_decoded(decoded, window_s: float = 60.0, **kwargs) -> DecodedWidget:
     ``left``/``right`` pan by half a window, ``up``/``down`` change how much
     time is shown, ``home``/``end`` jump to either end, and the slider goes
     anywhere. Dashed red lines mark splices between non-adjacent stretches of
-    the recording, where the decoder restarted from a uniform prior.
+    the recording, where the decoder restarted from a uniform prior. Pass
+    ``mark`` (a boolean per decoded bin) to shade bins gray, e.g. stillness.
     """
     return DecodedWidget(decoded, window_s=window_s, **kwargs)

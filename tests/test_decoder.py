@@ -22,6 +22,7 @@ from spikeshpc.decoder import (
     decode,
     decoding_metrics,
     fit_encoding_model,
+    metrics_by_group,
     movement_variance,
     poisson_log_likelihood,
     prepare_decoder_data,
@@ -602,6 +603,19 @@ def test_a_mask_with_no_usable_run_is_rejected(data, model):
         decode(data, model, lonely, min_run_s=5.0)
 
 
+def test_the_likelihood_run_by_run_is_the_likelihood_up_front(data, model, split, decoded):
+    """Computing it per run saves memory and must change nothing else."""
+    from spikeshpc.decoder import _forward_backward, _runs
+
+    whole = poisson_log_likelihood(data.counts, data.duration_s, model.rate_hz)
+    transition = ring_transition(model.n_angle_bins, movement_variance(data))
+    expected = np.concatenate([
+        _forward_backward(whole[a:b], transition)[1]
+        for a, b in _runs(split[1], data.duration_s, max_gap_s=1.0, min_run_s=1.0)
+    ])
+    np.testing.assert_allclose(decoded.posterior, expected, rtol=1e-5, atol=1e-7)
+
+
 def test_metrics_of_a_perfect_decode():
     angles = np.linspace(0, 360, 500, endpoint=False)
     metrics = decoding_metrics(angles, angles)
@@ -609,6 +623,49 @@ def test_metrics_of_a_perfect_decode():
     assert metrics["rmse_deg"] == 0.0
     assert metrics["frac_within_deg"] == 1.0
     assert metrics["circular_correlation"] == pytest.approx(1.0)
+
+
+def test_each_group_is_scored_on_its_own_bins(decoded):
+    labels = np.where(np.arange(decoded.n_decoded) < decoded.n_decoded // 3, "a", "b")
+    index = np.arange(decoded.n_decoded, dtype=float)
+    table = metrics_by_group(decoded, labels, extra={"index": index})
+
+    assert list(table) == ["a", "b"]
+    assert sum(t["n_bins"] for t in table.values()) == decoded.n_decoded
+    for name, metrics in table.items():
+        keep = labels == name
+        expected = decoding_metrics(
+            decoded.decoded_deg[keep], decoded.actual_deg[keep],
+            decoded.metrics["tolerance_deg"],
+        )
+        for key, value in expected.items():
+            assert metrics[key] == pytest.approx(value), key
+        assert metrics["time_s"] == pytest.approx(decoded.duration_s[keep].sum())
+        assert metrics["mean_posterior_max"] == pytest.approx(
+            decoded.posterior_max[keep].mean()
+        )
+        assert metrics["population_rate_hz"] == pytest.approx(
+            decoded.n_spikes[keep].sum() / decoded.duration_s[keep].sum()
+        )
+        assert metrics["index"] == pytest.approx(index[keep].mean())
+        assert (metrics["q25_abs_error_deg"] <= metrics["median_abs_error_deg"]
+                <= metrics["q75_abs_error_deg"])
+
+
+def test_groups_come_back_in_the_order_asked_and_empty_ones_are_dropped(decoded):
+    labels = np.full(decoded.n_decoded, "late", dtype=object)
+    labels[:50] = "early"  # as a fixed-width <U4 array this would be "earl"
+    table = metrics_by_group(decoded, labels, order=["late", "never", "early"])
+    assert list(table) == ["late", "early"]
+
+
+def test_labels_must_cover_every_decoded_bin(decoded):
+    with pytest.raises(ValueError, match="labels has"):
+        metrics_by_group(decoded, np.zeros(3))
+    with pytest.raises(ValueError, match="extra"):
+        metrics_by_group(
+            decoded, np.zeros(decoded.n_decoded), extra={"speed": np.zeros(3)}
+        )
 
 
 # ── the control ──────────────────────────────────────────────────────────
@@ -764,6 +821,47 @@ def test_a_session_with_no_wake_is_refused(session):
         )
 
 
+def test_within_keeps_training_and_testing_inside_the_spans(session, full_run):
+    """Movement bouts, say: both sides of the split come from them alone."""
+    wake_stop = session["intervals"]["WAKE"][0][1]
+    spans = [[0.0, 250.0], [300.0, 600.0]]
+    run = run_decoder(
+        session["sorting"],
+        session["unit_ids"],
+        session["heading_deg"],
+        session["frame_times"],
+        session["intervals"],
+        n_shuffles=0,
+        verbose=False,
+        within=np.array(spans),  # an array works as well as a list
+    )
+    used = run.train_mask | run.test_mask
+    inside = ((run.data.edges[:-1] >= 0.0) & (run.data.edges[1:] <= 250.0)) | (
+        (run.data.edges[:-1] >= 300.0) & (run.data.edges[1:] <= 600.0)
+    )
+    assert used.any() and not (used & ~inside).any()
+    assert run.data.duration_s[used].sum() == pytest.approx(550.0, rel=0.01)
+    assert run.data.time_s[used].max() < wake_stop
+    assert run.test.metrics["median_abs_error_deg"] < 10.0
+    # REM is not wake, so `within` does not reach it
+    assert run.rem.n_decoded == full_run.rem.n_decoded
+
+
+def test_within_spans_that_miss_wake_are_refused(session):
+    with pytest.raises(ValueError, match="inside the `within` spans"):
+        run_decoder(
+            session["sorting"],
+            session["unit_ids"],
+            session["heading_deg"],
+            session["frame_times"],
+            session["intervals"],
+            n_shuffles=0,
+            decode_rem=False,
+            verbose=False,
+            within=session["intervals"]["NREM"],
+        )
+
+
 # ── plots ────────────────────────────────────────────────────────────────
 def test_the_plots_draw(full_run):
     matplotlib = pytest.importorskip("matplotlib")
@@ -794,3 +892,29 @@ def test_the_plots_draw(full_run):
         axis = made[0] if isinstance(made, np.ndarray) else made
         assert axis.figure is not None
         plt.close(axis.figure)
+
+
+def test_grouped_metrics_draw_as_bars(full_run):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from spikeshpc.decoder import plot_metrics_by_group
+
+    test = full_run.test
+    labels = np.where(np.arange(test.n_decoded) % 2 == 0, "even", "odd")
+    table = metrics_by_group(test, labels)
+
+    axes = plot_metrics_by_group(table)
+    assert len(axes) == 3
+    # chance on the error panel, and each group's time on its tick
+    assert any(np.allclose(line.get_ydata(), 90.0) for line in axes[0].lines)
+    ticks = [t.get_text() for t in axes[0].get_xticklabels()]
+    assert ticks[0].startswith("even") and ticks[0].endswith("s")
+    plt.close(axes[0].figure)
+
+    both = plot_metrics_by_group(
+        {"model a": table, "model b": table}, metrics=("median_abs_error_deg",)
+    )
+    assert len(both[0].patches) == 4  # two series x two groups
+    plt.close(both[0].figure)

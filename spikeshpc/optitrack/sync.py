@@ -197,7 +197,7 @@ def plot_shutter_close_sanity_check(
 
     Rather than eyeballing one arbitrary time window, this shows the falling-
     edge detection holds up at both ends of the recording. Assumes a single
-    segment (``segment_index``), which is what OneBox recordings are here.
+    segment (``segment_index``)
 
     ``time_offset`` is subtracted from the recording's own timestamps to put
     the trace on the same clock as ``shutter_close_times``. It has to be given

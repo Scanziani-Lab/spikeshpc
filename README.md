@@ -228,6 +228,31 @@ The method follows Moritz's `run_decoder.py`, which used
 `replay_trajectory_classification`; that package is unmaintained and does not install
 here, and its linearized-track machinery is scaffolding a circle does not need.
 
+## Looking at raw traces
+
+`spikeshpc.plot_traces` and `spikeshpc.get_traces` take the same arguments as
+spikeinterface's functions of the same name. Use them instead on long recordings:
+
+```python
+from spikeshpc import open_stream, plot_traces, get_traces
+
+rec = open_stream(phys_path, "openephysbinary", stream_name)
+plot_traces(rec, time_range=(1000.0, 1000.2), relative=True, mode="map")
+traces, times = get_traces(rec, (1000.0, 1000.2), relative=True, return_times=True)
+```
+
+Only the requested frames are read, and the time vector is never loaded whole. A
+range is refused, not read, in two cases. The first is when it resolves to more
+samples than it can hold, which happens when a clock restarts mid-recording
+(spikeinterface would read hours of data there). The second is when the traces
+would be larger than `max_gb` (default 1). `time_range` is on the recording's own
+clock. For Open Ephys that is the synchronized acquisition clock, which does not
+start at 0; `relative=True` counts from the first sample instead.
+
+Open Ephys `timestamps.npy` is also memory-mapped now rather than read into RAM
+(~11 GB for 12.75 h at 30 kHz). When several sessions are concatenated, their
+timestamps are joined once into `output_dir/sync_timestamps.npy`.
+
 ## Utilities
 
 - `spikeshpc-drift <output_dir>` — kilosort's drift step across each concatenation

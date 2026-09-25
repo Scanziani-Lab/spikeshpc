@@ -48,6 +48,7 @@ from .tuning import (
     find_bimodal_threshold,
     get_unit_depths,
     plot_hd_tuning_population,
+    plot_tuning_comparison,
 )
 
 __version__ = "0.1.0"
@@ -80,6 +81,7 @@ __all__ = [
     "load_optitrack_csv",
     "plot_hd_tuning_population",
     "plot_shutter_close_sanity_check",
+    "plot_tuning_comparison",
     "rail_fraction",
     "read_rigid_body_track",
     "rigid_body_names",

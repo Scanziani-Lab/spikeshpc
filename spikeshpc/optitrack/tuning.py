@@ -565,3 +565,69 @@ def plot_hd_tuning_population(
     fig.suptitle(f"{hd_tuning.session}: {n} {which}", fontsize=11)
     fig.tight_layout()
     return fig, (ax_hist, ax_polar)
+
+
+def plot_tuning_comparison(
+    curve_sets: dict,
+    unit_ids=None,
+    ncols: int = 6,
+    colors=None,
+    panel_size=(2.4, 1.9),
+):
+    """Each unit's tuning curve under several conditions, one panel per unit.
+
+    ``curve_sets`` is ``{condition: curves}``, each ``curves`` the dict
+    :func:`compute_all_units_tuning_curves` returns -- the same units during
+    moving and still wake, say, or the first and second half of a session. A
+    unit whose curve keeps its peak and shape across conditions codes heading
+    the same way in both; one whose curve flattens or moves does not.
+
+    Curves are in Hz, each panel scaled to its own unit, and each title gives
+    the conditions' mean vector lengths in legend order. Only units with a
+    curve in every condition are drawn; ``unit_ids`` picks and orders them
+    (default: the first condition's order).
+
+    Returns ``(fig, axes)``.
+    """
+    import matplotlib.pyplot as plt
+
+    if not curve_sets:
+        raise ValueError("no conditions to compare")
+    names = list(curve_sets)
+    if unit_ids is None:
+        unit_ids = list(curve_sets[names[0]])
+    unit_ids = [u for u in unit_ids if all(u in curve_sets[n] for n in names)]
+    if not unit_ids:
+        raise ValueError("no unit has a curve in every condition")
+    if colors is None:
+        colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    ncols = max(1, min(ncols, len(unit_ids)))
+    nrows = int(np.ceil(len(unit_ids) / ncols))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(panel_size[0] * ncols, panel_size[1] * nrows),
+        squeeze=False,
+    )
+    for ax, unit in zip(axes.flat, unit_ids):
+        mvls = []
+        for k, name in enumerate(names):
+            centers, rate = (np.asarray(a, dtype=float) for a in curve_sets[name][unit])
+            ax.plot(centers, rate, color=colors[k % len(colors)], lw=1.2, label=str(name))
+            mvls.append(compute_mean_vector_length(centers, rate)[0])
+        ax.set_title(
+            f"unit {unit}  MVL " + " / ".join(f"{m:.2f}" for m in mvls), fontsize=8
+        )
+        ax.set_xlim(0, 360)
+        ax.set_xticks(np.arange(0, 361, 90))
+        ax.tick_params(labelsize=7)
+        ax.spines[["top", "right"]].set_visible(False)
+    for ax in axes.flat[len(unit_ids):]:
+        ax.set_visible(False)
+    for ax in axes[:, 0]:
+        ax.set_ylabel("Hz", fontsize=8)
+    axes.flat[0].legend(fontsize=7, frameon=False)
+    fig.supxlabel("heading (deg)", fontsize=9)
+    fig.tight_layout()
+    return fig, axes

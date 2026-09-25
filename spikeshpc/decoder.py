@@ -56,9 +56,11 @@ __all__ = [
     "ShuffleTest",
     "decode",
     "fit_encoding_model",
+    "metrics_by_group",
     "plot_decoded",
     "plot_encoding_model",
     "plot_error",
+    "plot_metrics_by_group",
     "plot_shuffle",
     "prepare_decoder_data",
     "ring_transition",
@@ -700,13 +702,15 @@ def decode(
             f"(after dropping bins longer than max_gap_s={max_gap_s})"
         )
 
-    log_likelihood = poisson_log_likelihood(data.counts, data.duration_s, model.rate_hz)
-
     posteriors, indices, run_ids = [], [], []
     for run_id, (a, b) in enumerate(runs):
-        causal, smoothed = _forward_backward(
-            log_likelihood[a:b], transition, acausal=acausal
+        # per run rather than for every bin up front: a decode only visits the
+        # masked bins, and the whole recording's likelihood is n_bins x
+        # n_angle_bins floats -- gigabytes for a night of 60 Hz bins
+        log_likelihood = poisson_log_likelihood(
+            data.counts[a:b], data.duration_s[a:b], model.rate_hz
         )
+        causal, smoothed = _forward_backward(log_likelihood, transition, acausal=acausal)
         posteriors.append(smoothed if acausal else causal)
         indices.append(np.arange(a, b))
         run_ids.append(np.full(b - a, run_id))
@@ -743,6 +747,81 @@ def decode(
     result.metrics["mean_posterior_max"] = float(np.mean(result.posterior_max))
     result.metrics["mean_entropy_bits"] = float(np.mean(entropy))
     return result
+
+
+def metrics_by_group(
+    decoded: Decoded,
+    labels,
+    order=None,
+    extra: dict | None = None,
+    tolerance_deg: float | None = None,
+) -> dict:
+    """The decode's metrics separately for each group of its bins.
+
+    ``labels`` has one entry per decoded bin: "moving"/"still", say, or a
+    binned :func:`spikeshpc.states.seconds_since`. The question is *where* a
+    decode fails rather than how often, and which explanation the pattern
+    fits. A group that is wrong but confident is a population reporting some
+    other heading; one that is wrong and unsure had too little to go on, and
+    ``population_rate_hz`` says whether that is because the units went quiet.
+
+    Returns ``{label: metrics}`` in ``order`` (default: the sorted labels;
+    labels with no bins are left out). Each ``metrics`` is
+    :func:`decoding_metrics` on that group's bins plus
+
+      time_s                  how much decoded time the group holds
+      q25/q75_abs_error_deg   the spread around the median, for error bars
+      mean_posterior_max      how sure the decoder was
+      population_rate_hz      summed spikes over time: the evidence it had
+      <name>                  the group mean of each per-bin array in ``extra``
+
+    ``tolerance_deg`` defaults to the one ``decoded`` was scored with, so the
+    groups' ``frac_within_deg``, weighted by ``n_bins``, average back to the
+    whole decode's.
+    """
+    labels = np.asarray(labels)
+    if labels.shape != (decoded.n_decoded,):
+        raise ValueError(
+            f"labels has {labels.shape} entries but {decoded.label!r} has "
+            f"{decoded.n_decoded} decoded bins"
+        )
+    extra = {name: np.asarray(v, dtype=float) for name, v in (extra or {}).items()}
+    for name, values in extra.items():
+        if values.shape != (decoded.n_decoded,):
+            raise ValueError(
+                f"extra[{name!r}] has {values.shape} entries but {decoded.label!r} "
+                f"has {decoded.n_decoded} decoded bins"
+            )
+    if tolerance_deg is None:
+        tolerance_deg = decoded.metrics.get("tolerance_deg", 30.0)
+    if order is None:
+        order = sorted(set(labels.tolist()))
+
+    table = {}
+    for label in order:
+        keep = labels == label
+        if not keep.any():
+            continue
+        time_s = float(decoded.duration_s[keep].sum())
+        metrics = decoding_metrics(
+            decoded.decoded_deg[keep], decoded.actual_deg[keep], tolerance_deg
+        )
+        absolute = np.abs(decoded.error_deg[keep])
+        absolute = absolute[np.isfinite(absolute)]
+        if absolute.size:
+            q25, q75 = np.percentile(absolute, [25, 75])
+            metrics["q25_abs_error_deg"] = float(q25)
+            metrics["q75_abs_error_deg"] = float(q75)
+        metrics["time_s"] = time_s
+        metrics["mean_posterior_max"] = float(decoded.posterior_max[keep].mean())
+        metrics["population_rate_hz"] = (
+            float(decoded.n_spikes[keep].sum() / time_s) if time_s > 0 else float("nan")
+        )
+        for name, values in extra.items():
+            finite = values[keep][np.isfinite(values[keep])]
+            metrics[name] = float(finite.mean()) if finite.size else float("nan")
+        table[label] = metrics
+    return table
 
 
 # ── the control ──────────────────────────────────────────────────────────
@@ -942,6 +1021,7 @@ def run_decoder(
     keep_posterior: bool = True,
     seed: int = 0,
     verbose: bool = True,
+    within=None,
 ) -> DecoderRun:
     """Train on wake, test on held-out wake against a shuffle, then decode REM.
 
@@ -952,6 +1032,11 @@ def run_decoder(
     ``heading_deg`` and ``frame_times`` are the shutter-aligned pair
 
     ``intervals``: ``scoring.intervals`` from :func:`spikeshpc.load_states`
+
+    ``within``: optional list of [start, stop] spans, e.g.
+    ``movement_intervals(scoring)["MOVING"]``. Only WAKE bins lying wholly
+    inside one are trained and tested on, so both sides of the split come from
+    those periods. REM is decoded as before. Default None (all of wake)
 
     ``bin_s``: bin size in seconds. To set to camera frame rate, use (1/frame rate). Default 1/60
 
@@ -1079,6 +1164,17 @@ def run_decoder(
     wake_mask = state_interval_mask(data, intervals, "WAKE")
     if not wake_mask.any():
         raise ValueError("no decoder bin falls inside a WAKE interval")
+    if within is not None:
+        wake_s = data.duration_s[wake_mask].sum()
+        spans = np.asarray(within, dtype=float).reshape(-1, 2).tolist()
+        wake_mask &= state_interval_mask(data, {"WITHIN": spans}, "WITHIN")
+        if not wake_mask.any():
+            raise ValueError("no WAKE decoder bin lies inside the `within` spans")
+        if verbose:
+            print(
+                f"  within the given spans: {data.duration_s[wake_mask].sum():.0f}s "
+                f"of {wake_s:.0f}s wake"
+            )
 
     train_mask, test_mask = split_train_test(
         data, wake_mask, test_fraction, split_mode, block_s, seed
@@ -1393,3 +1489,95 @@ def plot_shuffle(shuffle: ShuffleTest, ax=None):
     ax.set_title(f"p = {shuffle.p_value:.4f}, z = {shuffle.z_score:+.1f}")
     ax.legend()
     return ax
+
+
+_METRIC_LABELS = {
+    "median_abs_error_deg": "median |error| (deg)",
+    "mean_abs_error_deg": "mean |error| (deg)",
+    "rmse_deg": "RMSE (deg)",
+    "frac_within_deg": "fraction within tolerance",
+    "circular_correlation": "circular correlation",
+    "mean_posterior_max": "posterior max (confidence)",
+    "population_rate_hz": "population rate (Hz)",
+}
+
+
+def plot_metrics_by_group(
+    tables,
+    metrics=("median_abs_error_deg", "mean_posterior_max", "population_rate_hz"),
+    axes=None,
+):
+    """:func:`metrics_by_group` as bars, one panel per metric.
+
+    ``tables`` is one table, or ``{series: table}`` to compare several decodes
+    over the same groups -- two encoding models, say -- as grouped bars.
+    Groups run in the order the tables list them. Each tick says how much time
+    its group holds, because a striking bar over twenty seconds of data is not
+    the finding one over an hour would be. The error panel has interquartile
+    whiskers and the 90 degree line that chance would give.
+    """
+    import matplotlib.pyplot as plt
+
+    # one table is {label: metrics}; several are {series: {label: metrics}}
+    first = next(iter(tables.values()), None)
+    if isinstance(first, dict) and "time_s" in first:
+        tables = {"": tables}
+    series = list(tables)
+    groups = []
+    for table in tables.values():
+        groups.extend(g for g in table if g not in groups)
+    if not groups:
+        raise ValueError("nothing to plot: every table is empty")
+
+    if axes is None:
+        _, axes = plt.subplots(
+            1, len(metrics), figsize=(4.2 * len(metrics), 3.8), squeeze=False
+        )
+    axes = np.atleast_1d(np.asarray(axes, dtype=object).ravel())
+    if len(axes) != len(metrics):
+        raise ValueError(f"{len(metrics)} metrics but {len(axes)} axes")
+
+    x = np.arange(len(groups))
+    width = 0.8 / len(series)
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    def column(table, key):
+        return np.array([table.get(g, {}).get(key, np.nan) for g in groups], float)
+
+    reference = tables[series[0]]
+    ticks = [
+        f"{g}\n{reference[g]['time_s']:.0f}s" if g in reference else str(g)
+        for g in groups
+    ]
+    for i, (ax, metric) in enumerate(zip(axes, metrics)):
+        for k, name in enumerate(series):
+            table = tables[name]
+            values = column(table, metric)
+            yerr = None
+            if metric == "median_abs_error_deg":
+                low = column(table, "q25_abs_error_deg")
+                high = column(table, "q75_abs_error_deg")
+                if np.isfinite(low).any():
+                    yerr = np.vstack([values - low, high - values])
+            ax.bar(
+                x + (k - (len(series) - 1) / 2) * width,
+                values,
+                width,
+                yerr=yerr,
+                capsize=2,
+                color=colors[k % len(colors)],
+                label=name or None,
+            )
+        if metric == "median_abs_error_deg":
+            ax.axhline(90.0, color="0.4", ls="--", lw=1, label="chance")
+        ax.set_xticks(x)
+        ax.set_xticklabels(ticks, fontsize=8)
+        ax.set_ylabel(_METRIC_LABELS.get(metric, metric.replace("_", " ")))
+        ax.spines[["top", "right"]].set_visible(False)
+        # the series once, on the first panel, plus wherever chance is drawn
+        if (i == 0 or metric == "median_abs_error_deg") and (
+            ax.get_legend_handles_labels()[0]
+        ):
+            ax.legend(fontsize=8, frameon=False)
+    axes[0].figure.tight_layout()
+    return axes

@@ -277,3 +277,29 @@ def test_too_short_a_decode_is_refused(decoded):
     tiny = replace(decoded, time_s=decoded.time_s[:1], duration_s=decoded.duration_s[:1])
     with pytest.raises(ValueError, match="holds 1 bins"):
         DecodedWidget(tiny)
+
+
+# ── marking bins ────────────────────────────────────────────────────────
+def test_marked_bins_are_shaded_one_span_per_run(decoded):
+    mark = np.zeros(decoded.n_decoded, dtype=bool)
+    mark[10:30] = True  # two runs, both inside the first minute
+    mark[50:55] = True
+    w = show_decoded(decoded, window_s=60.0, mark=mark, mark_label="still")
+    try:
+        assert len(w._mark_patches) == 2
+        labels = [t.get_text() for t in w.ax.get_legend().get_texts()]
+        assert labels == ["actual", "decoded", "still"]
+        assert "still" in w.ax.get_title()
+
+        # redrawn, not stacked: away from the runs and back again
+        w._on_key(Key("end"))
+        assert len(w._mark_patches) == 0
+        w._on_key(Key("home"))
+        assert len(w._mark_patches) == 2
+    finally:
+        plt.close(w.fig)
+
+
+def test_a_mark_of_the_wrong_length_is_refused(decoded):
+    with pytest.raises(ValueError, match="mark has"):
+        DecodedWidget(decoded, mark=np.zeros(3, dtype=bool))
