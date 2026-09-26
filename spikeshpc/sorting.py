@@ -7,9 +7,7 @@ from .channels import resolve_bad_channels
 from .config import CHANMAP_NAME, SORTER_DIRNAME
 
 # Arguments run_kilosort4 already supplies from the pipeline's own state.
-# settings_overrides must not touch these -- silently accepting, say, a
-# `filename` override would sort the wrong file while everything downstream
-# kept believing the concatenated binary was the one that got sorted.
+# settings_overrides must not touch these
 _RESERVED_KILOSORT_ARGS = frozenset({
     "settings", "probe", "probe_name", "filename", "data_dir", "file_object",
     "results_dir", "data_dtype", "bad_channels",

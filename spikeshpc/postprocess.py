@@ -1,5 +1,7 @@
 """Stage 4: read kilosort4's output back and build the sorting analyzer."""
 
+import json
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +41,120 @@ def _filtered(rec, bandpass):
         "before extracting waveforms"
     )
     return si.bandpass_filter(rec, **kwargs)
+
+
+# The filters an analyzer's recording chain may carry that analyzer_recording
+# knows how to put back, by the class name its saved provenance records.
+REPLAYABLE_FILTERS = {
+    "BandpassFilterRecording": si.bandpass_filter,
+    "HighpassFilterRecording": si.highpass_filter,
+}
+
+
+def analyzer_recording(rec, analyzer):
+    """`rec` as `analyzer` measured it: its channels, through its own filters.
+
+    An analyzer loaded on another machine usually cannot reopen its recording
+    -- the saved path is relative (``../concatenated.bin``) or points at the
+    cluster -- so it gets a temporary one, and ``set_temporary_recording``
+    checks channels and dtype but not filtering. Handed the binary as loaded,
+    everything that reads traces afterwards -- SLAy's spike snippets, the
+    GUI's trace view, any recompute -- measures a different signal from the
+    one the extensions were computed on: the median-subtracted but unfiltered
+    binary, LFP and all, where the analyzer saw a 300-6000 Hz band.
+
+    Rather than assume that band, the analyzer's own provenance is replayed:
+    each filter layer its recording passed through, with the parameters it
+    was built with, and none if it had none -- as for an analyzer built on a
+    binary that is already high-passed, which a guessed bandpass would filter
+    twice. Two checks make a mismatch loud rather than silent:
+
+      * `rec` must be filtered exactly when the base of the analyzer's chain
+        was (so an old analyzer is not paired with a rewritten binary, and a
+        recording filtered by hand is not filtered again), and
+      * the result must be filtered exactly when the analyzer's recording
+        was (``rec_attributes["is_filtered"]``), which is all that can be
+        checked when the provenance cannot be read at all.
+
+    A layer that is neither a channel slice nor a filter raises: dropping it
+    quietly is the failure this function exists to prevent.
+    """
+    out = rec.select_channels(list(analyzer.channel_ids))
+    layers = _saved_recording_layers(analyzer)
+    if layers is not None:
+        *above, (_, _, base_annotations) = layers
+        unknown = [
+            name
+            for name, _, _ in above
+            if name not in REPLAYABLE_FILTERS and name != "ChannelSliceRecording"
+        ]
+        if unknown:
+            raise ValueError(
+                f"The analyzer's recording passes through {', '.join(unknown)}, which "
+                "analyzer_recording cannot replay. Rebuild that recording yourself and "
+                "pass it to analyzer.set_temporary_recording()."
+            )
+        base_filtered = base_annotations.get("is_filtered")
+        if base_filtered is not None and bool(rec.is_filtered()) != bool(base_filtered):
+            raise ValueError(
+                "The recording given is "
+                + ("already filtered, but the analyzer was built from an unfiltered one "
+                   "(and filtered it itself): passing it would filter it twice."
+                   if rec.is_filtered() else
+                   "not filtered, but the analyzer was built from a filtered one: it is not "
+                   "the recording this analyzer was made from (a rewritten binary?).")
+                + " Pass the recording as loaded for this analyzer (load_concatenated)."
+            )
+        for name, kwargs, _ in reversed(above):
+            if name in REPLAYABLE_FILTERS:
+                out = REPLAYABLE_FILTERS[name](out, **kwargs)
+
+    expected = analyzer.rec_attributes.get("is_filtered")
+    if expected is not None and bool(out.is_filtered()) != bool(expected):
+        raise ValueError(
+            f"The analyzer measured {'a filtered' if expected else 'an unfiltered'} recording, "
+            f"but the one rebuilt for it is {'filtered' if out.is_filtered() else 'not'}"
+            + ("" if layers is not None else ", and it kept no readable record of its filters")
+            + ". Rebuild the analyzer's recording yourself and pass it to "
+            "analyzer.set_temporary_recording()."
+        )
+    return out
+
+
+def _saved_recording_layers(analyzer):
+    """``(class name, kwargs, annotations)`` per layer of the analyzer's saved recording.
+
+    Outermost first; the last entry is the reader at the bottom of the chain.
+    Read from the provenance the analyzer wrote when it was created -- a dict
+    of class names and parameters, never instantiated, so it works although
+    the files it names are gone. None for an in-memory analyzer, or one that
+    kept no provenance.
+    """
+    folder = getattr(analyzer, "folder", None)
+    node = None
+    if analyzer.format == "zarr":
+        import zarr
+
+        root = zarr.open(str(folder), mode="r")
+        if "recording" in root:
+            node = root["recording"][0]
+    elif analyzer.format == "binary_folder":
+        folder = Path(folder)
+        if (folder / "recording.json").is_file():
+            node = json.loads((folder / "recording.json").read_text())
+        elif (folder / "recording.pickle").is_file():
+            with open(folder / "recording.pickle", "rb") as f:
+                node = pickle.load(f)
+    if not isinstance(node, dict):
+        return None
+
+    layers = []
+    while isinstance(node, dict) and "class" in node:
+        kwargs = dict(node.get("kwargs", {}))
+        parent = kwargs.pop("recording", None) or kwargs.pop("parent_recording", None)
+        layers.append((node["class"].rsplit(".", 1)[-1], kwargs, node.get("annotations", {})))
+        node = parent
+    return layers or None
 
 
 def kilosort_spike_locations(analyzer, results_dir: Path) -> np.ndarray:

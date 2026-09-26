@@ -203,6 +203,52 @@ sway — which keep movement well off zero — are handled without a hand-tuned 
 `spikeshpc/tracking.py` reads the Motive CSV directly; the `optitrack` package is not
 a dependency.
 
+## Curating units
+
+`0_load_inspect.ipynb` runs bombcell, UnitRefine and SLAy on a session's sorting, then
+opens spikeinterface-gui with all three in it (`spikeshpc/curation.py`):
+
+- every tool's call is a sortable column in the unit table;
+- the quality label starts filled in wherever bombcell and UnitRefine agree, and blank
+  where they don't, so the blanks are what needs looking at;
+- SLAy's merge proposals are listed in the Merge tab with their scores, to accept
+  (ctrl+a) or ignore.
+
+The GUI runs in its own process, because `%matplotlib qt` puts PyQt6 in the notebook's
+kernel and the GUI needs PySide6. It reads everything from the session's `curation/`
+folder:
+
+| file | contents |
+|---|---|
+| `sorting.json` | the sorting the folder belongs to: unit ids, spikes per unit, a templates checksum |
+| `unitrefine_labels.csv`, `slay_merges.npz` | UnitRefine's and SLAy's results, next to bombcell's own files |
+| `automated_labels.csv` | every tool's call, one row per unit: what the GUI shows |
+| `sigui_curation.json` | written by the GUI's "Save curation"; the GUI resumes from it (delete it to start over) |
+| `curated_units.csv` | the automated calls plus your label, removal, merge group and split, per unit |
+| `sigui.log` | the GUI process's output, for when the window does not appear |
+
+```bash
+python -m spikeshpc.curation <output_dir> [--curation-dir DIR]   # what launch_gui() starts
+```
+
+Everything in `curation/` is keyed by unit id, and a re-sort numbers its units from 0
+again. So the folder is tied to the sorting it was made from. After a pipeline re-run,
+the notebook stops until you move the old folder aside, rather than loading the last
+sorting's labels onto this one.
+
+Two things are specific to running this on Windows:
+
+- spikeinterface recomputes `valid_unit_periods` whenever units are split or merged, in
+  a process pool it has to send the whole sorting to. At 10^8 spikes that fails
+  (`OSError 22`), so SLAy's parameter search and `si.apply_curation` run inside
+  `detached_extensions(analyzer, "valid_unit_periods")`.
+- An analyzer opened here cannot reopen its own recording. `analyzer_recording()`
+  rebuilds it from the binary, re-applying the analyzer's own filters, or none if it had
+  none.
+
+The Merge tab is filled through spikeinterface-gui 0.13.1's internals, and
+`tests/test_curation.py` fails if an upgrade moves them.
+
 ## Head-direction decoding
 
 `spikeshpc/decoder.py` decodes head direction from head-direction-tuned units: a

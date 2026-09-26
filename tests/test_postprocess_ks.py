@@ -1,11 +1,13 @@
 """Filtering the analyzer's recording, and borrowing kilosort's spike positions.
 
-The two failures these guard against are both silent. An unfiltered recording
+The failures these guard against are all silent. An unfiltered recording
 produces extensions that exist, load, and are wrong -- every unit at the same
-depth, because the mean waveform is the DC offset. And copying kilosort's
+depth, because the mean waveform is the DC offset. Copying kilosort's
 per-spike positions index for index lines the sample indices up exactly while
 handing a few percent of spikes the position of a different unit, because the
-two disagree about how to order spikes that share a sample.
+two disagree about how to order spikes that share a sample. And an analyzer
+opened on another machine takes any temporary recording with the right
+channels, filtered like the one it measured or not.
 """
 
 import shutil
@@ -17,6 +19,7 @@ import spikeinterface.full as si
 
 from spikeshpc.postprocess import (
     DEFAULT_BANDPASS,
+    analyzer_recording,
     attach_spike_locations,
     kilosort_spike_locations,
     postprocess,
@@ -248,3 +251,79 @@ def test_it_falls_back_to_computing_when_kilosort_cannot_be_matched(
     assert analyzer.get_extension("spike_locations").params["method"] != (
         "kilosort_spike_positions"
     )
+
+
+# ── rebuilding it on another machine ────────────────────────────────────
+@pytest.fixture
+def raw(tmp_path):
+    """A binary on disk, unfiltered, as load_concatenated would open one."""
+    rec = si.generate_recording(
+        num_channels=N_CHANNELS, sampling_frequency=FS, durations=[DURATION], seed=0
+    )
+    rec.annotate(is_filtered=False)  # generated noise calls itself filtered; a raw binary is not
+    return rec.save(folder=tmp_path / "raw")
+
+
+def zarr_analyzer(tmp_path, rec, name="analyzer.zarr"):
+    sorting = si.generate_sorting(
+        num_units=3, sampling_frequency=FS, durations=[DURATION], seed=0
+    )
+    return si.create_sorting_analyzer(
+        sorting, rec, format="zarr", folder=tmp_path / name, sparse=False
+    )
+
+
+def chain(rec):
+    """The class names a recording is built from, outermost first."""
+    names, node = [], rec.to_dict()
+    while isinstance(node, dict) and "class" in node:
+        names.append(node["class"].rsplit(".", 1)[-1])
+        node = node["kwargs"].get("recording") or node["kwargs"].get("parent_recording")
+    return names
+
+
+def test_the_analyzers_own_band_is_put_back_exactly(tmp_path, raw):
+    measured = si.bandpass_filter(raw, freq_min=400.0, freq_max=5000.0)
+    analyzer = zarr_analyzer(tmp_path, measured)
+
+    rebuilt = analyzer_recording(si.load(tmp_path / "raw"), analyzer)
+    kwargs = rebuilt.to_dict()["kwargs"]
+    assert (kwargs["freq_min"], kwargs["freq_max"]) == (400.0, 5000.0)
+    np.testing.assert_array_equal(
+        rebuilt.get_traces(end_frame=4000), measured.get_traces(end_frame=4000)
+    )
+
+
+def test_a_binary_already_filtered_is_not_filtered_again(tmp_path, raw):
+    """The pipeline's high-passed binaries: the analyzer adds no filter, so neither may this."""
+    prefiltered = si.bandpass_filter(raw).save(folder=tmp_path / "prefiltered")
+    analyzer = zarr_analyzer(tmp_path, prefiltered)
+
+    rebuilt = analyzer_recording(si.load(tmp_path / "prefiltered"), analyzer)
+    assert not any("Filter" in name for name in chain(rebuilt)), chain(rebuilt)
+    np.testing.assert_array_equal(
+        rebuilt.get_traces(end_frame=4000), prefiltered.get_traces(end_frame=4000)
+    )
+
+
+def test_a_recording_filtered_by_hand_is_refused_rather_than_filtered_twice(tmp_path, raw):
+    analyzer = zarr_analyzer(tmp_path, si.bandpass_filter(raw))
+    with pytest.raises(ValueError, match="twice"):
+        analyzer_recording(si.bandpass_filter(raw), analyzer)
+
+
+def test_a_layer_it_cannot_replay_is_refused_not_dropped(tmp_path, raw):
+    analyzer = zarr_analyzer(tmp_path, si.bandpass_filter(si.common_reference(raw)))
+    with pytest.raises(ValueError, match="CommonReferenceRecording"):
+        analyzer_recording(raw, analyzer)
+
+
+def test_without_provenance_a_filter_mismatch_is_still_caught(raw):
+    sorting = si.generate_sorting(
+        num_units=3, sampling_frequency=FS, durations=[DURATION], seed=0
+    )
+    in_memory = si.create_sorting_analyzer(
+        sorting, si.bandpass_filter(raw), format="memory", sparse=False
+    )
+    with pytest.raises(ValueError, match="no readable record"):
+        analyzer_recording(raw, in_memory)

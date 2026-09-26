@@ -3,6 +3,7 @@
 import json
 import re
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -166,6 +167,68 @@ def _attach_sync_times(rec) -> bool:
     return True
 
 
+@contextmanager
+def _hide_streams_without_data(keep: str):
+    """Have neo pass over Open Ephys streams whose continuous.dat is gone.
+
+    neo already skips a stream whose folder is missing; this extends that to
+    a folder kept only for its timestamps.npy (see :func:`probe_start_time`).
+    `keep`, the stream being read, is never hidden -- nor is the stream a
+    derived one ('...SYNC', '..._ADC') is sliced from, hence the prefix test.
+
+    Swaps neo's folder parser for the duration, since neo calls it by class
+    name and a subclass cannot override it. A recording opened this way cannot
+    be rebuilt from its folder afterwards, which is how spikeinterface clones
+    one or sends it to a worker process: jobs on it need n_jobs=1.
+    """
+    from neo.rawio.openephysbinaryrawio import OpenEphysBinaryRawIO as RawIO
+
+    original = RawIO.__dict__["_parse_folder_structure"]
+
+    def parse(dirname, experiment_names=None):
+        structure, experiments = original.__func__(dirname, experiment_names)
+        recordings = (
+            recording
+            for node in structure.values()
+            for experiment in node["experiments"].values()
+            for recording in experiment["recordings"].values()
+        )
+        for recording in recordings:
+            streams = recording["streams"].get("continuous", {})
+            for name in [
+                name
+                for name, stream in streams.items()
+                if not keep.startswith(name)
+                and not Path(stream["raw_filename"]).is_file()
+            ]:
+                del streams[name]
+        return structure, experiments
+
+    RawIO._parse_folder_structure = staticmethod(parse)
+    try:
+        yield
+    finally:
+        RawIO._parse_folder_structure = original
+
+
+def _read_openephys(folder, stream_name, **kwargs):
+    """si.read_openephys, even with another stream's continuous.dat deleted.
+
+    neo opens every continuous stream in a recording to read any one of them,
+    so deleting the probe's continuous.dat once it has been preprocessed would
+    otherwise make the ADC beside it unreadable too. Only a missing
+    continuous.dat is retried, and the stream asked for is never the one
+    hidden, so its own missing data is still an error.
+    """
+    try:
+        return si.read_openephys(folder_path=folder, stream_name=stream_name, **kwargs)
+    except FileNotFoundError as err:
+        if Path(err.filename or "").name != "continuous.dat":
+            raise
+    with _hide_streams_without_data(keep=stream_name):
+        return si.read_openephys(folder_path=folder, stream_name=stream_name, **kwargs)
+
+
 def read_openephys_synced(folder, stream_name, require_sync: bool = False):
     """Open Ephys on the acquisition clock, not on one inferred from the rate.
 
@@ -186,14 +249,12 @@ def read_openephys_synced(folder, stream_name, require_sync: bool = False):
 
     The timestamps are memory-mapped rather than read into RAM (see
     :func:`_attach_sync_times`) -- at 30 kHz they are 11 GB for 12.75 hours.
+    Other streams in the recording need not still have their continuous.dat
+    (see :func:`_read_openephys`).
     """
-    rec = si.read_openephys(
-        folder_path=folder, stream_name=stream_name, load_sync_timestamps=False
-    )
+    rec = _read_openephys(folder, stream_name, load_sync_timestamps=False)
     if not _attach_sync_times(rec):
-        rec = si.read_openephys(
-            folder_path=folder, stream_name=stream_name, load_sync_timestamps=True
-        )
+        rec = _read_openephys(folder, stream_name, load_sync_timestamps=True)
     problem = sync_clock_problem(rec)
     if problem is None:
         return rec
@@ -207,9 +268,7 @@ def read_openephys_synced(folder, stream_name, require_sync: bool = False):
     if require_sync:
         raise ValueError(message.replace("Falling back to", "Refusing to use"))
     warnings.warn(message, stacklevel=2)
-    return si.read_openephys(
-        folder_path=folder, stream_name=stream_name, load_sync_timestamps=False
-    )
+    return _read_openephys(folder, stream_name, load_sync_timestamps=False)
 
 
 def open_stream(folder, phys_type: str, stream_name: str):
@@ -298,12 +357,35 @@ def _spikeglx_source_binary(folder: Path, stream_name: str):
     return matches[0] if len(matches) == 1 else None
 
 
-def _openephys_source_binary(folder: Path, stream_name: str):
+def _openephys_stream_folders(folder: Path) -> list:
+    """Every Open Ephys continuous stream's own folder under `folder`.
+
+    Found by the folder rather than by the continuous.dat in it, which may have
+    been deleted to save space once the stream was preprocessed -- the
+    timestamps.npy beside it, which is all the clock needs, is still there.
+    """
+    return [
+        stream
+        for continuous in folder.rglob("continuous")
+        if continuous.is_dir()
+        for stream in continuous.iterdir()
+        if stream.is_dir()
+    ]
+
+
+def _openephys_stream_folder(folder: Path, stream_name: str):
     # 'Record Node 101#Neuropix-PXI-100.ProbeA' lives in
-    # .../continuous/Neuropix-PXI-100.ProbeA/continuous.dat
+    # .../continuous/Neuropix-PXI-100.ProbeA/
     leaf = stream_name.split("#")[-1]
-    matches = [p for p in folder.rglob("continuous.dat") if p.parent.name == leaf]
+    matches = [p for p in _openephys_stream_folders(folder) if p.name == leaf]
     return matches[0] if len(matches) == 1 else None
+
+
+def _openephys_source_binary(folder: Path, stream_name: str):
+    stream = _openephys_stream_folder(folder, stream_name)
+    if stream is None or not (stream / "continuous.dat").is_file():
+        return None
+    return stream / "continuous.dat"
 
 
 def locate_source_binary(phys_path: Path, phys_type: str, stream_name: str):
@@ -317,6 +399,22 @@ def locate_source_binary(phys_path: Path, phys_type: str, stream_name: str):
     if phys_type == "openephysbinary":
         return _openephys_source_binary(folder, stream_name)
     return None
+
+
+def _timestamps_sidecar(phys_path, phys_type: str, stream_name: str):
+    """Where one stream's timestamps.npy is, whether or not its data still is.
+
+    The same stream :func:`locate_source_binary` finds, found by its folder
+    instead: the clock outlives a continuous.dat deleted to save space.
+    """
+    if phys_type != "openephysbinary":
+        return None
+    phys_path = Path(phys_path)
+    if phys_path.is_file() and phys_path.suffix in (".bin", ".dat", ".raw"):
+        return phys_path.parent / "timestamps.npy"
+    folder = phys_path.parent if phys_path.is_file() else phys_path
+    stream = _openephys_stream_folder(folder, stream_name)
+    return None if stream is None else stream / "timestamps.npy"
 
 
 def _first_timestamp(sidecar: Path):
@@ -343,20 +441,17 @@ def probe_start_time(phys_path, phys_type: str):
     Found by walking the recording's own layout rather than by asking
     spikeinterface to enumerate streams: that opens the whole dataset through
     neo, which is a great deal of work to read one float, and it fails on a
-    tree that has the continuous data but not every sidecar. Returns None when
-    there is no synchronized clock to speak of, so callers can leave times
-    where they are instead of shifting them by a guess.
+    tree that has the continuous data but not every sidecar -- or every
+    sidecar but not the continuous data, once the probe's has been deleted.
+    Returns None when there is no synchronized clock to speak of, so callers
+    can leave times where they are instead of shifting them by a guess.
     """
     if phys_type != "openephysbinary":
         return None
 
     phys_path = Path(phys_path)
     folder = phys_path.parent if phys_path.is_file() else phys_path
-    streams = {
-        p.parent.name: p.parent
-        for p in folder.rglob("continuous.dat")
-        if p.parent.parent.name == "continuous"
-    }
+    streams = {p.name: p for p in _openephys_stream_folders(folder)}
     probes = _stream_candidates(list(streams), phys_type, band="ap")
     if len(probes) != 1:
         return None
@@ -369,10 +464,8 @@ def stream_start_time(phys_path, phys_type: str, stream_name: str):
     See :func:`probe_start_time`, which is the same question asked of whichever
     stream was sorted.
     """
-    binary = locate_source_binary(Path(phys_path), phys_type, stream_name)
-    if binary is None or phys_type != "openephysbinary":
-        return None
-    return _first_timestamp(binary.parent / "timestamps.npy")
+    sidecar = _timestamps_sidecar(phys_path, phys_type, stream_name)
+    return None if sidecar is None else _first_timestamp(sidecar)
 
 
 def check_source_binary(rec, path: Path, dtype="int16", n_check_samples=30000):
@@ -425,17 +518,12 @@ def _stream_timestamps(phys_path, phys_type: str, stream_name: str):
 
     On the acquisition clock, as Open Ephys saved it -- not the uniform grid
     `sampling_frequency` alone would imply. None when `phys_type` isn't
-    openephysbinary (SpikeGLX carries no such sidecar) or the source binary
+    openephysbinary (SpikeGLX carries no such sidecar) or the stream's folder
     or its timestamps.npy cannot be found. Memory-mapped: see
     :func:`_first_timestamp` -- these run to gigabytes for one session.
     """
-    if phys_type != "openephysbinary":
-        return None
-    binary = locate_source_binary(Path(phys_path), phys_type, stream_name)
-    if binary is None:
-        return None
-    sidecar = binary.parent / "timestamps.npy"
-    if not sidecar.exists():
+    sidecar = _timestamps_sidecar(phys_path, phys_type, stream_name)
+    if sidecar is None or not sidecar.exists():
         return None
     return np.load(sidecar, mmap_mode="r")
 

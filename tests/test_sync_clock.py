@@ -13,6 +13,8 @@ without complaint, so asking for the good clock and not checking is its own way
 of getting a bad one.
 """
 
+import json
+
 import numpy as np
 import pytest
 
@@ -20,9 +22,12 @@ import spikeinterface.full as si
 
 from spikeshpc import shutter
 from spikeshpc.io import (
+    _stream_timestamps,
+    locate_source_binary,
     open_stream,
     probe_start_time,
     read_openephys_synced,
+    stream_start_time,
     sync_clock_problem,
 )
 
@@ -236,6 +241,91 @@ def test_an_unsynced_probe_leaves_the_times_alone(tmp_path, monkeypatch, capsys)
     )
     assert np.load(out)[0] > 0
     assert "no synchronized clock" in capsys.readouterr().out
+
+
+# ── the probe's continuous.dat deleted once it is preprocessed ──────────
+PROBE, ADC = "OneBox-109.ProbeA", "OneBox-109.OneBox-ADC"
+
+
+def test_the_probe_clock_outlives_its_continuous_dat(tmp_path):
+    """Its timestamps.npy is still there, and it is all the clock needs.
+
+    Every lookup used to find a stream by its continuous.dat, so the probe's
+    clock went with it -- and derive_shutter_times, finding none, would have
+    left every camera frame on the acquisition clock, 90 s late.
+    """
+    open_ephys_tree(tmp_path, {PROBE: 89.973067, ADC: 89.98201})
+    (next(tmp_path.rglob(PROBE)) / "continuous.dat").unlink()
+
+    assert probe_start_time(tmp_path, "openephysbinary") == pytest.approx(89.973067)
+    assert stream_start_time(tmp_path, "openephysbinary", PROBE) == pytest.approx(
+        89.973067
+    )
+    assert _stream_timestamps(tmp_path, "openephysbinary", PROBE)[0] == pytest.approx(
+        89.973067
+    )
+    # but there is no longer anything to sort in place
+    assert locate_source_binary(tmp_path, "openephysbinary", PROBE) is None
+
+
+def open_ephys_recording(node, n=300):
+    """A recording neo will really open: a probe with a OneBox ADC beside it.
+
+    `node` is the Record Node folder. Returns {stream: the int16 samples
+    written to its continuous.dat}.
+    """
+    folder = node / "experiment1" / "recording1"
+    streams = {  # channels, declared rate, measured rate, first timestamp
+        PROBE: (["CH0", "CH1", "CH2"], FS, FS, 89.973067),
+        ADC: (["ADC0", "ADC1"], DECLARED_FS, TRUE_FS, 89.98201),
+    }
+    oebin = {"continuous": [], "events": [], "spikes": []}
+    written = {}
+    for name, (channels, declared, measured, t0) in streams.items():
+        stream = folder / "continuous" / name
+        stream.mkdir(parents=True)
+        data = np.arange(n * len(channels), dtype="int16").reshape(n, -1)
+        data.tofile(stream / "continuous.dat")
+        np.save(stream / "sample_numbers.npy", np.arange(n, dtype="int64"))
+        np.save(stream / "timestamps.npy", t0 + np.arange(n) / measured)
+        oebin["continuous"].append({
+            "folder_name": f"{name}/",
+            "sample_rate": declared,
+            "num_channels": len(channels),
+            "channels": [
+                {"channel_name": c, "bit_volts": 0.195, "units": "uV"}
+                for c in channels
+            ],
+        })
+        written[name] = data
+    (folder / "structure.oebin").write_text(json.dumps(oebin))
+    return written
+
+
+@pytest.mark.parametrize("node", ["Record Node 101", "raw"])
+def test_the_adc_opens_without_the_probe_s_continuous_dat(tmp_path, node):
+    """neo opens every stream to read any one, so the ADC went with the probe.
+
+    neo prefixes stream names with a node folder called 'Record Node ...' and
+    not with any other, such as a 'raw' it was renamed to.
+    """
+    folder = tmp_path / node
+    written = open_ephys_recording(folder)
+    (next(folder.rglob(PROBE)) / "continuous.dat").unlink()
+    prefix = f"{node}#" if node.startswith("Record") else ""
+
+    events = open_stream(folder, "openephysbinary", prefix + ADC)
+    np.testing.assert_array_equal(events.get_traces(return_in_uV=False), written[ADC])
+    assert events.get_times()[0] == pytest.approx(89.98201), "the measured clock"
+
+    # the stream whose data is gone still says so, rather than going quiet
+    with pytest.raises(FileNotFoundError) as missing:
+        open_stream(folder, "openephysbinary", prefix + PROBE)
+    assert PROBE in missing.value.filename
+
+    # and neo is left as it was found
+    with pytest.raises(FileNotFoundError):
+        si.read_openephys(folder_path=folder, stream_name=prefix + ADC)
 
 
 # ── the acquisition type has to survive the trip ────────────────────────
