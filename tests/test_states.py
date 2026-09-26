@@ -1,5 +1,7 @@
 """Tests for spikeshpc.states -- the pieces that are ours, not spikeinterface's."""
 
+import re
+
 import numpy as np
 import pytest
 from scipy.signal import butter, sosfiltfilt
@@ -186,6 +188,52 @@ def test_scoring_recovers_planted_states(synthetic):
     for metric, state in (("broadband", "NREM"), ("theta", "REM"), ("emg", "WAKE")):
         means = {s: result[metric][true == s].mean() for s in ("WAKE", "NREM", "REM")}
         assert max(means, key=means.get) == state, (metric, means)
+
+
+@pytest.fixture
+def progress_bars():
+    """Turn spikeinterface's global progress_bar on or off for one test.
+
+    Other test modules switch it off and leave it that way, so a test about
+    the bars cannot rely on the default.
+    """
+    import spikeinterface.full as si
+
+    before = si.get_global_job_kwargs()["progress_bar"]
+    yield lambda on: si.set_global_job_kwargs(progress_bar=on)
+    si.set_global_job_kwargs(progress_bar=before)
+
+
+def test_every_pass_over_the_recording_shows_progress(
+        synthetic, progress_bars, capsys
+):
+    """On a real session each pass runs for hours, and silence reads as a hang."""
+    from spikeshpc.config import DEFAULT_PIPELINE
+
+    progress_bars(True)
+    rec, _ = synthetic
+    cfg = dict(DEFAULT_PIPELINE["state_scoring"])
+    cfg.update(lfp_rate=1250.0, emg_rate=FS)
+    S.score_recording(S._resample_to(rec, cfg["lfp_rate"]), rec, cfg)
+    S.rank_channels_by_bimodality(rec, rec.channel_ids[:2], cfg, "theta",
+                                  n_windows=20)
+
+    err = capsys.readouterr().err
+    seconds = f"{len(PLAN) * BLOCK:.0f}/{len(PLAN) * BLOCK:.0f} s"
+    for label, done in (
+        ("LFP", seconds),
+        ("EMG", seconds),
+        ("theta channel search", "20/20 windows"),
+    ):
+        assert re.search(rf"state scoring: {label}: 100%\|[^|]*\| {done}", err), err
+
+
+def test_progress_bars_follow_the_job_kwargs_switch(synthetic, progress_bars, capsys):
+    """job_kwargs.progress_bar silences these along with spikeinterface's own."""
+    progress_bars(False)
+    rec, _ = synthetic
+    S._mean_trace(rec, rec.channel_ids[:2])
+    assert "state scoring" not in capsys.readouterr().err
 
 
 def test_merge_shifts_sessions_onto_concatenated_clock(tmp_path):

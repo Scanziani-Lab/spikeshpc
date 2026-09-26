@@ -141,7 +141,38 @@ def bimodality_score(values, seed=0) -> float:
     return float(abs(means[0] - means[1]) / max(pooled, 1e-12))
 
 
-def sampled_spectra(rec, channel_ids, config, n_windows=240, seed=0):
+def _progress(desc, total, unit="s"):
+    """A bar on stderr for one pass over the recording.
+
+    A full pass over a long session runs for hours with nothing to print,
+    which in a job log is indistinguishable from a hang. Shown whenever
+    spikeinterface's own bars are -- the global job_kwargs' progress_bar, which
+    the pipeline sets from its config -- so one switch governs every bar in a
+    run.
+    """
+    from tqdm.auto import tqdm
+
+    return tqdm(
+        total=total,
+        desc=f"state scoring: {desc}",
+        unit=unit,
+        # seconds of recording arrive as floats; show them whole
+        bar_format=(
+            "{desc}: {percentage:3.0f}%|{bar}| {n:.0f}/{total:.0f} {unit} "
+            "[{elapsed}<{remaining}]"
+        ),
+        disable=not si.get_global_job_kwargs().get("progress_bar", True),
+    )
+
+
+def sampled_spectra(
+        rec,
+        channel_ids,
+        config,
+        n_windows=240,
+        seed=0,
+        desc="channel search",
+):
     """Log-spaced power spectra on `n_windows` windows spread through `rec`.
 
     The same frequency grid :func:`log_spectrogram` builds, so the signals
@@ -174,14 +205,16 @@ def sampled_spectra(rec, channel_ids, config, n_windows=240, seed=0):
     taper = np.hanning(nwin).astype(np.float32)
 
     spec = np.empty((len(list(channel_ids)), n_freqs, n_windows), dtype=np.float32)
-    for w, start in enumerate(starts):
-        traces = sub.get_traces(
-            start_frame=int(start), end_frame=int(start + nwin), return_in_uV=True
-        )
-        power = np.abs(np.fft.rfft(np.asarray(traces, np.float32) * taper[:, None],
-                                   axis=0)) ** 2
-        for c in range(power.shape[1]):
-            spec[c, :, w] = np.interp(freqs, fft_freqs, power[:, c])
+    with _progress(desc, n_windows, unit="windows") as bar:
+        for w, start in enumerate(starts):
+            traces = sub.get_traces(
+                start_frame=int(start), end_frame=int(start + nwin), return_in_uV=True
+            )
+            power = np.abs(np.fft.rfft(np.asarray(traces, np.float32) * taper[:, None],
+                                       axis=0)) ** 2
+            for c in range(power.shape[1]):
+                spec[c, :, w] = np.interp(freqs, fft_freqs, power[:, c])
+            bar.update()
     return freqs, spec
 
 
@@ -202,7 +235,10 @@ def rank_channels_by_bimodality(
     Returns a list of (channel_id, score), NaN scores last.
     """
     channel_ids = list(channel_ids)
-    freqs, spec = sampled_spectra(rec, channel_ids, config, n_windows, seed)
+    freqs, spec = sampled_spectra(
+        rec, channel_ids, config, n_windows, seed,
+        desc=f"{signal.replace('_', '-')} channel search",
+    )
 
     scores = []
     for c, channel in enumerate(channel_ids):
@@ -281,17 +317,19 @@ def pick_bimodal_channels(
     return sorted(chosen, key=lambda c: order[str(c)])
 
 
-def _mean_trace(rec, channel_ids, chunk_s=120.0):
+def _mean_trace(rec, channel_ids, chunk_s=120.0, desc="LFP"):
     """Mean trace (uV) across `channel_ids`, accumulated chunk by chunk."""
     sub = rec.select_channels(channel_ids)
     n = sub.get_num_frames()
     fs = sub.get_sampling_frequency()
     out = np.empty(n, dtype=np.float32)
     step = max(int(chunk_s * fs), 1)
-    for start in range(0, n, step):
-        stop = min(start + step, n)
-        chunk = sub.get_traces(start_frame=start, end_frame=stop, return_in_uV=True)
-        out[start:stop] = np.asarray(chunk, dtype=np.float32).mean(axis=1)
+    with _progress(desc, n / fs) as bar:
+        for start in range(0, n, step):
+            stop = min(start + step, n)
+            chunk = sub.get_traces(start_frame=start, end_frame=stop, return_in_uV=True)
+            out[start:stop] = np.asarray(chunk, dtype=np.float32).mean(axis=1)
+            bar.update((stop - start) / fs)
     return out
 
 
@@ -399,24 +437,29 @@ def emg_from_lfp(
     centres = np.clip((times * fs).round().astype(int), half, n_total - (nwin - half))
 
     emg = np.empty(len(times), dtype=np.float32)
-    for start in range(0, len(centres), chunk_windows):
-        stop = min(start + chunk_windows, len(centres))
-        lo = centres[start] - half
-        hi = centres[stop - 1] + (nwin - half)
-        # Filter with padding either side so chunk edges are not transients.
-        pad = min(int(fs), lo, n_total - hi)
-        raw = sub.get_traces(
-            start_frame=lo - pad, end_frame=hi + pad, return_in_uV=True
-        )
-        filtered = sosfiltfilt(sos, np.asarray(raw, dtype=np.float64), axis=0)
-        filtered = filtered[pad : filtered.shape[0] - pad] if pad else filtered
+    seconds = n_total / fs
+    with _progress("EMG", seconds) as bar:
+        for start in range(0, len(centres), chunk_windows):
+            stop = min(start + chunk_windows, len(centres))
+            lo = centres[start] - half
+            hi = centres[stop - 1] + (nwin - half)
+            # Filter with padding either side so chunk edges are not transients.
+            pad = min(int(fs), lo, n_total - hi)
+            raw = sub.get_traces(
+                start_frame=lo - pad, end_frame=hi + pad, return_in_uV=True
+            )
+            filtered = sosfiltfilt(sos, np.asarray(raw, dtype=np.float64), axis=0)
+            filtered = filtered[pad : filtered.shape[0] - pad] if pad else filtered
 
-        for j in range(start, stop):
-            a = centres[j] - half - lo
-            seg = filtered[a : a + nwin]
-            with np.errstate(invalid="ignore", divide="ignore"):
-                corr = np.corrcoef(seg, rowvar=False)
-            emg[j] = np.nanmean(corr[iu][far])
+            for j in range(start, stop):
+                a = centres[j] - half - lo
+                seg = filtered[a : a + nwin]
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    corr = np.corrcoef(seg, rowvar=False)
+                emg[j] = np.nanmean(corr[iu][far])
+            # in seconds of recording, like the LFP bar; the windows are
+            # evenly spaced, so the share of them done is the share read
+            bar.update(seconds * stop / len(centres) - bar.n)
     return emg
 
 
@@ -840,7 +883,9 @@ def score_recording(
     print(f"      emg channels      : {[str(c) for c in emg_ids]}")
 
     fs = rec_lfp.get_sampling_frequency()
-    sw_sig = _mean_trace(rec_lfp, sw_ids)
+    # the same channels mean one LFP pass serves both signals
+    shared = list(map(str, theta_ids)) == list(map(str, sw_ids))
+    sw_sig = _mean_trace(rec_lfp, sw_ids, desc="LFP" if shared else "slow-wave LFP")
     times, freqs, spec = log_spectrogram(
         sw_sig,
         fs,
@@ -851,11 +896,11 @@ def score_recording(
     )
     broadband = broadband_slow_wave(spec, freqs, config["slow_wave_max_hz"])
 
-    if list(map(str, theta_ids)) == list(map(str, sw_ids)):
+    if shared:
         theta_spec, theta_freqs = spec, freqs
     else:
         _, theta_freqs, theta_spec = log_spectrogram(
-            _mean_trace(rec_lfp, theta_ids),
+            _mean_trace(rec_lfp, theta_ids, desc="theta LFP"),
             fs,
             config["window_s"],
             step_s,

@@ -190,6 +190,13 @@ module docstring in `spikeshpc/states.py` for the specific deviations. Theta is 
 hippocampal signal — on a probe spanning several structures, set
 `state_scoring.theta_channels` explicitly rather than averaging over everything.
 
+Scoring is bound by disk, not arithmetic. With no LF stream (Neuropixels 2.0) the LFP and
+the pseudo-EMG are each resampled from the 30 kHz AP band, and each is a full read of the
+raw binary: twice over ~1.1 TB for a 13.6 h recording. On the cluster's scratch that has
+run at about 0.3 h per hour of recording, so ~4 h for a 13–14 h session, with nothing
+printed to stdout meanwhile. Each pass shows a progress bar on stderr (the job's `.err`),
+switched by `job_kwargs.progress_bar` along with spikeinterface's own.
+
 ### OptiTrack movement veto
 
 Optional. Gross movement proves the animal is awake, so it overrules an NREM/REM call;
