@@ -10,7 +10,8 @@ Four independently re-runnable stages, each gated by a --skip_* flag:
                       and writes a single flat binary plus chanMap.mat /
                       probe.json / concat_info.json.
   3. sorting          kilosort4 is driven directly (not through
-                      si.run_sorter) on that binary with DEFAULT_SETTINGS.
+                      si.run_sorter) on that binary with DEFAULT_SETTINGS,
+                      in a freshly started interpreter of its own.
   4. post-processing  spikeinterface reads the kilosort4 output back and
                       builds/saves the sorting analyzer.
 

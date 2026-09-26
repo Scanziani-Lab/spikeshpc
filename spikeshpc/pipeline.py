@@ -1,8 +1,11 @@
 """The four-stage runner."""
 
 import json
+import multiprocessing
 import os
+import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 import spikeinterface.full as si
@@ -19,6 +22,69 @@ from .postprocess import postprocess
 from .preprocess import preprocess
 from .sorting import run_kilosort4
 from .states import merge_to_concatenated_time, score_session
+
+
+def _run_in_fresh_process(func, *args):
+    """Return `func(*args)`, computed in a newly started interpreter.
+
+    Stage 3 goes through this so that kilosort4 inherits nothing the earlier
+    stages did to this process. Run in the same process straight after
+    write_binary_recording's forked workers, kilosort4 has hung -- silently,
+    for hours, at "Re-computing universal templates from data." -- twice,
+    while a fresh process sorting the same binary got straight past it. What
+    it trips over is still unknown (the OpenBLAS deadlock-after-fork that
+    looked likeliest was ruled out: numpy and scipy in the container both
+    pass a fork test), so rather than undo one suspected piece of state,
+    kilosort gets none of it. "spawn" starts a clean interpreter; it does not
+    fork this one.
+
+    A failure raises here with the child's own traceback in the message
+    rather than leaving only an exit code, and an interrupt here -- a
+    notebook's reaches only this process -- stops the child too, so a sort is
+    never left running unseen on the GPU.
+    """
+    ctx = multiprocessing.get_context("spawn")
+    receiver, sender = ctx.Pipe(duplex=False)
+    child = ctx.Process(target=_report_back, args=(sender, func, args))
+    child.start()
+    # The child has to hold the only sending end, or recv() could never see
+    # EOF when it dies without reporting.
+    sender.close()
+    try:
+        outcome = receiver.recv()
+    except EOFError:
+        outcome = None
+    except BaseException:
+        child.terminate()
+        raise
+    finally:
+        child.join()
+        receiver.close()
+
+    if outcome is None:
+        raise RuntimeError(
+            f"{func.__name__} died in its own process without reporting back "
+            f"(exit code {child.exitcode}; -N means killed by signal N, and -9 "
+            "is usually the out-of-memory killer)"
+        )
+    succeeded, value = outcome
+    if not succeeded:
+        raise RuntimeError(f"{func.__name__} failed in its own process:\n\n{value}")
+    return value
+
+
+def _report_back(sender, func, args):
+    """The child's side of _run_in_fresh_process."""
+    # `python -u` does not carry over to a spawned interpreter, and without it
+    # a stdout redirected to a file (slurm's .out) holds prints back until exit.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    try:
+        outcome = (True, func(*args))
+    except BaseException:
+        outcome = (False, traceback.format_exc())
+    sender.send(outcome)
+    sender.close()
 
 
 def run_pipeline(
@@ -176,8 +242,10 @@ def run_pipeline(
     if skip_sorting:
         print("[3/4] skip_sorting=True, reusing existing kilosort4 output...")
     else:
-        print("[3/4] starting kilosort4...")
-        run_kilosort4(output_dir, info, pipeline.get("sorting"), bad_channels)
+        print("[3/4] starting kilosort4 in its own process...")
+        _run_in_fresh_process(
+            run_kilosort4, output_dir, info, pipeline.get("sorting"), bad_channels
+        )
         print("[3/4] sorting complete.")
 
     # Concatenating only holds up if the probe barely moved between sessions.

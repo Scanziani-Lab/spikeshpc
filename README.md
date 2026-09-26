@@ -9,7 +9,7 @@ Four independently re-runnable stages, each gated by a `--skip_*` flag:
 |---|-------|--------|
 | 1 | **state scoring** — per session, *before* concatenation | `states/` |
 | 2 | **pre-processing** — load, align channels by probe geometry, concatenate | `concatenated.bin`, `concat_info.json`, `chanMap.mat`, `probe.json` |
-| 3 | **sorting** — kilosort4, driven directly | `kilosort4/` |
+| 3 | **sorting** — kilosort4, driven directly, in a freshly started process | `kilosort4/` |
 | 4 | **post-processing** — sorting analyzer | `analyzer.zarr` |
 
 Everything a later stage needs is written to disk by the earlier ones, so any stage

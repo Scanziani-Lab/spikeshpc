@@ -207,7 +207,7 @@ DEFAULT_PIPELINE = {
     },
 }
 
-# ── Files written into output_dir ────────────────────────────────────────
+# ── Curation params ────────────────────────────────────────
 BOMBCELL_KEYS = {
     -1: "NA",
     0: "NOISE",
