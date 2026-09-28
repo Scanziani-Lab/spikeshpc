@@ -204,6 +204,22 @@ def test_every_polar_curve_is_normalized_and_closed(loaded):
     plt.close(fig)
 
 
+def test_unnormalized_curves_are_drawn_in_hz_on_one_scale(loaded):
+    fig, (_, ax_polar) = plot_hd_tuning_population(loaded, normalized=False)
+    rates = {str(u): loaded.curve(u)[1] for u in loaded.tuned_ids}
+    assert len(ax_polar.lines) == len(rates)
+    for line in ax_polar.lines:
+        _, r = line.get_data()
+        rate = rates[line.get_label()]
+        assert np.allclose(r, np.r_[rate, rate[0]])  # Hz as saved, closed
+    top = max(rate.max() for rate in rates.values())
+    rim = ax_polar.get_ylim()[1]
+    assert top <= rim < 2 * top  # nothing clipped, nothing squashed
+    assert ax_polar.get_yticks()[-1] == pytest.approx(rim)  # the rim is labeled
+    assert "Hz" in ax_polar.get_title()
+    plt.close(fig)
+
+
 def test_units_get_distinct_colors_from_the_given_map(loaded):
     fig, (ax_hist, ax_polar) = plot_hd_tuning_population(loaded, cmap="viridis")
     line_colors = [tuple(line.get_color()) for line in ax_polar.lines]

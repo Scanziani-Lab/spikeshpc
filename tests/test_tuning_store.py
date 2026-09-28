@@ -209,6 +209,35 @@ def test_a_unit_missing_a_depth_is_dropped_rather_than_padded(tmp_path, saved):
     assert list(load_hd_tuning(out).unit_ids) == [1]
 
 
+def test_the_interval_mask_comes_back_when_saved(tmp_path, saved):
+    """So the decoder can use exactly the intervals the units were chosen on."""
+    _, heading, curves, stats, depths = saved
+    keep = np.random.default_rng(0).random(len(heading) - 1) < 0.7
+    path = save_hd_tuning(
+        tmp_path / "masked", "s1", heading, curves, stats, depths, interval_mask=keep
+    )
+
+    loaded = load_hd_tuning(path)
+    assert loaded.interval_mask.dtype == bool
+    np.testing.assert_array_equal(loaded.interval_mask, keep)
+    summary = json.loads(path.with_suffix(".json").read_text())
+    assert summary["n_intervals_kept"] == int(keep.sum())
+
+
+def test_a_file_saved_without_a_mask_loads_none(saved):
+    path, *_ = saved
+    assert load_hd_tuning(path).interval_mask is None
+
+
+def test_a_mask_over_frames_rather_than_intervals_is_refused(tmp_path, saved):
+    _, heading, curves, stats, depths = saved
+    with pytest.raises(ValueError, match="inter-frame intervals"):
+        save_hd_tuning(
+            tmp_path / "bad", "s1", heading, curves, stats, depths,
+            interval_mask=np.ones(len(heading), dtype=bool),
+        )
+
+
 def test_saving_nothing_is_refused(tmp_path, saved):
     _, heading, curves, stats, _ = saved
     with pytest.raises(ValueError, match="nothing"):

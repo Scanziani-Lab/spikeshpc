@@ -54,6 +54,7 @@ __all__ = [
     "DecoderRun",
     "EncodingModel",
     "ShuffleTest",
+    "bins_in_interval_mask",
     "decode",
     "fit_encoding_model",
     "metrics_by_group",
@@ -253,6 +254,30 @@ def state_interval_mask(data: DecoderData, intervals, states=("WAKE",)) -> np.nd
     """
     _, keep = frames_in_states(data.edges, intervals, states)
     return keep
+
+
+def bins_in_interval_mask(data: DecoderData, interval_mask) -> np.ndarray:
+    """Which decoder bins have every one of their frame intervals in `interval_mask`.
+
+    ``interval_mask`` is over the inter-frame intervals of the ``frame_times``
+    the data was prepared from -- the mask the tuning functions take, e.g.
+    from :func:`spikeshpc.states.behavior_interval_mask`. A bin spans
+    ``bin_frames`` of those intervals and survives only if all of them do.
+    :func:`state_interval_mask` can only test a bin's two edges, which is
+    enough for state epochs that last minutes but lets through a frame excluded
+    from the middle of a bin.
+    """
+    interval_mask = np.asarray(interval_mask, dtype=bool)
+    n_used = data.n_bins * data.bin_frames
+    # prepare_decoder_data drops the frames past the last whole bin, so the
+    # full mask is up to bin_frames - 1 intervals longer than the bins use
+    if interval_mask.ndim != 1 or not n_used <= len(interval_mask) < n_used + data.bin_frames:
+        raise ValueError(
+            f"interval_mask has {interval_mask.shape} entries, which is not the "
+            f"inter-frame intervals of the frames behind {data.n_bins} bins of "
+            f"{data.bin_frames} frames. It masks intervals, not frames or bins."
+        )
+    return interval_mask[:n_used].reshape(data.n_bins, data.bin_frames).all(axis=1)
 
 
 # ── train / test split ───────────────────────────────────────────────────
@@ -710,7 +735,9 @@ def decode(
         log_likelihood = poisson_log_likelihood(
             data.counts[a:b], data.duration_s[a:b], model.rate_hz
         )
-        causal, smoothed = _forward_backward(log_likelihood, transition, acausal=acausal)
+        causal, smoothed = _forward_backward(
+            log_likelihood, transition, acausal=acausal
+        )
         posteriors.append(smoothed if acausal else causal)
         indices.append(np.arange(a, b))
         run_ids.append(np.full(b - a, run_id))
@@ -970,8 +997,10 @@ class DecoderRun:
     def summary(self) -> str:
         lines = [
             f"{self.model}",
-            (f"  train {self.data.duration_s[self.train_mask].sum():.0f}s / "
-            f"test {self.data.duration_s[self.test_mask].sum():.0f}s"),
+            (
+                f"  train {self.data.duration_s[self.train_mask].sum():.0f}s / "
+                f"test {self.data.duration_s[self.test_mask].sum():.0f}s"
+            ),
             f"  test: {self.test}",
         ]
         for key in (
@@ -1022,62 +1051,48 @@ def run_decoder(
     seed: int = 0,
     verbose: bool = True,
     within=None,
+    interval_mask=None,
 ) -> DecoderRun:
     """Train on wake, test on held-out wake against a shuffle, then decode REM.
-
     ``sorting``: may be a sorting or a sorting analyzer
-
     ``unit_ids``: the head-direction-tuned units you selected
-
     ``heading_deg`` and ``frame_times`` are the shutter-aligned pair
-
     ``intervals``: ``scoring.intervals`` from :func:`spikeshpc.load_states`
-
-    ``within``: optional list of [start, stop] spans, e.g.
-    ``movement_intervals(scoring)["MOVING"]``. Only WAKE bins lying wholly
+    ``within``: optional list of [start, stop] spans on the recording clock,
+    e.g. ``[[0, 7200]]`` for the first two hours. Only WAKE bins lying wholly
     inside one are trained and tested on, so both sides of the split come from
     those periods. REM is decoded as before. Default None (all of wake)
-
+    ``interval_mask``: optional boolean mask over the inter-frame intervals of
+    ``frame_times`` (length ``len(frame_times) - 1``) -- the one the tuning
+    functions take, e.g. from :func:`spikeshpc.behavior_interval_mask`. Only
+    WAKE bins whose every frame interval it keeps are trained and tested on,
+    and it is applied before the train/test split, so both sides come from the
+    kept time. REM is decoded as before. Default None (all of wake)
     ``bin_s``: bin size in seconds. To set to camera frame rate, use (1/frame rate). Default 1/60
-
     ``n_angle_bins``: number of bins to devide heading space into. Default 180
-
     ``smooth_sigma_deg``: how much to smooth tuning curves. Default 10 degrees
-
     ``min_rate_hz``: applies this floor to tuning curves to avoid overweighting random spikes. Default 0.1 hz
-
     ``test_fraction``: test/train split. Default 0.3
-
     ``split_mode``: how to split the wake data into train/test chunks. Can be 'blocks' or 'contiguous'. Default 'blocks'
-
     ``block_s``: if 'blocks' mode is used, how long in seconds the blocks should be. Default 60
-
     ``movement_var_deg2``: maximum degrees/bin to allow for heading changes/bin.
       ``None`` = (2 deg^2 per 10 ms bin, scaled to ``bin_s``) per convention. Default
       ``'estimate'`` = estimate from the actual heading
       ``np.inf`` = remove limit completely
       ``number`` = fix at this value
-
     ``acausal``: whether to use causal or acausal decoder. Default True (acausal)
-
     ``tolerance_deg``: for evaluating model. Acceptable variance from true heading. Default 10 degrees
-
     ``n_shuffles``: number of shuffles for control analysis. Default 100
-
     ``min_shift_s``: amount to shift spike trains vs heading for shuffle analysis. Default 30 s
-
     ``decode_rem``: whether or not to run decoder on REM data. Default True. Set False for fine-tuning model
-
     ``keep_posterior``: whether to save posteriors for REM analysis. Default True
-
     ``seed``: seed for generating the random train/test split. Default 0
-
     ``verbose``: print progress on model generation. Default True
 
     Tuning guide
     ------------
-    The knob that matters most is not in this list: it is which units you pass
-    in. A decoder is a weighted vote of tuning curves, so adding a unit with a
+    The factor that matters most is not in this list: which units you pass in.
+    A decoder is a weighted vote of tuning curves, so adding a unit with a
     weak or unstable curve costs more than any parameter here will win back.
     Start there, then:
 
@@ -1175,6 +1190,24 @@ def run_decoder(
                 f"  within the given spans: {data.duration_s[wake_mask].sum():.0f}s "
                 f"of {wake_s:.0f}s wake"
             )
+    if interval_mask is not None:
+        interval_mask = np.asarray(interval_mask, dtype=bool)
+        n_intervals = len(frame_times) - 1
+        if interval_mask.shape != (n_intervals,):
+            raise ValueError(
+                f"interval_mask has {interval_mask.shape} entries but there are "
+                f"{n_intervals} inter-frame intervals. It masks intervals, not "
+                "frames -- see spikeshpc.states.frames_in_states."
+            )
+        wake_s = data.duration_s[wake_mask].sum()
+        wake_mask &= bins_in_interval_mask(data, interval_mask)
+        if not wake_mask.any():
+            raise ValueError("no WAKE decoder bin lies wholly inside `interval_mask`")
+        if verbose:
+            print(
+                f"  within interval_mask: {data.duration_s[wake_mask].sum():.0f}s "
+                f"of {wake_s:.0f}s wake"
+            )
 
     train_mask, test_mask = split_train_test(
         data, wake_mask, test_fraction, split_mode, block_s, seed
@@ -1216,6 +1249,15 @@ def run_decoder(
     )
     if verbose:
         print(f"  {test}")
+        # decode() skips stretches under min_run_s, which a fragmented mask is
+        # made of; say so rather than let the test set shrink unannounced
+        test_s = data.duration_s[test_mask].sum()
+        skipped_s = test_s - test.duration_s.sum()
+        if skipped_s > 0.01 * test_s:
+            print(
+                f"    {skipped_s:.0f}s of the {test_s:.0f}s test set was not "
+                "decoded: decode() skips stretches under 1 s"
+            )
 
     test_shuffle = None
     if n_shuffles:
@@ -1392,11 +1434,17 @@ def plot_decoded(
     breaks = np.flatnonzero(np.diff(decoded.run_index[window]) != 0) + 1
     ax.plot(
         *break_at(time, decoded.actual_deg[window], breaks),
-        color=ACTUAL_COLOR, lw=1.3, label="actual", zorder=3,
+        color=ACTUAL_COLOR,
+        lw=1.3,
+        label="actual",
+        zorder=3,
     )
     ax.plot(
         *break_at(time, decoded.decoded_deg[window], breaks),
-        color=DECODED_COLOR, lw=1.3, label="decoded", zorder=4,
+        color=DECODED_COLOR,
+        lw=1.3,
+        label="decoded",
+        zorder=4,
     )
     ax.set_facecolor("white")
     ax.set_xlim(t0, t0 + window_s)

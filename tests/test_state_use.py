@@ -7,9 +7,10 @@ import pytest
 
 from spikeshpc.io import StateScoring, load_states
 from spikeshpc.states import (
+    behavior_interval_mask,
     frames_in_states,
+    interval_mask_to_spans,
     intervals_between_frames,
-    movement_intervals,
     seconds_since,
     slice_recording_to_states,
     state_epochs,
@@ -176,62 +177,241 @@ def test_intervals_between_frames_on_degenerate_input():
     assert len(intervals_between_frames(np.array([], dtype=bool))) == 0
 
 
-# ── movement as intervals, for downstream masks ─────────────────────────
-def _scoring_with_speed(speed, threshold=None, step_s=1.0):
-    """A scoring whose movement veto ran with `threshold` (None: never ran)."""
-    speed = np.asarray(speed, dtype=float)
-    n = len(speed)
-    movement = {} if threshold is None else {"movement": {"threshold_speed": threshold}}
-    return StateScoring(
-        session="m1",
-        times=np.arange(n) * step_s + step_s / 2,
-        codes=np.ones(n, dtype=np.int16),
-        speed=speed,
-        step_s=step_s,
-        metadata=movement,
+# ── behaviour as an interval mask, for downstream analysis ──────────────
+def _track(n_frames, rate=60.0, seed=0):
+    """Shutter-aligned per-frame arrays for a head that behaves itself.
+
+    Heading random-walks, elevation stays within a few tens of degrees of
+    level, and speed is lognormal around a trot -- a bulk with no tail in it
+    for an outlier cut to find.
+    """
+    rng = np.random.default_rng(seed)
+    frame_times = np.arange(n_frames) / rate
+    heading = np.cumsum(rng.normal(0, 0.5, n_frames)) % 360.0
+    elevation = rng.normal(0, 10, n_frames)
+    speed = 10 ** rng.normal(1.6, 0.25, n_frames)
+    return frame_times, heading, {"speed": speed}, elevation
+
+
+def test_with_no_thresholds_the_starting_mask_comes_back():
+    frame_times, heading, kinematics, elevation = _track(600)
+    _, wake = frames_in_states(frame_times, {"WAKE": [[0.0, 4.0], [6.0, 10.0]]}, "WAKE")
+
+    keep, thresholds = behavior_interval_mask(
+        heading, frame_times, kinematics, elevation, wake, verbose=False
     )
+    np.testing.assert_array_equal(keep, wake)
+    assert thresholds["max_elevation_deg"] is None
+    assert thresholds["min_speed_mm_s"] is None and thresholds["automatic"] == []
+
+    # and with no starting mask, every interval is a candidate
+    everything, _ = behavior_interval_mask(None, frame_times, verbose=False)
+    assert everything.shape == (len(frame_times) - 1,) and everything.all()
 
 
-def test_movement_intervals_split_tracked_time_at_the_threshold():
-    s = _scoring_with_speed([50, 50, 2, 2, 2, 30, np.nan, np.nan, 1], threshold=10.0)
-    spans = movement_intervals(s, verbose=False)
-    assert spans["MOVING"] == [[0.0, 2.0], [5.0, 6.0]]
-    # the untracked 6-8 s is in neither: no tracking is not stillness
-    assert spans["STILL"] == [[2.0, 5.0], [8.0, 9.0]]
+def test_an_interval_needs_both_of_its_frames_to_pass():
+    elevation = np.array([0.0, 0.0, 70.0, 0.0, 0.0, 0.0])
+    keep, _ = behavior_interval_mask(
+        None, np.arange(6.0), elevation_deg=elevation, max_elevation_deg=60,
+        verbose=False,
+    )
+    # frame 2 fails, so both intervals it bounds go with it
+    assert list(keep) == [True, False, False, True, True]
 
 
-def test_movement_intervals_default_to_the_veto_threshold():
-    s = _scoring_with_speed([5, 15, 25], threshold=20.0)
-    assert movement_intervals(s, verbose=False)["MOVING"] == [[2.0, 3.0]]
-    # but an explicit threshold wins
-    assert movement_intervals(s, threshold=10.0, verbose=False)["MOVING"] == [[1.0, 3.0]]
+def test_elevation_is_cut_on_its_magnitude():
+    """Nose straight down leaves heading as ill-defined as nose straight up."""
+    elevation = np.array([0.0, -70.0, 0.0, 0.0, 0.0, 70.0, 0.0])
+    keep, _ = behavior_interval_mask(
+        None, np.arange(7.0), elevation_deg=elevation, max_elevation_deg=60,
+        verbose=False,
+    )
+    assert list(keep) == [False, False, True, True, False, False]
 
 
-def test_movement_intervals_find_their_own_threshold_without_a_veto():
-    """No saved threshold: split the breathing floor from locomotion."""
+def test_minimum_and_maximum_speed_select_a_band():
+    frame_times = np.arange(8.0)
+    kinematics = {"speed": np.array([5.0, 5.0, 50.0, 50.0, 50.0, 500.0, 500.0, 50.0])}
+
+    band, _ = behavior_interval_mask(
+        None, frame_times, kinematics, min_speed_mm_s=10, max_speed_mm_s=100,
+        verbose=False,
+    )
+    assert list(band) == [False, False, True, True, False, False, False]
+
+    # one threshold splits moving from still, and a frame exactly on it is
+    # still -- so no interval is both
+    moving, _ = behavior_interval_mask(
+        None, frame_times, kinematics, min_speed_mm_s=50, verbose=False
+    )
+    still, _ = behavior_interval_mask(
+        None, frame_times, kinematics, max_speed_mm_s=50, verbose=False
+    )
+    assert list(moving) == [False, False, False, False, False, True, False]
+    assert list(still) == [True, True, True, True, False, False, False]
+    assert not (moving & still).any()
+
+
+def test_angular_velocity_is_read_off_the_heading():
+    """A two-turn spin in one second is dropped; the still head around it is not."""
+    frame_times = np.arange(600) / 60.0
+    heading = np.full(600, 90.0)
+    heading[300:360] = (90.0 + 12.0 * np.arange(1, 61)) % 360.0  # 720 deg/s
+
+    keep, _ = behavior_interval_mask(
+        heading, frame_times, max_angular_velocity_deg_s=360, verbose=False
+    )
+    assert not keep[305:354].any()
+    assert keep[:285].all() and keep[375:].all()
+
+
+def test_automatic_maxima_cut_a_planted_tail_and_spare_the_bulk():
+    frame_times, heading, kinematics, elevation = _track(20_000)
+    glitches = np.arange(500, 20_000, 1000)  # 20 isolated frames
+    elevation[glitches] = 88.0
+    kinematics["speed"][glitches] = 20_000.0
+    # a 90-degree step: the rigid body re-identified the wrong way round
+    jumps = np.zeros(len(heading))
+    jumps[glitches] = 90.0
+    heading = (heading + np.cumsum(jumps)) % 360.0
+
+    for name in ("max_elevation_deg", "max_angular_velocity_deg_s", "max_speed_mm_s"):
+        keep, thresholds = behavior_interval_mask(
+            heading, frame_times, kinematics, elevation, verbose=False,
+            **{name: "automatic"},
+        )
+        assert thresholds["automatic"] == [name]
+        # every glitch is cut, along with the interval leading into it...
+        assert not keep[glitches - 1].any(), name
+        # ...and very little of the rest. Elevation's bulk is half-normal, so
+        # its fence (2.4 sd) trims a percent or two of honest frames with it
+        assert keep.mean() > 0.95, (name, keep.mean())
+
+
+def test_automatic_minimum_speed_splits_still_from_moving():
+    """The breathing floor on one side of the trough, locomotion on the other."""
     rng = np.random.default_rng(0)
-    still = 10 ** rng.normal(np.log10(3.0), 0.15, 300)
-    moving = 10 ** rng.normal(np.log10(40.0), 0.25, 300)
-    spans = movement_intervals(_scoring_with_speed(np.r_[still, moving]), verbose=False)
-    called_moving = times_in_states(np.arange(600) + 0.5, spans, "MOVING")
-    assert called_moving[:300].mean() < 0.02 and called_moving[300:].mean() > 0.98
+    still = 10 ** rng.normal(np.log10(3.0), 0.15, 3000)
+    moving = 10 ** rng.normal(np.log10(40.0), 0.25, 3000)
+    frame_times = np.arange(6000) / 60.0
 
-
-def test_movement_intervals_need_a_movement_trace():
-    s = StateScoring(session="m2", times=np.arange(3) + 0.5, codes=np.ones(3))
-    with pytest.raises(ValueError, match="optitrack_csv"):
-        movement_intervals(s)
-
-
-def test_moving_spans_mask_frames_like_any_other_state():
-    spans = movement_intervals(
-        _scoring_with_speed([50, 50, 2, 2, 50], threshold=10.0), verbose=False
+    keep, thresholds = behavior_interval_mask(
+        None, frame_times, {"speed": np.r_[still, moving]},
+        min_speed_mm_s="automatic", verbose=False,
     )
-    frame_times = np.arange(0, 5, 0.25)
-    frames, ivals = frames_in_states(frame_times, spans, "MOVING")
-    assert frames[:8].all() and not frames[8:16].any() and frames[16:].all()
-    # no inter-frame interval bridges the still gap
-    assert not ivals[7] and not ivals[15]
+    assert 3.0 < thresholds["min_speed_mm_s"] < 40.0
+    assert keep[:2999].mean() < 0.02 and keep[3000:].mean() > 0.95
+
+
+def test_automatic_thresholds_read_only_the_starting_intervals():
+    """Whatever happens outside wake cannot move a cut made for wake."""
+    frame_times, heading, kinematics, elevation = _track(12_000)
+    _, wake = frames_in_states(frame_times, {"WAKE": [[0.0, 100.0]]}, "WAKE")
+    wild_kinematics = {"speed": kinematics["speed"].copy()}
+    wild_kinematics["speed"][6500:] = 1e6
+    wild_elevation = elevation.copy()
+    wild_elevation[6500:] = 89.0
+
+    settings = dict(
+        max_elevation_deg="automatic",
+        max_speed_mm_s="automatic",
+        min_speed_mm_s="automatic",
+        verbose=False,
+    )
+    keep, thresholds = behavior_interval_mask(
+        heading, frame_times, kinematics, elevation, wake, **settings
+    )
+    wild_keep, wild_thresholds = behavior_interval_mask(
+        heading, frame_times, wild_kinematics, wild_elevation, wake, **settings
+    )
+    assert wild_thresholds == thresholds
+    np.testing.assert_array_equal(wild_keep, keep)
+    assert not keep[wake.sum():].any()
+
+
+def test_nan_fails_only_the_thresholds_that_read_it():
+    frame_times = np.arange(5.0)
+    kinematics = {"speed": np.full(5, 50.0)}
+    elevation = np.array([0.0, np.nan, 0.0, 0.0, 0.0])
+
+    speed_only, _ = behavior_interval_mask(
+        None, frame_times, kinematics, elevation, max_speed_mm_s=100, verbose=False
+    )
+    assert speed_only.all()
+    with_elevation, _ = behavior_interval_mask(
+        None, frame_times, kinematics, elevation, max_elevation_deg=60, verbose=False
+    )
+    assert list(with_elevation) == [False, False, True, True]
+
+
+def test_min_duration_drops_short_stretches():
+    frame_times = np.arange(21) * 0.1
+    kinematics = {"speed": np.full(21, 50.0)}
+    kinematics["speed"][[3, 10]] = 0.0  # leaves stretches of 0.2, 0.5 and 0.9 s
+    start = np.ones(20, dtype=bool)
+
+    keep, thresholds = behavior_interval_mask(
+        None, frame_times, kinematics, interval_mask=start, min_speed_mm_s=10,
+        min_duration_s=0.4, verbose=False,
+    )
+    assert not keep[:2].any()
+    assert keep[4:9].all() and keep[11:].all()
+    assert thresholds["min_duration_s"] == 0.4
+    assert start.all()  # the mask passed in is left alone
+
+
+def test_the_thresholds_are_plain_json():
+    """They go into the parameters a tuning is saved with."""
+    frame_times, heading, kinematics, elevation = _track(3000)
+    _, thresholds = behavior_interval_mask(
+        heading, frame_times, kinematics, elevation,
+        max_elevation_deg="automatic", max_speed_mm_s=500, verbose=False,
+    )
+    assert json.loads(json.dumps(thresholds)) == thresholds
+    assert thresholds["max_speed_mm_s"] == 500.0
+    assert thresholds["automatic"] == ["max_elevation_deg"]
+    assert thresholds["min_speed_mm_s"] is None
+
+
+def test_masks_and_inputs_of_the_wrong_shape_are_refused():
+    frame_times, heading, _, elevation = _track(100)
+    frames, ivals = frames_in_states(frame_times, {"WAKE": [[0.0, 1.0]]}, "WAKE")
+
+    with pytest.raises(ValueError, match="masks intervals, not"):
+        behavior_interval_mask(heading, frame_times, interval_mask=frames, verbose=False)
+    with pytest.raises(ValueError, match="is a tuple"):
+        behavior_interval_mask(
+            heading, frame_times, interval_mask=(frames, ivals), verbose=False
+        )
+    with pytest.raises(ValueError, match="one entry per frame"):
+        behavior_interval_mask(
+            heading, frame_times, elevation_deg=elevation[:-1],
+            max_elevation_deg=60, verbose=False,
+        )
+
+
+def test_a_threshold_needs_its_input_and_a_word_it_knows():
+    frame_times, heading, kinematics, _ = _track(100)
+    with pytest.raises(ValueError, match="elevation_deg is needed"):
+        behavior_interval_mask(
+            heading, frame_times, kinematics, max_elevation_deg=60, verbose=False
+        )
+    with pytest.raises(ValueError, match="'automatic' or None"):
+        behavior_interval_mask(
+            heading, frame_times, kinematics, min_speed_mm_s="auto", verbose=False
+        )
+
+
+def test_spans_of_a_mask_are_its_runs_for_seconds_since():
+    frame_times = np.arange(10.0)
+    mask = np.array([True, True, False, False, True, False, False, True, True])
+
+    spans = interval_mask_to_spans(frame_times, mask)
+    assert spans == [[0.0, 2.0], [4.0, 5.0], [7.0, 9.0]]
+    np.testing.assert_allclose(
+        seconds_since(np.array([1.0, 3.0, 6.5, 9.0]), spans), [0.0, 1.0, 1.5, 0.0]
+    )
+    assert interval_mask_to_spans(frame_times, np.zeros(9, dtype=bool)) == []
 
 
 def test_seconds_since_is_zero_inside_and_counts_up_after():

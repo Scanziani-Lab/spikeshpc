@@ -55,6 +55,9 @@ class HDTuning:
 
     ``unit_ids`` orders every per-unit array here. ``tuned_ids`` is the subset
     that passed the significance test, which is what a decoder should be given.
+    ``interval_mask`` is the mask over inter-frame intervals the curves were
+    computed on, for ``run_decoder(interval_mask=...)`` -- None if it was not
+    saved.
     """
 
     session: str
@@ -65,6 +68,7 @@ class HDTuning:
     depths: np.ndarray  # (n_units,), probe depth
     stats: dict = field(default_factory=dict)  # unit_id -> HDTuningStats
     parameters: dict = field(default_factory=dict)
+    interval_mask: np.ndarray | None = None  # one per inter-frame interval
 
     @property
     def tuned_ids(self) -> np.ndarray:
@@ -104,6 +108,7 @@ def save_hd_tuning(
     stats: dict,
     unit_depths: dict,
     parameters: dict | None = None,
+    interval_mask=None,
 ) -> Path:
     """Write tuning curves, statistics and heading to ``<path>.npz`` + ``.json``.
 
@@ -111,8 +116,21 @@ def save_hd_tuning(
     functions return, keyed by unit id. Units missing from any of them are
     dropped rather than padded, so what comes back is exactly the set that has
     a curve, a statistic and a depth.
+
+    ``interval_mask`` is the one the curves were computed with, if any. Saving
+    it lets the decoder be trained and tested on exactly the intervals the
+    units were selected on, without recomputing whatever built it.
     """
     path = Path(path).with_suffix(".npz")
+
+    if interval_mask is not None:
+        interval_mask = np.asarray(interval_mask, dtype=bool)
+        if interval_mask.shape != (len(heading_deg) - 1,):
+            raise ValueError(
+                f"interval_mask has {interval_mask.shape} entries but heading_deg "
+                f"has {len(heading_deg)} frames, so {len(heading_deg) - 1} "
+                "inter-frame intervals"
+            )
     path.parent.mkdir(parents=True, exist_ok=True)
 
     unit_ids = [u for u in tuning_curves if u in stats and u in unit_depths]
@@ -144,6 +162,8 @@ def save_hd_tuning(
             ),
             "null_percentiles": np.asarray(first.null_percentiles, dtype=float),
         }
+    if interval_mask is not None:
+        extra["interval_mask"] = interval_mask
 
     np.savez_compressed(
         path,
@@ -166,6 +186,7 @@ def save_hd_tuning(
         "n_units": len(unit_ids),
         "n_tuned": int(columns["significant"].sum()),
         "n_frames": len(heading_deg),
+        "n_intervals_kept": None if interval_mask is None else int(interval_mask.sum()),
         "parameters": parameters or {},
         "units": {
             str(u): {k: _plain(getattr(stats[u], k)) for k in _STAT_FIELDS}
@@ -225,4 +246,5 @@ def load_hd_tuning(path) -> HDTuning:
         depths=arrays["depths"],
         stats=stats,
         parameters=json.loads(str(arrays["parameters"])),
+        interval_mask=arrays.get("interval_mask"),
     )

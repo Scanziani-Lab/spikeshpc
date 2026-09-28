@@ -482,6 +482,7 @@ def compute_all_units_tuning_curves(
 def plot_hd_tuning_population(
     hd_tuning,
     significant_only: bool = True,
+    normalized: bool = True,
     cmap="hsv",
     n_hist_bins: int = 36,
     figsize=(10.0, 4.5),
@@ -495,8 +496,12 @@ def plot_hd_tuning_population(
     unit's peak is the argmax of its saved curve -- the direction of maximal
     firing, not the MVL's preferred direction, which a skewed curve pulls off
     the peak. Each unit is its own block in the stack, in its own color.
-    Right: every curve on a polar axis, each divided by its own peak so all
-    of them reach 1.
+    Right: every curve on a polar axis. With ``normalized`` (the default) each
+    is divided by its own peak so all of them reach 1, which lines up shapes
+    and directions whatever the rate. Without it they are drawn in Hz on one
+    shared scale, out to a round number past the highest peak, so how hard
+    each unit fires shows too -- at the cost of one fast unit flattening the
+    quiet ones.
 
     Colors are ``cmap`` sampled evenly across the units in order of peak
     direction, so each is distinct and the same unit has the same color in both
@@ -524,7 +529,7 @@ def plot_hd_tuning_population(
     peak_deg = bin_centers[np.argmax(curves, axis=1)]
     order = np.argsort(peak_deg, kind="stable")
     unit_ids, curves, peak_deg = unit_ids[order], curves[order], peak_deg[order]
-    normalized = curves / curves.max(axis=1, keepdims=True)
+    radii = curves / curves.max(axis=1, keepdims=True) if normalized else curves
     n = len(unit_ids)
     # bin centers, not 0..1 inclusive: a cyclic map's two ends are one color
     colors = matplotlib.colormaps.get_cmap(cmap)((np.arange(n) + 0.5) / n)
@@ -550,16 +555,26 @@ def plot_hd_tuning_population(
     ax_hist.spines[["top", "right"]].set_visible(False)
 
     theta = np.deg2rad(np.r_[bin_centers, bin_centers[0]])  # closed loop
-    for rate, color, unit in zip(normalized, colors, unit_ids):
+    for rate, color, unit in zip(radii, colors, unit_ids):
         ax_polar.plot(theta, np.r_[rate, rate[0]], color=color, lw=1.3, label=str(unit))
     spokes = np.arange(0, 360, 30)
     ax_polar.set_thetagrids(spokes, labels=[f"{a}" if a % 90 == 0 else "" for a in spokes])
-    ax_polar.set_ylim(0, 1.0)
-    ax_polar.set_yticks([0.5, 1.0])
-    ax_polar.set_yticklabels(["", "1"], fontsize=8, color="gray")
+    if normalized:
+        ax_polar.set_ylim(0, 1.0)
+        ax_polar.set_yticks([0.5, 1.0])
+        ax_polar.set_yticklabels(["", "1"], fontsize=8, color="gray")
+        ax_polar.set_title("Normalized firing rate", fontsize=10, pad=14)
+    else:
+        # the locator's last tick is at or past the highest peak, so the rim is
+        # a labeled ring and no curve is clipped
+        rings = MaxNLocator(nbins=4).tick_values(0, curves.max())
+        rings = rings[rings > 0]
+        ax_polar.set_ylim(0, rings[-1])
+        ax_polar.set_yticks(rings)
+        ax_polar.set_yticklabels([f"{r:g}" for r in rings], fontsize=8, color="gray")
+        ax_polar.set_title("Firing rate (Hz)", fontsize=10, pad=14)
     ax_polar.set_rlabel_position(45)
     ax_polar.grid(color="0.85", lw=0.6)
-    ax_polar.set_title("Normalized firing rate", fontsize=10, pad=14)
 
     which = "significantly tuned units" if significant_only else "units"
     fig.suptitle(f"{hd_tuning.session}: {n} {which}", fontsize=11)

@@ -245,7 +245,9 @@ def postprocess(
     kilosort's own spike_positions.npy instead of recomputing it. On a 6.6 h
     session that extension alone costs about two hours, and kilosort has
     already done the work. Falls back to computing it, with the reason
-    printed, if the two sortings cannot be matched spike for spike.
+    printed, if the two sortings cannot be matched spike for spike. The metric
+    extensions are then computed after it is attached, since the drift metric
+    reads it.
     """
     results_dir = output_dir / SORTER_DIRNAME
     if not (results_dir / "spike_times.npy").exists():
@@ -282,9 +284,29 @@ def postprocess(
             except ValueError as e:
                 print(f"    spike_locations: {e}")
 
+    # Metrics read other extensions -- quality_metrics' drift reads
+    # spike_locations -- and spikeinterface drops a metric whose input is
+    # missing with no more than a warning. So while spike_locations is
+    # borrowed, the metric extensions wait until it is attached. It cannot be
+    # attached first instead: computing templates or random_spikes deletes an
+    # existing spike_locations.
+    held_back = {}
+    if borrowed is not None:
+        held_back = {name: extensions.pop(name) for name in list(extensions) if _is_metric_extension(name)}
+
     analyzer.compute(extensions)
 
     if borrowed is not None:
         attach_spike_locations(analyzer, borrowed)
         print(f"    spike_locations: took {len(borrowed):,} positions from kilosort")
+    if held_back:
+        analyzer.compute(held_back)
     return analyzer
+
+
+def _is_metric_extension(name) -> bool:
+    """Whether `name` is a metrics extension (quality_metrics, template_metrics, ...)."""
+    from spikeinterface.core.analyzer_extension_core import BaseMetricExtension
+    from spikeinterface.core.sortinganalyzer import get_extension_class
+
+    return issubclass(get_extension_class(name), BaseMetricExtension)

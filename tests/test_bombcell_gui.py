@@ -140,6 +140,66 @@ def test_big_scatters_become_markers_with_the_same_points_and_limits():
     plt.close(fig)
 
 
+def _drawn(gui):
+    gui.fig.canvas.draw()
+    return gui.fig.canvas.get_renderer()
+
+
+def test_no_text_is_cut_off_at_the_figure_edge(gui):
+    from matplotlib.text import Text
+
+    renderer = _drawn(gui)
+    figure_box = gui.fig.bbox
+    outside = []
+    for text in gui.fig.findobj(Text):
+        if not text.get_visible() or not text.get_text().strip():
+            continue
+        box = text.get_window_extent(renderer)
+        if box.width and not (figure_box.x0 - 1 <= box.x0 and box.x1 <= figure_box.x1 + 1
+                              and figure_box.y0 - 1 <= box.y0 and box.y1 <= figure_box.y1 + 1):
+            outside.append(text.get_text())
+    assert not outside
+
+
+def test_histograms_are_squares_in_a_block_on_the_right(gui):
+    renderer = _drawn(gui)
+    hist = [ax for ax in gui._hist["axes"] if ax.axison]
+    assert len(hist) >= 10
+    for ax in hist:
+        box = ax.get_window_extent(renderer)
+        assert box.width == pytest.approx(box.height, abs=1.5)
+    per_unit = [ax for ax in gui.fig.axes if ax not in gui._hist["axes"]]
+    assert min(ax.get_window_extent(renderer).x0 for ax in hist) > max(
+        ax.get_window_extent(renderer).x1 for ax in per_unit)
+
+
+def test_per_unit_panels_do_not_overlap(gui):
+    renderer = _drawn(gui)
+    panels = [ax for ax in gui.fig.axes
+              if ax not in gui._hist["axes"] and ax.get_subplotspec() is not None]
+    boxes = {}
+    for ax in panels:  # a twin shares its parent's box
+        boxes.setdefault(tuple(np.round(ax.get_position().bounds, 6)),
+                         ax.get_window_extent(renderer))
+    boxes = list(boxes.values())
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1:]:
+            assert not a.overlaps(b)
+
+
+def test_font_scale_scales_the_text(inputs, tmp_path):
+    ephys, qm, param, unit_types = inputs
+    sizes = []
+    for scale in (1.0, 1.5):
+        g = FastUnitQualityGUI(ephys, qm.copy(), param=dict(param), unit_types=unit_types.copy(),
+                               save_path=str(tmp_path), window="notebook", prefetch=False,
+                               font_scale=scale)
+        sizes.append(g._location_ax.title.get_fontsize())
+        g.close()
+        plt.close("all")
+    assert sizes[1] == pytest.approx(1.5 * sizes[0])
+
+
 def test_qt_is_refused_without_the_qt_backend(inputs, tmp_path):
     ephys, qm, param, unit_types = inputs
     with pytest.raises(ValueError, match="%matplotlib qt"):

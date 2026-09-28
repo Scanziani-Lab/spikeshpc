@@ -17,6 +17,7 @@ from scipy.ndimage import gaussian_filter1d
 
 from spikeshpc.decoder import (
     DecoderData,
+    bins_in_interval_mask,
     circular_correlation,
     circular_difference,
     decode,
@@ -32,6 +33,7 @@ from spikeshpc.decoder import (
     split_train_test,
     state_interval_mask,
 )
+from spikeshpc.states import frames_in_states, interval_mask_to_spans
 
 RATE = 120.0  # camera frames per second
 N_UNITS = 24
@@ -305,6 +307,23 @@ def test_state_mask_keeps_only_bins_wholly_inside_the_state(session, data):
     assert data.duration_s[rem].sum() == pytest.approx(200.0, abs=0.2)
     # nothing from the NREM block sneaks in
     assert data.time_s[wake].max() < session["intervals"]["NREM"][0][0]
+
+
+def test_a_bin_needs_every_one_of_its_frame_intervals(session, data):
+    """A frame excluded from the middle of a bin sinks that bin, and only it."""
+    keep = np.ones(len(session["frame_times"]) - 1, dtype=bool)
+    keep[3 * data.bin_frames + 2] = False  # inside the fourth bin
+
+    bins = bins_in_interval_mask(data, keep)
+    assert list(np.flatnonzero(~bins)) == [3]
+    # testing only a bin's edges, as state masks do, would have kept it
+    spans = {"KEEP": interval_mask_to_spans(session["frame_times"], keep)}
+    assert state_interval_mask(data, spans, "KEEP")[3]
+
+
+def test_a_bin_mask_wants_intervals_not_bins(data):
+    with pytest.raises(ValueError, match="masks intervals, not frames or bins"):
+        bins_in_interval_mask(data, np.ones(data.n_bins, dtype=bool))
 
 
 # ── train / test split ───────────────────────────────────────────────────
@@ -860,6 +879,51 @@ def test_within_spans_that_miss_wake_are_refused(session):
             verbose=False,
             within=session["intervals"]["NREM"],
         )
+
+
+def test_interval_mask_keeps_training_and_testing_inside_it(session, full_run):
+    """A tuning's interval mask, handed on: both sides of the split come from it."""
+    frame_times = session["frame_times"]
+    _, keep = frames_in_states(
+        frame_times, {"KEEP": [[0.0, 250.0], [300.0, 600.0]]}, "KEEP"
+    )
+    run = run_decoder(
+        session["sorting"],
+        session["unit_ids"],
+        session["heading_deg"],
+        frame_times,
+        session["intervals"],
+        n_shuffles=0,
+        verbose=False,
+        interval_mask=keep,
+    )
+    used = run.train_mask | run.test_mask
+    inside = ((run.data.edges[:-1] >= 0.0) & (run.data.edges[1:] <= 250.0)) | (
+        (run.data.edges[:-1] >= 300.0) & (run.data.edges[1:] <= 600.0)
+    )
+    assert used.any() and not (used & ~inside).any()
+    assert run.data.duration_s[used].sum() == pytest.approx(550.0, rel=0.01)
+    assert run.test.metrics["median_abs_error_deg"] < 10.0
+    # REM is not wake, so the mask does not reach it
+    assert run.rem.n_decoded == full_run.rem.n_decoded
+
+
+def test_an_interval_mask_must_be_over_intervals_and_meet_wake(session):
+    frame_times = session["frame_times"]
+    inputs = (
+        session["sorting"],
+        session["unit_ids"],
+        session["heading_deg"],
+        frame_times,
+        session["intervals"],
+    )
+    quiet = dict(n_shuffles=0, decode_rem=False, verbose=False)
+
+    with pytest.raises(ValueError, match="masks intervals, not"):
+        run_decoder(*inputs, interval_mask=np.ones(len(frame_times), dtype=bool), **quiet)
+    _, nrem = frames_in_states(frame_times, session["intervals"], "NREM")
+    with pytest.raises(ValueError, match="wholly inside `interval_mask`"):
+        run_decoder(*inputs, interval_mask=nrem, **quiet)
 
 
 # ── plots ────────────────────────────────────────────────────────────────

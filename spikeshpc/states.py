@@ -46,6 +46,7 @@ from scipy.signal import butter, sosfiltfilt
 from .config import STATES_DIRNAME
 from .io import channel_positions, detect_phys_type, read_recording
 from .optitrack.io import read_rigid_body_track
+from .optitrack.kinematics import compute_angular_velocity
 
 # buzcode's SleepState convention.
 STATE_CODES = {"WAKE": 1, "NREM": 3, "REM": 5}
@@ -1262,78 +1263,265 @@ def frames_in_states(frame_times, intervals, states=("WAKE",)):
     return frame_mask, intervals_between_frames(frame_mask)
 
 
-def movement_intervals(scoring, threshold=None, verbose=True) -> dict:
-    """Moving and still spans from the scoring's movement trace, as intervals.
+AUTOMATIC = "automatic"
 
-    Returns ``{"MOVING": [[start, stop], ...], "STILL": [[start, stop], ...]}``
-    on the scoring's own clock -- the same shape as ``scoring.intervals``, so
-    everything that takes intervals takes these: :func:`frames_in_states` for a
-    tuning curve's interval mask, the decoder's ``state_interval_mask`` for its
-    bins, :func:`times_in_states` for anything else. AND the result with a
-    state's mask to ask about, say, moving WAKE.
+# what each threshold of behavior_interval_mask is compared with, how, and in
+# which units -- in the order they are applied and reported
+_BEHAVIOR_THRESHOLDS = {
+    "max_elevation_deg": ("|elevation|", "<=", "deg"),
+    "max_angular_velocity_deg_s": ("|angular velocity|", "<=", "deg/s"),
+    "max_speed_mm_s": ("speed", "<=", "mm/s"),
+    "min_speed_mm_s": ("speed", ">", "mm/s"),
+}
 
-    ``threshold`` is in the speed trace's units (mm/s). Left None it is the one
-    the movement veto used, read back from the saved scoring: the trough
-    between the immobility and locomotion modes of log speed. Only if the veto
-    never ran is it recomputed, by the same bimodal split
-    (:func:`movement_threshold`). Movement above it proves the animal awake;
-    being below it proves nothing, so "STILL" is what the tracker saw and not
-    a claim about the brain.
 
-    Bins without tracking (NaN speed) are in neither.
-    """
-    speed = getattr(scoring, "speed", None)
-    if speed is None:
+def _true_runs(mask):
+    """(starts, stops) of each run of True in `mask`, stops exclusive."""
+    edges = np.diff(np.r_[0, np.asarray(mask, dtype=np.int8), 0])
+    return np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
+
+
+def _per_frame(values, name, needed_by, n_frames):
+    """`values` as floats, one per frame, or a ValueError saying what is wrong."""
+    if values is None:
+        raise ValueError(f"{needed_by} is set, so {name} is needed; it is None")
+    values = np.asarray(values, dtype=float)
+    if values.shape != (n_frames,):
         raise ValueError(
-            f"{scoring.session!r} has no movement trace to split. Load it with "
-            "load_states(..., optitrack_csv=...) to compute one from the "
-            "tracking (see attach_movement)."
+            f"{name} has {values.shape} entries but frame_times has {n_frames}; "
+            "both have to be the shutter-aligned arrays, one entry per frame"
         )
-    speed = np.asarray(speed, dtype=float)
+    return values
 
-    if threshold is not None:
-        threshold, source = float(threshold), "given"
+
+def _upper_fence(values, log=False, k=1.5):
+    """Tukey's upper fence, Q3 + k IQR, or None with too few values to place it.
+
+    On log10 of the values when `log`, for quantities whose spread is
+    multiplicative. Zeros have no log and cannot be upper outliers anyway.
+    """
+    values = values[np.isfinite(values)]
+    if log:
+        values = np.log10(values[values > 0])
+    if values.size < 10:
+        return None
+    q1, q3 = np.percentile(values, [25, 75])
+    fence = q3 + k * (q3 - q1)
+    return float(10**fence) if log else float(fence)
+
+
+def _automatic_threshold(name, values):
+    """A cut for threshold `name` read off `values`, or None if there are too few."""
+    if name == "min_speed_mm_s":
+        values = values[np.isfinite(values)]
+        # the mixture fit is the slow part, and a few hundred thousand evenly
+        # spread frames pin the trough down as well as a million do
+        log_threshold = movement_threshold(values[:: max(1, values.size // 200_000)])
+        return None if log_threshold is None else float(10**log_threshold)
+    return _upper_fence(values, log=name != "max_elevation_deg")
+
+
+def behavior_interval_mask(
+    heading_deg,
+    frame_times,
+    kinematics=None,
+    elevation_deg=None,
+    interval_mask=None,
+    max_elevation_deg=None,
+    max_angular_velocity_deg_s=None,
+    max_speed_mm_s=None,
+    min_speed_mm_s=None,
+    min_duration_s=0.0,
+    verbose=True,
+):
+    """The inter-frame intervals where the head was doing what an analysis wants.
+
+    Starts from ``interval_mask`` -- usually the WAKE intervals, the second
+    output of :func:`frames_in_states` -- and keeps those whose frames pass
+    every threshold that is set:
+
+      max_elevation_deg           |elevation_deg|, nose above or below level
+      max_angular_velocity_deg_s  |angular head velocity| from ``heading_deg``
+                                  (:func:`optitrack.compute_angular_velocity`)
+      max_speed_mm_s              ``kinematics["speed"]`` at or below this
+      min_speed_mm_s              ``kinematics["speed"]`` above this
+
+    Returns ``(interval_mask, thresholds)``. The mask has the shape of the one
+    passed in, so it goes straight to ``interval_mask=`` of
+    :func:`optitrack.compute_all_units_tuning_curves`,
+    :func:`optitrack.compute_hd_tuning_significance` and
+    :func:`spikeshpc.decoder.run_decoder`. ``thresholds`` is the value each
+    threshold ended up with (None where it was not applied), plus
+    ``min_duration_s`` and which were ``"automatic"`` -- plain JSON, for the
+    parameters a result is saved with.
+
+    Each threshold is a number, None (not applied) or ``"automatic"``, which
+    reads a cut off that quantity's own distribution over the frames of the
+    starting intervals, each independently of the others:
+
+      maxima     Tukey's upper fence, Q3 + 1.5 IQR -- the end of a box plot's
+                 whisker. Speed and angular velocity are fenced on log10,
+                 because their spread is multiplicative: on a linear scale the
+                 fence lands inside ordinary behaviour (session7 wake: 143 deg/s
+                 and 197 mm/s, dropping 8.4% and 5.5% of it) where on log10 it
+                 reaches the tail (1133 deg/s, 978 mm/s). Elevation is bounded
+                 at 90 degrees and is fenced as it is (58.7 deg, 5% of wake,
+                 nearly all of it nose-up). The two overlap: heading is an
+                 azimuth and spins near vertical, so 93% of the angular-
+                 velocity outliers are elevation outliers too.
+      min speed  the trough between the immobility and locomotion modes of log
+                 speed, the split the movement veto uses
+                 (:func:`movement_threshold`; session7 wake: 14 mm/s).
+
+    An interval is kept only if both of its frames pass -- the rule
+    :func:`intervals_between_frames` applies to states -- and a frame whose
+    quantity is NaN fails every threshold that reads it. The minimum is strict
+    and the maxima are not, so ``min_speed_mm_s=t`` and ``max_speed_mm_s=t``
+    split the same starting intervals into moving and still with none in both.
+
+    ``min_duration_s`` then drops kept stretches shorter than it. A tuning
+    curve does not mind a fragmented mask; the decoder does, since
+    :func:`spikeshpc.decoder.decode` skips stretches under a second. A
+    frame-level speed threshold fragments heavily -- on session7 the median
+    stretch above the automatic minimum is 0.1 s -- so pass 1.0 when the mask
+    is for decoding.
+
+    ``heading_deg``, ``kinematics`` (the dict from
+    :func:`optitrack.compute_kinematics`) and ``elevation_deg`` are the
+    shutter-aligned per-frame arrays, one entry per ``frame_times``; any of
+    them that no set threshold reads may be None.
+    """
+    frame_times = np.asarray(frame_times, dtype=float)
+    n_frames = len(frame_times)
+    dt = np.diff(frame_times)
+
+    if isinstance(interval_mask, tuple):
+        raise ValueError(
+            "interval_mask is a tuple; pass the second output of "
+            "frames_in_states -- the interval mask -- on its own"
+        )
+    if interval_mask is None:
+        start = np.ones(n_frames - 1, dtype=bool)
     else:
-        saved = (getattr(scoring, "metadata", None) or {}).get("movement") or {}
-        if saved.get("threshold_speed") is not None:
-            threshold, source = float(saved["threshold_speed"]), "the movement veto's"
+        start = np.asarray(interval_mask, dtype=bool)
+        if start.shape != (n_frames - 1,):
+            raise ValueError(
+                f"interval_mask has {start.shape} entries but there are "
+                f"{n_frames - 1} inter-frame intervals. It masks intervals, not "
+                "frames -- pass the second output of frames_in_states."
+            )
+    # the frames the starting intervals span, which "automatic" reads
+    start_frames = np.zeros(n_frames, dtype=bool)
+    start_frames[:-1] |= start
+    start_frames[1:] |= start
+
+    given = {
+        "max_elevation_deg": max_elevation_deg,
+        "max_angular_velocity_deg_s": max_angular_velocity_deg_s,
+        "max_speed_mm_s": max_speed_mm_s,
+        "min_speed_mm_s": min_speed_mm_s,
+    }
+    for name, value in given.items():
+        if isinstance(value, str) and value != AUTOMATIC:
+            raise ValueError(
+                f"{name} must be a number, {AUTOMATIC!r} or None, not {value!r}"
+            )
+
+    thresholds = {}
+    automatic = []
+    passing = np.ones(n_frames, dtype=bool)
+    lines = []
+    start_s = float(dt[start].sum())
+    for name, value in given.items():
+        if value is None:
+            thresholds[name] = None
+            continue
+        if name == "max_elevation_deg":
+            quantity = np.abs(_per_frame(elevation_deg, "elevation_deg", name, n_frames))
+        elif name == "max_angular_velocity_deg_s":
+            heading = _per_frame(heading_deg, "heading_deg", name, n_frames)
+            quantity = np.abs(compute_angular_velocity(heading, frame_times))
         else:
-            log_threshold = movement_threshold(speed)
-            if log_threshold is None:
+            speed = None if kinematics is None else kinematics["speed"]
+            quantity = _per_frame(speed, 'kinematics["speed"]', name, n_frames)
+
+        if isinstance(value, str):
+            value = _automatic_threshold(name, quantity[start_frames])
+            if value is None:
                 raise ValueError(
-                    f"{scoring.session!r} has too few tracked bins to find a "
-                    "movement threshold; pass threshold= explicitly."
+                    f"too few tracked frames to set {name} automatically; pass "
+                    "a number"
                 )
-            threshold, source = float(10**log_threshold), "bimodal split of log speed"
+            automatic.append(name)
+        thresholds[name] = value = float(value)
 
-    tracked = np.isfinite(speed)
-    labels = np.zeros(len(speed), dtype=np.int16)  # 0: untracked, in neither
-    labels[tracked & (speed > threshold)] = 1
-    labels[tracked & (speed <= threshold)] = 2
+        label, relation, unit = _BEHAVIOR_THRESHOLDS[name]
+        with np.errstate(invalid="ignore"):  # NaN compares False: it fails
+            ok = quantity > value if relation == ">" else quantity <= value
+        passing &= ok
+        dropped_s = dt[start & ~(ok[:-1] & ok[1:])].sum()
+        lines.append(
+            f"      {label} {relation} {value:.1f} {unit} "
+            f"({'automatic' if name in automatic else 'given'}): drops "
+            f"{dropped_s / max(start_s, 1e-12):.1%}"
+        )
 
-    spans = {"MOVING": [], "STILL": []}
-    for epoch in state_epochs(
-        labels, scoring.times, {"MOVING": 1, "STILL": 2}, scoring.step_s,
-        states=("MOVING", "STILL"),
-    ):
-        spans[epoch.state].append([epoch.start, epoch.stop])
+    keep = start & passing[:-1] & passing[1:]
+    if min_duration_s > 0:
+        before_s = dt[keep].sum()
+        starts, stops = _true_runs(keep)
+        # a run of intervals a..b-1 spans frame a to frame b
+        short = frame_times[stops] - frame_times[starts] < min_duration_s
+        for a, b in zip(starts[short], stops[short]):
+            keep[a:b] = False
+        lines.append(
+            f"      stretches under {min_duration_s:g}s: drop "
+            f"{(before_s - dt[keep].sum()) / max(start_s, 1e-12):.1%}"
+        )
+    thresholds["min_duration_s"] = float(min_duration_s)
+    thresholds["automatic"] = automatic
 
     if verbose:
-        moving_s = sum(b - a for a, b in spans["MOVING"])
-        tracked_s = moving_s + sum(b - a for a, b in spans["STILL"])
+        kept_s = dt[keep].sum()
+        print(f"    behavior mask, from {start_s:.0f}s of intervals:")
+        for line in lines:
+            print(line)
         print(
-            f"    movement: threshold {threshold:.1f} mm/s ({source}); "
-            f"{moving_s / max(tracked_s, 1e-12):.1%} of {tracked_s:.0f}s tracked "
-            f"is moving, in {len(spans['MOVING'])} bouts"
+            f"    kept {kept_s:.0f}s ({kept_s / max(start_s, 1e-12):.1%}) in "
+            f"{len(_true_runs(keep)[0])} stretches"
         )
-    return spans
+    return keep, thresholds
+
+
+def interval_mask_to_spans(frame_times, interval_mask) -> list:
+    """Each run of kept inter-frame intervals as a [start, stop] span, in seconds.
+
+    The way back from a mask to spans, for what wants spans: how long since the
+    animal last moved (:func:`seconds_since` of a moving mask's spans), say, or
+    shading a plot. A run of intervals a..b-1 covers ``frame_times[a]`` to
+    ``frame_times[b]``.
+
+    For masking, keep the mask itself. Spans are tested half-open, so
+    :func:`frames_in_states` would leave out the frame each span ends on, and
+    with it the last interval of every run.
+    """
+    frame_times = np.asarray(frame_times, dtype=float)
+    mask = np.asarray(interval_mask, dtype=bool)
+    if mask.shape != (len(frame_times) - 1,):
+        raise ValueError(
+            f"interval_mask has {mask.shape} entries but there are "
+            f"{len(frame_times) - 1} inter-frame intervals"
+        )
+    starts, stops = _true_runs(mask)
+    return [[float(frame_times[a]), float(frame_times[b])] for a, b in zip(starts, stops)]
 
 
 def seconds_since(query_times, spans) -> np.ndarray:
     """How long before each of `query_times` the most recent of `spans` ended.
 
-    0 inside a span, inf before the first one. With the MOVING spans of
-    :func:`movement_intervals` it is how long the animal has been still; with a
+    0 inside a span, inf before the first one. With the spans of a moving mask
+    (:func:`interval_mask_to_spans` of a :func:`behavior_interval_mask` with a
+    ``min_speed_mm_s``) it is how long the animal has been still; with a
     scoring's NREM and REM spans, how long it has been awake. Either is a
     sharper axis than a still/moving split for asking whether an effect is
     sleep: the animal cannot be asleep two seconds after it last moved, and is

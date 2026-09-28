@@ -253,6 +253,28 @@ def test_it_falls_back_to_computing_when_kilosort_cannot_be_matched(
     )
 
 
+def test_borrowed_positions_are_in_place_before_the_metrics_that_read_them(session, tmp_path):
+    """The drift metric is computed from spike_locations. With the metrics computed
+    before the borrowed positions are attached, spikeinterface drops drift with no more
+    than a warning -- and UnitRefine, whose models take drift as input, then refuses
+    the analyzer."""
+    rec, ks, *_ = session
+    out = tmp_path / "out6"
+    out.mkdir()
+    shutil.copytree(ks, out / "kilosort4", dirs_exist_ok=True)
+
+    analyzer = postprocess(
+        rec, out,
+        {"random_spikes": {}, "noise_levels": {}, "templates": {},
+         "spike_locations": {}, "quality_metrics": {"metric_names": ["num_spikes", "drift"]}},
+        use_KS_positions=True,
+    )
+    assert analyzer.get_extension("spike_locations").params["method"] == "kilosort_spike_positions"
+    assert "drift" in analyzer.get_extension("quality_metrics").params["metric_names"]
+    metrics = analyzer.get_extension("quality_metrics").get_data()
+    assert {"drift_ptp", "drift_std", "drift_mad"} <= set(metrics.columns)
+
+
 # ── rebuilding it on another machine ────────────────────────────────────
 @pytest.fixture
 def raw(tmp_path):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from spikeshpc.optitrack.kinematics import compute_kinematics
+from spikeshpc.optitrack.kinematics import compute_angular_velocity, compute_kinematics
 
 
 def test_constant_velocity_is_recovered():
@@ -28,3 +28,13 @@ def test_constant_acceleration_is_recovered():
     assert np.allclose(kin["velocity"][10:-10], expected_velocity[10:-10], atol=1e-3)
     assert np.allclose(kin["acceleration"][10:-10], accel_true, atol=1e-3)
     assert np.allclose(kin["speed"], np.linalg.norm(kin["velocity"], axis=1))
+
+
+def test_a_steady_turn_across_north_has_a_steady_angular_velocity():
+    """Wrapping from 359 to 0 degrees is a small step, not a 360-degree lurch."""
+    times = np.arange(600) / 60.0
+    left = (350.0 + 30.0 * times) % 360.0
+    right = (10.0 - 30.0 * times) % 360.0
+
+    assert np.allclose(compute_angular_velocity(left, times), 30.0, atol=1e-6)
+    assert np.allclose(compute_angular_velocity(right, times), -30.0, atol=1e-6)

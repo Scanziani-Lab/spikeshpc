@@ -1,4 +1,4 @@
-"""Position, velocity, and acceleration from a rigid body's OptiTrack track."""
+"""Position, velocity, acceleration, and head turning from a rigid body's OptiTrack track."""
 
 from __future__ import annotations
 
@@ -41,3 +41,26 @@ def compute_kinematics(
         "acceleration": acceleration,
         "accel_magnitude": np.linalg.norm(acceleration, axis=1),
     }
+
+
+def compute_angular_velocity(
+    heading_deg: np.ndarray,
+    times: np.ndarray,
+    smooth_window: int = 11,
+    polyorder: int = 3,
+) -> np.ndarray:
+    """Angular head velocity in deg/s: how fast the heading turns, per frame.
+
+    Signed, positive in the direction heading increases. The heading is
+    unwrapped first, so a turn across 0/360 is a small step rather than a
+    360-degree jump, and then differentiated with the same Savitzky-Golay
+    filter :func:`compute_kinematics` uses, for the same reason: a raw
+    frame-to-frame difference turns tracking jitter into spurious spikes.
+
+    ``times`` is assumed uniformly sampled, as there; the sample spacing is its
+    median step.
+    """
+    unwrapped = np.unwrap(np.deg2rad(np.asarray(heading_deg, dtype=float)))
+    dt = float(np.median(np.diff(times)))
+    turning = savgol_filter(unwrapped, smooth_window, polyorder, deriv=1, delta=dt)
+    return np.rad2deg(turning)

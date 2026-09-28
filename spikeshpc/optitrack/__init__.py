@@ -26,7 +26,7 @@ from .io import (
     read_rigid_body_track,
     rigid_body_names,
 )
-from .kinematics import compute_kinematics
+from .kinematics import compute_angular_velocity, compute_kinematics
 from .store import HDTuning, load_hd_tuning, save_hd_tuning
 from .sync import (
     align_frames_to_shutter_events,
@@ -65,6 +65,7 @@ __all__ = [
     "apply_mvl_cutoff",
     "calibrate_head_frame",
     "compute_all_units_tuning_curves",
+    "compute_angular_velocity",
     "compute_frame_firing_rates",
     "compute_hd_tuning_curve",
     "compute_hd_tuning_significance",
