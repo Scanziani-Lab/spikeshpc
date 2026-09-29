@@ -31,6 +31,8 @@ from .decoder import (
     DecoderRun,
     EncodingModel,
     ShuffleTest,
+    TransferRun,
+    apply_decoder,
     bins_in_interval_mask,
     decode,
     fit_encoding_model,
@@ -40,7 +42,11 @@ from .decoder import (
     plot_error,
     plot_metrics_by_group,
     plot_shuffle,
+    plot_transfer_summary,
     prepare_decoder_data,
+    reference_decode,
+    restrict_data,
+    restrict_model,
     run_decoder,
     shuffle_test,
     split_train_test,
@@ -60,7 +66,16 @@ from .io import (
     read_recording,
     sync_clock_problem,
 )
+from .matching import (
+    estimate_rotation,
+    plot_tracked_tuning,
+    putative_matches,
+    recording_colors,
+    select_partners,
+    tuning_similarity,
+)
 from .pipeline import run_pipeline
+from .raster import UnitRaster, unit_raster
 from .shutter import derive_shutter_times
 from .split import SessionSplit, save_splits, split_run
 from .states import (
@@ -76,6 +91,15 @@ from .states import (
     times_in_states,
 )
 from .traces import get_traces, plot_traces, time_range_to_frames
+from .turns import (
+    Turns,
+    clockwise_sign,
+    find_turns,
+    plot_turn_summary,
+    plot_turn_sweep,
+    plot_turn_trace,
+)
+from .turns_widget import TurnWidget, show_turns
 from .widgets import show_state_epochs
 
 __all__ = [
@@ -89,14 +113,22 @@ __all__ = [
     "ShuffleTest",
     "StateEditor",
     "StateScoring",
+    "TransferRun",
+    "TurnWidget",
+    "Turns",
+    "UnitRaster",
+    "apply_decoder",
     "attach_movement",
     "behavior_interval_mask",
     "bins_in_interval_mask",
+    "clockwise_sign",
     "decode",
     "deep_merge",
     "derive_shutter_times",
     "detect_phys_type",
     "drift_at_junction",
+    "estimate_rotation",
+    "find_turns",
     "fit_encoding_model",
     "get_traces",
     "frames_in_states",
@@ -111,21 +143,33 @@ __all__ = [
     "plot_error",
     "plot_metrics_by_group",
     "plot_shuffle",
+    "plot_tracked_tuning",
     "plot_traces",
+    "plot_transfer_summary",
+    "plot_turn_summary",
+    "plot_turn_sweep",
+    "plot_turn_trace",
     "prepare_decoder_data",
     "probe_start_time",
+    "putative_matches",
     "read_openephys_synced",
     "read_recording",
+    "recording_colors",
+    "reference_decode",
     "rescore_movement",
+    "restrict_data",
+    "restrict_model",
     "run_decoder",
     "run_pipeline",
     "save_splits",
     "score_recording",
     "score_session",
     "seconds_since",
+    "select_partners",
     "show_decoded",
     "show_state_editor",
     "show_state_epochs",
+    "show_turns",
     "shuffle_test",
     "slice_recording_to_states",
     "split_run",
@@ -134,4 +178,6 @@ __all__ = [
     "sync_clock_problem",
     "time_range_to_frames",
     "times_in_states",
+    "tuning_similarity",
+    "unit_raster",
 ]

@@ -20,6 +20,7 @@ from __future__ import annotations
 import numpy as np
 
 from .optitrack.widgets._backend import warn_if_noninteractive_backend
+from .raster import RasterPanel
 
 __all__ = ["DecodedWidget", "show_decoded"]
 
@@ -64,6 +65,12 @@ class DecodedWidget:
     was still, say, so a failure can be seen against what the animal was doing
     rather than inferred from the heading trace going flat.
 
+    ``raster`` (a :class:`~spikeshpc.raster.UnitRaster`, from
+    :func:`~spikeshpc.raster.unit_raster`) adds the decoder's units' spikes
+    above the heading: a row per unit, sorted by preferred direction and
+    colored by it through ``raster_color``. A window holding more than
+    ``max_raster_spikes`` spikes shows a note instead of the ticks.
+
     Requires an interactive matplotlib backend (``%matplotlib widget`` or
     ``%matplotlib qt``) and the figure to have keyboard focus: click it once.
     """
@@ -78,6 +85,9 @@ class DecodedWidget:
         max_window_s: float | None = None,
         mark=None,
         mark_label: str = "still",
+        raster=None,
+        raster_color="hsv",
+        max_raster_spikes: int = 150_000,
     ):
         import matplotlib.pyplot as plt
         from matplotlib.patches import Patch
@@ -119,8 +129,18 @@ class DecodedWidget:
         self.window_s = float(np.clip(window_s, self.min_window_s, self.max_window_s))
         self.t0 = 0.0
 
-        self.fig, self.ax = plt.subplots(figsize=(12, 4.5))
-        self.fig.subplots_adjust(bottom=0.24, top=0.86)
+        if raster is None:
+            self.fig, self.ax = plt.subplots(figsize=(12, 4.5))
+            self.fig.subplots_adjust(bottom=0.24, top=0.86)
+            self.raster_ax = None
+            slider_box = [0.125, 0.07, 0.775, 0.035]
+        else:
+            self.fig, (self.raster_ax, self.ax) = plt.subplots(
+                2, 1, figsize=(12, 8.0), sharex=True, gridspec_kw={"height_ratios": [1.25, 1.0]}
+            )
+            self.fig.subplots_adjust(bottom=0.14, top=0.9, hspace=0.06)
+            self.raster_ax.set_facecolor("white")
+            slider_box = [0.125, 0.045, 0.775, 0.025]
         self.fig.patch.set_facecolor("white")
         self.ax.set_facecolor("white")
 
@@ -138,7 +158,17 @@ class DecodedWidget:
         self.ax.set_ylabel("head direction (deg)")
         self.ax.set_xlabel("decoded time (s)")
 
-        slider_ax = self.fig.add_axes([0.125, 0.07, 0.775, 0.035])
+        # the spikes each bin was decoded from, on the same decoded-time axis
+        self.raster_panel = None
+        if raster is not None:
+            start = decoded.time_s - decoded.duration_s / 2
+            self.raster_panel = RasterPanel(
+                self.raster_ax, raster, start, start + decoded.duration_s, self.edges,
+                cmap=raster_color, max_spikes=max_raster_spikes,
+            )
+            self.raster_panel.add_colorbar(self.fig)
+
+        slider_ax = self.fig.add_axes(slider_box)
         self.slider = Slider(
             slider_ax,
             "position",
@@ -216,6 +246,8 @@ class DecodedWidget:
         for patch in self._mark_patches:
             patch.remove()
         self._mark_patches = []
+        if self.raster_panel is not None:
+            self.raster_panel.draw(self.t0, stop)
 
         if not window.any():
             self.ax.set_xlim(self.t0, stop)
@@ -254,11 +286,11 @@ class DecodedWidget:
         )
 
         for at in self.break_s[(self.break_s > self.t0) & (self.break_s < stop)]:
-            self._break_lines.append(
-                self.ax.axvline(
-                    at, color="#c03030", lw=1.0, ls="--", alpha=0.9, zorder=5
-                )
-            )
+            for ax in (self.ax, self.raster_ax):
+                if ax is not None:
+                    self._break_lines.append(
+                        ax.axvline(at, color="#c03030", lw=1.0, ls="--", alpha=0.9, zorder=5)
+                    )
 
         # above the posterior, below the traces; one span per marked run, and
         # the window is a contiguous range of bins so a run is too
@@ -308,7 +340,8 @@ class DecodedWidget:
             title += f" | {n_breaks} splice{'s' if n_breaks > 1 else ''} (dashed)"
         if self.mark is not None:
             title += f" | {self.mark_label} {self.mark[index].mean():.0%} of window"
-        self.ax.set_title(title, fontsize=10)
+        top = self.raster_ax if self.raster_ax is not None else self.ax
+        top.set_title(title, fontsize=10)
 
 
 def show_decoded(decoded, window_s: float = 60.0, **kwargs) -> DecodedWidget:
@@ -318,6 +351,9 @@ def show_decoded(decoded, window_s: float = 60.0, **kwargs) -> DecodedWidget:
     time is shown, ``home``/``end`` jump to either end, and the slider goes
     anywhere. Dashed red lines mark splices between non-adjacent stretches of
     the recording, where the decoder restarted from a uniform prior. Pass
-    ``mark`` (a boolean per decoded bin) to shade bins gray, e.g. stillness.
+    ``mark`` (a boolean per decoded bin) to shade bins gray, e.g. stillness,
+    and ``raster`` (from :func:`~spikeshpc.raster.unit_raster`) for the
+    decoder's units' spikes above the heading, colored by preferred direction
+    through ``raster_color`` (default ``"hsv"``).
     """
     return DecodedWidget(decoded, window_s=window_s, **kwargs)

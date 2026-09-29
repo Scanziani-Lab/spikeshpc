@@ -36,7 +36,7 @@ Typical use, from a notebook that already has the objects
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
@@ -54,6 +54,8 @@ __all__ = [
     "DecoderRun",
     "EncodingModel",
     "ShuffleTest",
+    "TransferRun",
+    "apply_decoder",
     "bins_in_interval_mask",
     "decode",
     "fit_encoding_model",
@@ -63,7 +65,11 @@ __all__ = [
     "plot_error",
     "plot_metrics_by_group",
     "plot_shuffle",
+    "plot_transfer_summary",
     "prepare_decoder_data",
+    "reference_decode",
+    "restrict_data",
+    "restrict_model",
     "ring_transition",
     "run_decoder",
     "shuffle_test",
@@ -155,6 +161,15 @@ class DecoderData:
 def _as_sorting(obj):
     """Accept either a sorting or a sorting analyzer."""
     return obj.sorting if hasattr(obj, "sorting") else obj
+
+
+def _unit_positions(have, want) -> np.ndarray:
+    """Where each of `want` sits in `have`, refusing any that are not there."""
+    position = {u: i for i, u in enumerate(np.asarray(have).tolist())}
+    missing = [u for u in want if u not in position]
+    if missing:
+        raise ValueError(f"units {missing[:10]} are not among the {len(position)} held here")
+    return np.array([position[u] for u in want], dtype=int)
 
 
 def _frames_per_bin(bin_s: float, frame_s: float, tolerance: float = 0.01) -> int:
@@ -278,6 +293,13 @@ def bins_in_interval_mask(data: DecoderData, interval_mask) -> np.ndarray:
             f"{data.bin_frames} frames. It masks intervals, not frames or bins."
         )
     return interval_mask[:n_used].reshape(data.n_bins, data.bin_frames).all(axis=1)
+
+
+def restrict_data(data: DecoderData, unit_ids) -> DecoderData:
+    """The same bins, holding only `unit_ids`' counts, in that order."""
+    unit_ids = list(unit_ids)
+    index = _unit_positions(data.unit_ids, unit_ids)
+    return replace(data, counts=data.counts[:, index], unit_ids=np.asarray(data.unit_ids)[index])
 
 
 # ── train / test split ───────────────────────────────────────────────────
@@ -467,6 +489,20 @@ def fit_encoding_model(
         occupancy_s=occupancy_s,
         train_time_s=float(duration.sum()),
         min_rate_hz=min_rate_hz,
+    )
+
+
+def restrict_model(model: EncodingModel, unit_ids) -> EncodingModel:
+    """The same encoding model with only `unit_ids`, in that order.
+
+    Each unit's curve is fitted from its own spikes alone, so this is exactly
+    the model that fitting those units by themselves would have produced --
+    which is what lets one baseline fit serve every subset of it.
+    """
+    unit_ids = list(unit_ids)
+    index = _unit_positions(model.unit_ids, unit_ids)
+    return replace(
+        model, rate_hz=model.rate_hz[index], unit_ids=np.asarray(model.unit_ids)[index]
     )
 
 
@@ -669,12 +705,21 @@ def decoding_metrics(decoded_deg, actual_deg, tolerance_deg: float = 30.0) -> di
     the size of the tail. ``frac_within_deg`` is the same tail question asked
     directly, and the circular correlation is the only one of the four that a
     constant offset -- a miscalibrated head frame -- would not punish.
+
+    ``offset_deg`` is that offset: the circular mean of the error. The
+    ``*_corrected_deg`` pair asks the median and tolerance questions again with
+    it removed. A head-direction population that turned as a whole between two
+    recordings is read by a decoder fitted on the first at a constant offset,
+    which the raw error scores as failure and the corrected error does not. On
+    a model's own held-out data the offset is near zero and the two agree.
     """
     error = circular_difference(decoded_deg, actual_deg)
     error = error[np.isfinite(error)]
     if error.size == 0:
         return {}
     absolute = np.abs(error)
+    offset = float(circular_difference(circular_mean(error), 0.0))
+    corrected = np.abs(circular_difference(error, offset))
     return {
         "median_abs_error_deg": float(np.median(absolute)),
         "mean_abs_error_deg": float(absolute.mean()),
@@ -682,6 +727,9 @@ def decoding_metrics(decoded_deg, actual_deg, tolerance_deg: float = 30.0) -> di
         "frac_within_deg": float(np.mean(absolute <= tolerance_deg)),
         "tolerance_deg": float(tolerance_deg),
         "circular_correlation": circular_correlation(decoded_deg, actual_deg),
+        "offset_deg": offset,
+        "median_abs_error_corrected_deg": float(np.median(corrected)),
+        "frac_within_corrected_deg": float(np.mean(corrected <= tolerance_deg)),
         "n_bins": int(error.size),
     }
 
@@ -906,18 +954,27 @@ def shuffle_test(
     misalign against and the question is whether the posterior is sharper and
     more coherent than a scrambled population would make it -- so pair it with
     a metric like ``mean_posterior_max``.
+
+    ``metric`` may also be a sequence of names, to judge several statistics on
+    the same shuffled decodes -- the raw and the offset-corrected error, say --
+    without paying for the decodes twice. The result is then a dict
+    ``{metric: ShuffleTest}`` in that order.
     """
     if kind not in ("shift", "units"):
         raise ValueError(f"kind must be 'shift' or 'units', got {kind!r}")
+    metrics = [metric] if isinstance(metric, str) else list(metric)
+    if not metrics:
+        raise ValueError("no metric to test")
 
     rng = np.random.default_rng(seed)
     observed = decode(
         data, model, mask, keep_posterior=False, label="observed", **decode_kwargs
     )
-    if metric not in observed.metrics:
-        raise ValueError(f"metric {metric!r} is not one of {sorted(observed.metrics)}")
+    for name in metrics:
+        if name not in observed.metrics:
+            raise ValueError(f"metric {name!r} is not one of {sorted(observed.metrics)}")
 
-    null = np.empty(n_shuffles)
+    null = np.empty((len(metrics), n_shuffles))
     for i in range(n_shuffles):
         if kind == "shift":
             min_shift = max(1, round(min_shift_s / data.bin_s))
@@ -957,22 +1014,31 @@ def shuffle_test(
             label=f"shuffle {i}",
             **decode_kwargs,
         )
-        null[i] = run.metrics[metric]
+        null[:, i] = [run.metrics[name] for name in metrics]
         if progress and (i + 1) % 10 == 0:
             print(f"      shuffle {i + 1}/{n_shuffles}", end="\r")
 
+    tests = {
+        name: _judge(name, observed.metrics[name], null[k], kind)
+        for k, name in enumerate(metrics)
+    }
+    return tests[metric] if isinstance(metric, str) else tests
+
+
+def _judge(metric: str, observed: float, null: np.ndarray, kind: str) -> ShuffleTest:
+    """One observed statistic against its null, the right way up."""
     # error-like metrics are better when small; confidence-like ones when large
     better = "lower" if "error" in metric or "rmse" in metric else "higher"
     hits = (
-        np.count_nonzero(null <= observed.metrics[metric])
+        np.count_nonzero(null <= observed)
         if better == "lower"
-        else np.count_nonzero(null >= observed.metrics[metric])
+        else np.count_nonzero(null >= observed)
     )
     return ShuffleTest(
         metric=metric,
-        observed=float(observed.metrics[metric]),
+        observed=float(observed),
         null=null,
-        p_value=float((1 + hits) / (n_shuffles + 1)),
+        p_value=float((1 + hits) / (len(null) + 1)),
         better=better,
         kind=kind,
     )
@@ -1326,6 +1392,266 @@ def run_decoder(
     )
 
 
+# ── carrying a model to another recording ────────────────────────────────
+# the wake statistics tested against the time-shift null, from one set of shuffles
+WAKE_SHUFFLE_METRICS = ("median_abs_error_deg", "median_abs_error_corrected_deg")
+
+
+@dataclass
+class TransferRun:
+    """An encoding model read out on spikes it was not fitted on.
+
+    Either another recording's, through :func:`apply_decoder`, or the fitting
+    recording's own held-out wake and REM through :func:`reference_decode`.
+    ``unit_ids`` are the model's units and ``partner_ids`` the units whose
+    spikes stood in for them, in the same order -- the same ids, for a
+    reference. ``wake_shuffles`` maps each of :data:`WAKE_SHUFFLE_METRICS` to
+    its :class:`ShuffleTest` against the time-shift null; ``rem_shuffle`` is the
+    unit-permutation null of the REM posterior's confidence.
+    """
+
+    label: str
+    unit_ids: np.ndarray
+    partner_ids: np.ndarray
+    data: DecoderData
+    wake: Decoded
+    wake_mask: np.ndarray
+    wake_shuffles: dict = field(default_factory=dict)
+    rem: Decoded | None = None
+    rem_mask: np.ndarray | None = None
+    rem_shuffle: ShuffleTest | None = None
+
+    @property
+    def offset_deg(self) -> float:
+        """The wake decode's mean error: how far the population reads turned."""
+        return float(self.wake.metrics.get("offset_deg", np.nan))
+
+    def as_row(self) -> dict:
+        """The headline numbers as one flat row, for a table across recordings."""
+        wake = self.wake.metrics
+        row = {
+            "label": self.label,
+            "n_units": len(self.unit_ids),
+            "wake_s": float(self.wake.duration_s.sum()),
+            "wake_median_abs_error_deg": wake.get("median_abs_error_deg", np.nan),
+            "wake_median_abs_error_corrected_deg": wake.get(
+                "median_abs_error_corrected_deg", np.nan
+            ),
+            "wake_frac_within_deg": wake.get("frac_within_deg", np.nan),
+            "wake_frac_within_corrected_deg": wake.get("frac_within_corrected_deg", np.nan),
+            "wake_circular_correlation": wake.get("circular_correlation", np.nan),
+            "wake_offset_deg": self.offset_deg,
+            "wake_mean_posterior_max": wake.get("mean_posterior_max", np.nan),
+        }
+        for metric, test in self.wake_shuffles.items():
+            short = metric.replace("median_abs_error_", "error_").replace("_deg", "")
+            row[f"wake_{short}_null_mean"] = float(test.null.mean())
+            row[f"wake_{short}_p"] = test.p_value
+            row[f"wake_{short}_z"] = test.z_score
+        row["rem_s"] = float(self.rem.duration_s.sum()) if self.rem is not None else 0.0
+        row["rem_mean_posterior_max"] = (
+            self.rem.metrics["mean_posterior_max"] if self.rem is not None else np.nan
+        )
+        if self.rem_shuffle is not None:
+            row["rem_null_mean"] = float(self.rem_shuffle.null.mean())
+            row["rem_p"] = self.rem_shuffle.p_value
+            row["rem_z"] = self.rem_shuffle.z_score
+        return row
+
+    def summary(self) -> str:
+        wake = self.wake.metrics
+        lines = [
+            f"{self.label}: {len(self.unit_ids)} units",
+            f"  wake: {self.wake}",
+            (
+                f"    median |error| {wake['median_abs_error_deg']:.1f} deg, "
+                f"{wake['median_abs_error_corrected_deg']:.1f} deg after removing a "
+                f"{wake['offset_deg']:+.1f} deg offset; circular r = "
+                f"{wake['circular_correlation']:.3f}"
+            ),
+        ]
+        for test in self.wake_shuffles.values():
+            lines.append(f"    vs shuffle: {test}")
+        if self.rem is not None:
+            lines.append(f"  REM: {self.rem}")
+            lines.append(
+                f"    mean posterior max = {self.rem.metrics['mean_posterior_max']:.3f} "
+                f"(wake {wake['mean_posterior_max']:.3f})"
+            )
+            if self.rem_shuffle is not None:
+                lines.append(f"    vs shuffle: {self.rem_shuffle}")
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return self.summary()
+
+
+def apply_decoder(
+    model: EncodingModel,
+    sorting,
+    unit_map: dict,
+    heading_deg,
+    frame_times,
+    intervals,
+    interval_mask=None,
+    movement_var_deg2: float | None = None,
+    bin_s: float = (1 / 60),
+    acausal: bool = True,
+    tolerance_deg: float = 10.0,
+    n_shuffles: int = 100,
+    min_shift_s: float = 30.0,
+    seed: int = 0,
+    decode_rem: bool = True,
+    keep_posterior: bool = False,
+    label: str = "transfer",
+    verbose: bool = True,
+) -> TransferRun:
+    """Decode another recording with a model fitted on the baseline.
+
+    ``unit_map`` is ``{model unit: this recording's unit}``, from matching the
+    two recordings. The model is restricted to those units and each column is
+    filled with its partner's spikes here, so the question is: read with the
+    baseline's tuning curves, does this recording's activity still say where
+    the head points?
+
+    Nothing here was trained on, so wake is every WAKE bin -- inside
+    ``interval_mask``, the mask this recording's own tuning was computed on,
+    as the baseline's split is inside its own -- scored raw and with its
+    constant offset removed (see :func:`decoding_metrics`), each against the
+    time-shift null. REM is decoded and judged against the unit-permutation
+    null exactly as :func:`run_decoder` does. ``movement_var_deg2`` should be
+    the baseline run's, so the prior is the one the model was scored with, and
+    the remaining settings should match that run's too.
+    """
+    model_units = list(unit_map)
+    if not model_units:
+        raise ValueError("unit_map is empty: there are no matched units to decode from")
+    partners = [unit_map[u] for u in model_units]
+    if len(set(partners)) != len(partners):
+        raise ValueError("unit_map gives two model units the same partner")
+
+    model = restrict_model(model, model_units)
+    data = prepare_decoder_data(sorting, partners, heading_deg, frame_times, bin_s)
+    # named by the model's units, so decode() matches its columns to the curves
+    data = replace(data, unit_ids=np.asarray(model.unit_ids))
+    if verbose:
+        print(f"  {label}: {data}")
+
+    wake_mask = state_interval_mask(data, intervals, "WAKE")
+    if not wake_mask.any():
+        raise ValueError(f"{label}: no decoder bin falls inside a WAKE interval")
+    if interval_mask is not None:
+        interval_mask = np.asarray(interval_mask, dtype=bool)
+        if interval_mask.shape != (len(frame_times) - 1,):
+            raise ValueError(
+                f"interval_mask has {interval_mask.shape} entries but there are "
+                f"{len(frame_times) - 1} inter-frame intervals. It masks intervals, "
+                "not frames -- see spikeshpc.states.frames_in_states."
+            )
+        wake_mask &= bins_in_interval_mask(data, interval_mask)
+        if not wake_mask.any():
+            raise ValueError(f"{label}: no WAKE decoder bin lies wholly inside `interval_mask`")
+    rem_mask = state_interval_mask(data, intervals, "REM") if decode_rem else None
+
+    return _read_out(
+        data, model, np.asarray(partners), wake_mask, rem_mask,
+        movement_var_deg2=movement_var_deg2, acausal=acausal,
+        tolerance_deg=tolerance_deg, n_shuffles=n_shuffles,
+        min_shift_s=min_shift_s, seed=seed, keep_posterior=keep_posterior,
+        label=label, verbose=verbose,
+    )
+
+
+def reference_decode(
+    run: DecoderRun,
+    unit_ids,
+    acausal: bool = True,
+    tolerance_deg: float = 10.0,
+    n_shuffles: int = 100,
+    min_shift_s: float = 30.0,
+    seed: int = 0,
+    keep_posterior: bool = False,
+    label: str = "baseline",
+    verbose: bool = True,
+) -> TransferRun:
+    """The fitting recording's own held-out wake and REM, decoded with only `unit_ids`.
+
+    What :func:`apply_decoder` on another recording should be compared with:
+    the same units and the same curves, on data the model never saw. Without
+    it, a recording where fewer units were found looks worse for having fewer
+    units rather than for coding worse.
+    """
+    unit_ids = list(unit_ids)
+    model = restrict_model(run.model, unit_ids)
+    data = restrict_data(run.data, unit_ids)
+    return _read_out(
+        data, model, np.asarray(unit_ids), run.test_mask, run.rem_mask,
+        movement_var_deg2=run.movement_var_deg2, acausal=acausal,
+        tolerance_deg=tolerance_deg, n_shuffles=n_shuffles,
+        min_shift_s=min_shift_s, seed=seed, keep_posterior=keep_posterior,
+        label=label, verbose=verbose,
+    )
+
+
+def _read_out(
+    data, model, partner_ids, wake_mask, rem_mask, movement_var_deg2, acausal,
+    tolerance_deg, n_shuffles, min_shift_s, seed, keep_posterior, label, verbose,
+) -> TransferRun:
+    """Decode wake and REM with `model` and judge both against their nulls."""
+    shared = {
+        "movement_var_deg2": movement_var_deg2,
+        "acausal": acausal,
+        "tolerance_deg": tolerance_deg,
+    }
+    wake = decode(
+        data, model, wake_mask, keep_posterior=keep_posterior,
+        label=f"{label} wake", **shared,
+    )
+    if verbose:
+        print(f"  {wake}")
+    wake_shuffles = {}
+    if n_shuffles:
+        wake_shuffles = shuffle_test(
+            data, model, wake_mask, kind="shift", metric=WAKE_SHUFFLE_METRICS,
+            n_shuffles=n_shuffles, min_shift_s=min_shift_s, seed=seed, **shared,
+        )
+        if verbose:
+            for test in wake_shuffles.values():
+                print(f"    {test}")
+
+    rem = rem_shuffle = None
+    if rem_mask is not None and not rem_mask.any():
+        warnings.warn(f"{label}: no decoder bin falls inside a REM interval", stacklevel=3)
+        rem_mask = None
+    if rem_mask is not None:
+        rem = decode(
+            data, model, rem_mask, keep_posterior=keep_posterior,
+            with_metrics=False, label=f"{label} REM", **shared,
+        )
+        if verbose:
+            print(f"  {rem}")
+        if n_shuffles:
+            rem_shuffle = shuffle_test(
+                data, model, rem_mask, kind="units", metric="mean_posterior_max",
+                n_shuffles=n_shuffles, seed=seed, with_metrics=False, **shared,
+            )
+            if verbose:
+                print(f"    {rem_shuffle}")
+
+    return TransferRun(
+        label=label,
+        unit_ids=np.asarray(model.unit_ids),
+        partner_ids=np.asarray(partner_ids),
+        data=data,
+        wake=wake,
+        wake_mask=wake_mask,
+        wake_shuffles=wake_shuffles,
+        rem=rem,
+        rem_mask=rem_mask,
+        rem_shuffle=rem_shuffle,
+    )
+
+
 # ── looking at it ────────────────────────────────────────────────────────
 def plot_encoding_model(model: EncodingModel, sort_by_preferred: bool = True, ax=None):
     """The tuning curves the decoder is using, as a units x heading heatmap.
@@ -1627,5 +1953,95 @@ def plot_metrics_by_group(
             ax.get_legend_handles_labels()[0]
         ):
             ax.legend(fontsize=8, frameon=False)
+    axes[0].figure.tight_layout()
+    return axes
+
+
+def plot_transfer_summary(runs: dict, colors: dict | None = None, references: dict | None = None,
+                          axes=None):
+    """How one decoder did on each recording, each against its own nulls.
+
+    ``runs`` is ``{recording: TransferRun}`` in the order to draw them, the
+    baseline's own :func:`reference_decode` included if it should have a
+    column. ``colors`` gives each recording's color (default: the property
+    cycle). ``references`` optionally gives, per recording, the baseline's
+    held-out data decoded with that recording's units, drawn as an open black
+    diamond in its column -- the number that recording has to be compared with.
+
+    Three panels, one column per recording, each tick saying how many units it
+    was decoded with:
+      wake median |error|   filled: raw, open: with the constant offset
+                            removed; gray bar: 5-95% of the time-shift null;
+                            dashed: the 90 deg of chance
+      wake offset           how far the population reads turned
+      REM posterior max     against 5-95% of its unit-permutation null
+
+    Returns the three axes.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    names = list(runs)
+    if not names:
+        raise ValueError("no runs to plot")
+    if colors is None:
+        cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        colors = {name: cycle[i % len(cycle)] for i, name in enumerate(names)}
+    references = references or {}
+    if axes is None:
+        _, axes = plt.subplots(1, 3, figsize=(max(9.0, 6.0 + 1.3 * len(names)), 3.8))
+    error_ax, offset_ax, rem_ax = axes
+    null_style = dict(color="0.8", lw=7, zorder=1)
+    reference_style = dict(marker="D", ls="none", mfc="none", mec="k", mew=1.2, ms=7, zorder=4)
+
+    for i, name in enumerate(names):
+        run, color = runs[name], colors[name]
+        wake = run.wake.metrics
+        raw_null = run.wake_shuffles.get("median_abs_error_deg")
+        if raw_null is not None:
+            error_ax.vlines(i, *np.percentile(raw_null.null, [5, 95]), **null_style)
+        error_ax.plot(i - 0.12, wake["median_abs_error_deg"], "o", color=color, ms=7, zorder=3)
+        error_ax.plot(i + 0.12, wake["median_abs_error_corrected_deg"], "o", mfc="none",
+                      mec=color, mew=1.5, ms=7, zorder=3)
+        offset_ax.plot(i, run.offset_deg, "o", color=color, ms=7, zorder=3)
+        if run.rem is not None:
+            if run.rem_shuffle is not None:
+                rem_ax.vlines(i, *np.percentile(run.rem_shuffle.null, [5, 95]), **null_style)
+            rem_ax.plot(i, run.rem.metrics["mean_posterior_max"], "o", color=color, ms=7,
+                        zorder=3)
+
+        reference = references.get(name)
+        if reference is not None:
+            error_ax.plot(i, reference.wake.metrics["median_abs_error_deg"], **reference_style)
+            offset_ax.plot(i, reference.offset_deg, **reference_style)
+            if reference.rem is not None:
+                rem_ax.plot(i, reference.rem.metrics["mean_posterior_max"], **reference_style)
+
+    # the legend in black, whatever color each recording's markers are
+    handles = [
+        Line2D([], [], marker="o", ls="none", color="k", ms=7, label="raw"),
+        Line2D([], [], marker="o", ls="none", mfc="none", mec="k", mew=1.5, ms=7,
+               label="offset removed"),
+    ]
+    if any(run.wake_shuffles for run in runs.values()):
+        handles.insert(0, Line2D([], [], color="0.8", lw=7, label="shuffled"))
+    if references:
+        handles.append(Line2D([], [], label="baseline, same units", **reference_style))
+    error_ax.axhline(90.0, color="0.4", ls="--", lw=1)
+    error_ax.set_ylim(0, None)
+    error_ax.set_ylabel("wake median |error| (deg)")
+    error_ax.legend(handles=handles, fontsize=7, frameon=False)
+    offset_ax.axhline(0.0, color="0.6", lw=0.8)
+    offset_ax.set_ylim(-180, 180)
+    offset_ax.set_yticks(np.arange(-180, 181, 90))
+    offset_ax.set_ylabel("wake offset (deg)")
+    rem_ax.set_ylabel("REM posterior max")
+
+    ticks = [f"{name}\n{len(runs[name].unit_ids)} units" for name in names]
+    for ax in axes:
+        ax.set_xticks(np.arange(len(names)))
+        ax.set_xticklabels(ticks, fontsize=8)
+        ax.set_xlim(-0.6, len(names) - 0.4)
+        ax.spines[["top", "right"]].set_visible(False)
     axes[0].figure.tight_layout()
     return axes

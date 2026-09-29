@@ -53,7 +53,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import ANALYZER_NAME
+from .config import ANALYZER_NAME, BOMBCELL_KEYS
 
 # ── the hand-off files, all in the session's curation folder ─────────────
 CURATION_DIRNAME = "curation"  # the default folder, next to the analyzer
@@ -65,6 +65,8 @@ CURATION_FILE = "sigui_curation.json"  # what the GUI's "Save curation" writes
 LOG_FILE = "sigui.log"
 CURATED_FILE = "curated_units.csv"  # the automated calls plus your decisions
 BOMBCELL_MANUAL_FILE = "manual_unit_classifications.csv"  # bombcell's GUI writes it
+# bombcell's GUI writes this one too: its call and yours side by side, per unit
+BOMBCELL_COMPARISON_FILE = "manual_vs_bombcell_classifications.csv"
 
 # SLAy's pairwise scores, in the order the Merge tab shows them
 SLAY_METRICS = ("final_metric", "similarity", "ccg_metric", "refractory_penalty")
@@ -311,6 +313,40 @@ def read_automated_labels(curation_dir) -> pd.DataFrame:
         if col in table:
             table[col] = pd.to_numeric(table[col].where(table[col] != ""))
     return table
+
+
+def final_unit_labels(curation_dir, unit_ids=None) -> pd.Series:
+    """Each unit's curated type: your call in bombcell's GUI where you made one, bombcell's otherwise.
+
+    Read from ``manual_vs_bombcell_classifications.csv`` and matched to units by
+    its ``unit_id`` column, never by row position. bombcell leaves out units it
+    could not measure -- unit 161 of session9, unit 29 of session10 -- and once
+    one row is missing, reading rows in order hands every later unit the label
+    of the unit after it.
+
+    Returns a Series of ``config.BOMBCELL_KEYS`` names ("GOOD", "MUA", "NOISE",
+    "NON-SOMA", "NA") indexed by unit id. With ``unit_ids``, it is reindexed to
+    those, and a unit bombcell left out is "NA".
+    """
+    path = Path(curation_dir) / BOMBCELL_COMPARISON_FILE
+    if not path.is_file():
+        raise FileNotFoundError(f"no {path}: classify units in bombcell's GUI first")
+    table = pd.read_csv(path)
+    ids = table["unit_id"].to_numpy().astype(np.int64)
+    if len(np.unique(ids)) != len(ids):
+        raise ValueError(f"{path} lists some unit_id more than once")
+
+    manual = table["classification_source"].eq("manual").to_numpy()
+    codes = np.where(manual, table["manual_classification"], table["bombcell_classification"])
+    codes = pd.Series(codes, dtype=float).fillna(-1).astype(int)
+    labels = pd.Series(
+        [BOMBCELL_KEYS.get(code, "NA") for code in codes],
+        index=pd.Index(ids, name="unit_id"),
+        name="label",
+    )
+    if unit_ids is not None:
+        labels = labels.reindex([_py(u) for u in unit_ids]).fillna("NA")
+    return labels
 
 
 def sigui_properties(table) -> dict:

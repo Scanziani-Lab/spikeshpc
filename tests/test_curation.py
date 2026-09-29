@@ -26,6 +26,7 @@ import spikeinterface.full as si
 
 from spikeshpc.curation import (
     AUTOMATED_FILE,
+    BOMBCELL_COMPARISON_FILE,
     BOMBCELL_MANUAL_FILE,
     CURATED_FILE,
     CURATION_FILE,
@@ -35,6 +36,7 @@ from spikeshpc.curation import (
     automated_labels,
     check_curation_dir,
     detached_extensions,
+    final_unit_labels,
     initial_curation,
     load_curation_result,
     load_slay,
@@ -279,3 +281,42 @@ def test_the_gui_shows_slays_pairs_every_column_and_the_prefilled_labels(tmp_pat
     finally:
         win.close()
         app.processEvents()
+
+
+# ── the curated type of each unit ─────────────────────────────────────────
+def write_comparison(folder, rows):
+    """bombcell's GUI output: unit_id, your code (-1 = none), its code, whose call counts."""
+    table = pd.DataFrame(
+        rows, columns=["unit_id", "manual_classification", "bombcell_classification",
+                       "classification_source"],
+    )
+    table.to_csv(folder / BOMBCELL_COMPARISON_FILE, index=False)
+
+
+def test_curated_labels_follow_the_unit_id_across_a_gap(tmp_path):
+    """bombcell left unit 2 out, as it did unit 161 of session9.
+
+    Reading rows in order would give unit 2 unit 3's label and unit 3 unit 4's.
+    """
+    write_comparison(tmp_path, [
+        (0, -1, 1.0, "bombcell"),
+        (1, 2, 1.0, "manual"),      # you overrode bombcell's GOOD with MUA
+        (3, -1, 0.0, "bombcell"),
+        (4, -1, 3.0, "bombcell"),
+    ])
+    labels = final_unit_labels(tmp_path)
+    assert labels.to_dict() == {0: "GOOD", 1: "MUA", 3: "NOISE", 4: "NON-SOMA"}
+
+    labels = final_unit_labels(tmp_path, unit_ids=np.arange(5))
+    assert labels.tolist() == ["GOOD", "MUA", "NA", "NOISE", "NON-SOMA"]
+
+
+def test_curated_labels_need_bombcell_s_file(tmp_path):
+    with pytest.raises(FileNotFoundError, match="bombcell's GUI"):
+        final_unit_labels(tmp_path)
+
+
+def test_a_unit_listed_twice_is_refused(tmp_path):
+    write_comparison(tmp_path, [(0, -1, 1.0, "bombcell"), (0, 2, 1.0, "manual")])
+    with pytest.raises(ValueError, match="more than once"):
+        final_unit_labels(tmp_path)
