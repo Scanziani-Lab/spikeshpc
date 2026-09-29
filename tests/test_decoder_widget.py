@@ -21,6 +21,7 @@ from spikeshpc.decoder_widget import (  # noqa: E402
     break_at,
     show_decoded,
 )
+from spikeshpc.raster import unit_raster  # noqa: E402
 
 from test_decoder import (  # noqa: E402
     N_UNITS, RATE, FakeSorting, poisson_spike_times, random_walk_heading,
@@ -34,8 +35,8 @@ class Key:
 
 
 @pytest.fixture(scope="module")
-def decoded():
-    """A blocked split, so the test set really is spliced together."""
+def decoded_run():
+    """A blocked split, so the test set really is spliced together -- with its sorting and model."""
     rng = np.random.default_rng(0)
     n = int(240 * RATE)
     frame_times = np.arange(n) / RATE
@@ -52,7 +53,12 @@ def decoded():
     wake = state_interval_mask(data, intervals, "WAKE")
     train, test = split_train_test(data, wake, 0.4, "blocks", 20.0, seed=1)
     model = fit_encoding_model(data, train, n_angle_bins=60)
-    return decode(data, model, test, label="wake test")
+    return decode(data, model, test, label="wake test"), sorting, model
+
+
+@pytest.fixture(scope="module")
+def decoded(decoded_run):
+    return decoded_run[0]
 
 
 @pytest.fixture
@@ -303,3 +309,50 @@ def test_marked_bins_are_shaded_one_span_per_run(decoded):
 def test_a_mark_of_the_wrong_length_is_refused(decoded):
     with pytest.raises(ValueError, match="mark has"):
         DecodedWidget(decoded, mark=np.zeros(3, dtype=bool))
+
+
+# ── the raster ──────────────────────────────────────────────────────────
+@pytest.fixture
+def raster_widget(decoded_run):
+    decoded, sorting, model = decoded_run
+    raster = unit_raster(sorting, model.unit_ids, model.preferred_deg)
+    w = show_decoded(decoded, window_s=20.0, raster=raster, raster_color="twilight")
+    yield w
+    plt.close(w.fig)
+
+
+def test_without_a_raster_the_view_is_as_it_was(widget):
+    assert widget.raster_ax is None and widget.raster_panel is None
+    assert len(widget.fig.axes) == 2  # the heading and the slider
+
+
+def test_the_raster_sits_above_the_heading_with_the_title(raster_widget):
+    w = raster_widget
+    assert w.raster_ax.get_position().y0 > w.ax.get_position().y1
+    assert w.raster_ax.get_ylim() == (0, N_UNITS)
+    assert "decoded" in w.raster_ax.get_title() and w.ax.get_title() == ""
+    assert w.raster_panel.colormap.name == "twilight"
+
+
+def test_the_raster_holds_exactly_the_spikes_that_were_decoded(raster_widget, decoded):
+    """Every spike the decoder counted in a stretch of bins, and no other."""
+    w = raster_widget
+    first, stop = 40, 400  # whole bins, across a splice
+    drawn = w.raster_panel.draw(w.edges[first], w.edges[stop])
+    assert drawn == decoded.n_spikes[first:stop].sum()
+
+
+def test_the_raster_scrolls_with_the_view(raster_widget):
+    w = raster_widget
+    w._on_key(Key("right"))
+    assert w.raster_ax.get_xlim() == pytest.approx((w.t0, w.t0 + w.window_s))
+    assert w.raster_panel.n_drawn > 0
+
+
+def test_splices_cross_the_raster_too(raster_widget):
+    w = raster_widget
+    w.window_s = w.total_s
+    w.t0 = 0.0
+    w._draw()
+    visible = ((w.break_s > w.t0) & (w.break_s < w.t0 + w.window_s)).sum()
+    assert len(w._break_lines) == 2 * visible

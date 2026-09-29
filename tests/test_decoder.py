@@ -16,7 +16,9 @@ import pytest
 from scipy.ndimage import gaussian_filter1d
 
 from spikeshpc.decoder import (
+    WAKE_SHUFFLE_METRICS,
     DecoderData,
+    apply_decoder,
     bins_in_interval_mask,
     circular_correlation,
     circular_difference,
@@ -27,6 +29,9 @@ from spikeshpc.decoder import (
     movement_variance,
     poisson_log_likelihood,
     prepare_decoder_data,
+    reference_decode,
+    restrict_data,
+    restrict_model,
     ring_transition,
     run_decoder,
     shuffle_test,
@@ -642,6 +647,21 @@ def test_metrics_of_a_perfect_decode():
     assert metrics["rmse_deg"] == 0.0
     assert metrics["frac_within_deg"] == 1.0
     assert metrics["circular_correlation"] == pytest.approx(1.0)
+    assert metrics["offset_deg"] == pytest.approx(0.0, abs=1e-9)
+    assert metrics["median_abs_error_corrected_deg"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_a_constant_offset_is_measured_and_can_be_removed():
+    """A population that turned as a whole, read with the old curves."""
+    rng = np.random.default_rng(2)
+    truth = rng.uniform(0, 360, 3000)
+    decoded = (truth + 40.0 + rng.normal(0, 3, 3000)) % 360.0
+    metrics = decoding_metrics(decoded, truth, tolerance_deg=10.0)
+    assert metrics["offset_deg"] == pytest.approx(40.0, abs=1.0)
+    assert metrics["median_abs_error_deg"] == pytest.approx(40.0, abs=1.0)
+    assert metrics["median_abs_error_corrected_deg"] < 3.0
+    assert metrics["frac_within_deg"] == 0.0
+    assert metrics["frac_within_corrected_deg"] > 0.99
 
 
 def test_each_group_is_scored_on_its_own_bins(decoded):
@@ -725,6 +745,21 @@ def test_an_unknown_shuffle_kind_is_rejected(data, model, split):
 def test_an_unknown_metric_is_rejected(data, model, split):
     with pytest.raises(ValueError, match="is not one of"):
         shuffle_test(data, model, split[1], metric="vibes", n_shuffles=2)
+    with pytest.raises(ValueError, match="is not one of"):
+        shuffle_test(data, model, split[1], metric=["median_abs_error_deg", "vibes"],
+                     n_shuffles=2)
+
+
+def test_several_metrics_are_judged_on_one_set_of_shuffles(data, model, split):
+    both = shuffle_test(
+        data, model, split[1], metric=WAKE_SHUFFLE_METRICS, n_shuffles=5, seed=2
+    )
+    alone = shuffle_test(
+        data, model, split[1], metric="median_abs_error_deg", n_shuffles=5, seed=2
+    )
+    assert list(both) == list(WAKE_SHUFFLE_METRICS)
+    np.testing.assert_allclose(both["median_abs_error_deg"].null, alone.null)
+    assert all(test.better == "lower" for test in both.values())
 
 
 # ── REM ──────────────────────────────────────────────────────────────────
@@ -924,6 +959,143 @@ def test_an_interval_mask_must_be_over_intervals_and_meet_wake(session):
     _, nrem = frames_in_states(frame_times, session["intervals"], "NREM")
     with pytest.raises(ValueError, match="wholly inside `interval_mask`"):
         run_decoder(*inputs, interval_mask=nrem, **quiet)
+
+
+# ── another recording ────────────────────────────────────────────────────
+def renamed(sorting, offset=100):
+    """The same spikes under other unit ids, as a later recording's sort numbers them."""
+    return FakeSorting({u + offset: sorting.get_unit_spike_train(u) for u in sorting.unit_ids})
+
+
+@pytest.fixture(scope="module")
+def turned(session):
+    """The same animal later on: every preferred direction turned +60 deg, units renumbered."""
+    rng = np.random.default_rng(5)
+    rates = von_mises_rates(session["heading_deg"], session["preferred"] + 60.0)
+    spikes = poisson_spike_times(rates, session["frame_times"], rng)
+    return FakeSorting({u + 100: t for u, t in spikes.items()})
+
+
+def transfer_to(session, sorting, model, data, **kwargs):
+    kwargs = {"bin_s": 0.05, "movement_var_deg2": movement_variance(data), "n_shuffles": 0,
+              "verbose": False, **kwargs}
+    return apply_decoder(
+        model, sorting, {u: u + 100 for u in session["unit_ids"]}, session["heading_deg"],
+        session["frame_times"], session["intervals"], **kwargs,
+    )
+
+
+def test_a_restricted_model_keeps_the_named_units_in_order(model):
+    sub = restrict_model(model, [5, 2, 7])
+    assert sub.unit_ids.tolist() == [5, 2, 7]
+    np.testing.assert_array_equal(sub.rate_hz, model.rate_hz[[5, 2, 7]])
+    with pytest.raises(ValueError, match="are not among"):
+        restrict_model(model, [5, 99])
+
+
+def test_restricting_the_model_is_fitting_those_units_alone(data, split, model):
+    units = [3, 11, 17]
+    alone = fit_encoding_model(restrict_data(data, units), split[0], n_angle_bins=180)
+    np.testing.assert_allclose(restrict_model(model, units).rate_hz, alone.rate_hz)
+
+
+def test_restricted_data_keeps_the_named_columns(data):
+    sub = restrict_data(data, [4, 1])
+    assert sub.unit_ids.tolist() == [4, 1]
+    np.testing.assert_array_equal(sub.counts, data.counts[:, [4, 1]])
+    assert sub.n_bins == data.n_bins
+
+
+def test_decoding_partners_is_decoding_the_units_they_stand_for(session, data, model):
+    """The same spikes under other ids decode exactly as the originals do."""
+    transfer = transfer_to(session, renamed(session["sorting"]), model, data, decode_rem=False)
+    wake = state_interval_mask(data, session["intervals"], "WAKE")
+    direct = decode(data, model, wake, movement_var_deg2=movement_variance(data),
+                    tolerance_deg=10.0)
+
+    np.testing.assert_array_equal(transfer.wake.decoded_deg, direct.decoded_deg)
+    assert transfer.unit_ids.tolist() == list(session["unit_ids"])
+    assert transfer.partner_ids.tolist() == [u + 100 for u in session["unit_ids"]]
+    assert transfer.rem is None
+
+
+def test_a_turned_population_is_read_at_a_constant_offset(session, data, model, turned):
+    """Every PD turned +60, so each unit now fires 60 deg past where the model expects.
+
+    The decoder therefore reports the head 60 deg short of where it is: the
+    offset is minus the rotation. Removed, the code is as good as ever.
+    """
+    transfer = transfer_to(session, turned, model, data, decode_rem=False)
+    metrics = transfer.wake.metrics
+    assert transfer.offset_deg == pytest.approx(-60.0, abs=5.0)
+    assert metrics["median_abs_error_deg"] == pytest.approx(60.0, abs=8.0)
+    assert metrics["median_abs_error_corrected_deg"] < 10.0
+    assert metrics["circular_correlation"] > 0.9
+
+
+def test_one_set_of_shuffles_judges_raw_and_corrected_error(session, data, model, turned):
+    transfer = transfer_to(session, turned, model, data, n_shuffles=5, decode_rem=False)
+    assert list(transfer.wake_shuffles) == list(WAKE_SHUFFLE_METRICS)
+    for test in transfer.wake_shuffles.values():
+        assert len(test.null) == 5
+        assert test.p_value == pytest.approx(1 / 6)  # nothing shuffled beat it
+
+
+def test_the_wake_of_another_recording_is_all_of_its_masked_wake(session, data, model):
+    frame_times = session["frame_times"]
+    _, keep = frames_in_states(frame_times, {"KEEP": [[0.0, 250.0], [300.0, 600.0]]}, "KEEP")
+    transfer = transfer_to(session, renamed(session["sorting"]), model, data,
+                           interval_mask=keep, decode_rem=False)
+    assert transfer.wake.duration_s.sum() == pytest.approx(550.0, rel=0.02)
+    with pytest.raises(ValueError, match="masks intervals, not"):
+        transfer_to(session, renamed(session["sorting"]), model, data,
+                    interval_mask=np.ones(len(frame_times), dtype=bool))
+
+
+def test_a_transfer_needs_distinct_matched_units(session, model):
+    inputs = (session["heading_deg"], session["frame_times"], session["intervals"])
+    with pytest.raises(ValueError, match="empty"):
+        apply_decoder(model, session["sorting"], {}, *inputs, verbose=False)
+    with pytest.raises(ValueError, match="same partner"):
+        apply_decoder(model, session["sorting"], {0: 5, 1: 5}, *inputs, verbose=False)
+
+
+def test_a_reference_decodes_the_baseline_s_own_held_out_bins(full_run):
+    units = list(full_run.model.unit_ids[:10])
+    reference = reference_decode(full_run, units, n_shuffles=0, verbose=False)
+    expected = decode(
+        restrict_data(full_run.data, units), restrict_model(full_run.model, units),
+        full_run.test_mask, movement_var_deg2=full_run.movement_var_deg2, tolerance_deg=10.0,
+    )
+    assert set(reference.wake.bin_index) <= set(np.flatnonzero(full_run.test_mask))
+    np.testing.assert_array_equal(reference.wake.decoded_deg, expected.decoded_deg)
+    assert reference.rem.n_decoded == full_run.rem.n_decoded
+
+
+def test_a_transfer_summarises_tabulates_and_draws(session, data, model, turned, full_run):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from spikeshpc.decoder import plot_transfer_summary
+
+    transfer = transfer_to(session, turned, model, data, n_shuffles=3)
+    text = transfer.summary()
+    assert "offset" in text and "REM" in text
+
+    row = transfer.as_row()
+    assert row["n_units"] == N_UNITS
+    assert row["wake_offset_deg"] == pytest.approx(transfer.offset_deg)
+    assert {"wake_error_p", "wake_error_corrected_p", "rem_p"} <= set(row)
+
+    reference = reference_decode(full_run, list(full_run.model.unit_ids), n_shuffles=3,
+                                 verbose=False)
+    axes = plot_transfer_summary(
+        {"baseline": reference, "turned": transfer}, references={"turned": reference}
+    )
+    assert len(axes) == 3
+    assert [t.get_text() for t in axes[0].get_xticklabels()][1].startswith("turned")
+    plt.close(axes[0].figure)
 
 
 # ── plots ────────────────────────────────────────────────────────────────
