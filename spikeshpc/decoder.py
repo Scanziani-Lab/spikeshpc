@@ -35,11 +35,14 @@ Typical use, from a notebook that already has the objects
 
 from __future__ import annotations
 
+import os
 import warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 
 import numpy as np
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import correlate1d, gaussian_filter1d
 
 from .optitrack.tuning import (
     _bin_headings,
@@ -620,6 +623,73 @@ def _runs(mask: np.ndarray, duration_s: np.ndarray, max_gap_s: float, min_run_s:
     ]
 
 
+class _RingStep:
+    """``p @ transition`` and ``transition @ v`` for rows of posteriors.
+
+    A :func:`ring_transition` is circulant: every row is the first one turned.
+    And it is a narrow Gaussian band over a uniform floor (the leak), so a
+    product with it is a short wrapped filter plus the floor times the row's
+    total -- a few dozen multiply-adds per angle bin where the dense product
+    streams the whole matrix through memory at every step. Any other
+    transition, or a band too wide to gain from this, is used as a matrix.
+
+    Rows are independent: a row of a batch comes out exactly as it would on
+    its own, which is what lets shuffles be decoded in batches.
+    """
+
+    def __init__(self, transition):
+        transition = np.asarray(transition, dtype=float)
+        n = transition.shape[0]
+        self.n = n
+        self.dense = transition
+        self.dense_t = np.ascontiguousarray(transition.T)
+        self.uniform = np.full((1, n), 1.0 / n)
+        self.fast = False
+        row = transition[0]
+        turned = np.stack([np.roll(row, i) for i in range(n)])
+        if not np.allclose(turned, transition, rtol=1e-12, atol=0):
+            return
+        floor = row.min()
+        band = row - floor
+        offsets = (np.flatnonzero(band > 0) + n // 2) % n - n // 2
+        reach = int(np.abs(offsets).max()) if offsets.size else 0
+        if 2 * reach + 1 > n // 4:
+            return
+        d = np.arange(-reach, reach + 1)
+        # correlate1d: out[j] = sum_k w[k] x[j + k - reach]
+        self.forward_weights = band[(-d) % n]  # sum_i p[i] T[i, j]
+        self.backward_weights = band[d % n]  # sum_j T[i, j] v[j]
+        self.floor = floor
+        self.fast = True
+
+    def forward(self, p):
+        if not self.fast:
+            return p @ self.dense
+        return (
+            correlate1d(p, self.forward_weights, axis=-1, mode="wrap")
+            + self.floor * p.sum(axis=-1, keepdims=True)
+        )
+
+    def backward(self, v):
+        if not self.fast:
+            return v @ self.dense_t
+        return (
+            correlate1d(v, self.backward_weights, axis=-1, mode="wrap")
+            + self.floor * v.sum(axis=-1, keepdims=True)
+        )
+
+
+def _normalize_rows(p, uniform):
+    """Each row divided by its total; a row with nothing in it becomes uniform."""
+    total = p.sum(axis=1, keepdims=True)
+    if (total > 0).all():
+        return p / total
+    empty = ~(total[:, 0] > 0)
+    p = p / np.where(empty[:, None], 1.0, total)
+    p[empty] = uniform
+    return p
+
+
 def _forward_backward(log_likelihood, transition, acausal=True):
     """Causal and acausal posteriors over one run, by the HMM forward-backward.
 
@@ -627,34 +697,34 @@ def _forward_backward(log_likelihood, transition, acausal=True):
     decoder running live would report. The acausal one also uses everything
     after t; it is better, and it is the right choice for offline analysis, but
     it cannot be read as a prediction.
+
+    ``transition`` is a matrix or a :class:`_RingStep`. Each step works on a
+    one-row batch, exactly as :func:`_shuffle_null` steps its batches.
     """
+    step = transition if isinstance(transition, _RingStep) else _RingStep(transition)
     n_t, n_x = log_likelihood.shape
     # Subtracting each row's max before exponentiating keeps the likelihood
     # away from underflow; it is a per-row constant, so the normalized
     # posterior is unchanged.
     likelihood = np.exp(log_likelihood - log_likelihood.max(axis=1, keepdims=True))
-    uniform = np.full(n_x, 1.0 / n_x)
-
-    def normalize(vector):
-        total = vector.sum()
-        return vector / total if total > 0 else uniform.copy()
+    uniform = step.uniform
 
     causal = np.empty((n_t, n_x))
     posterior = uniform
     for t in range(n_t):
-        prior = posterior if t == 0 else posterior @ transition
-        posterior = normalize(prior * likelihood[t])
-        causal[t] = posterior
+        prior = posterior if t == 0 else step.forward(posterior)
+        posterior = _normalize_rows(prior * likelihood[t : t + 1], uniform)
+        causal[t] = posterior[0]
 
     if not acausal:
         return causal, None
 
     smoothed = np.empty((n_t, n_x))
     smoothed[-1] = causal[-1]
-    backward = np.ones(n_x)
+    backward = np.ones((1, n_x))
     for t in range(n_t - 2, -1, -1):
-        backward = normalize(transition @ (likelihood[t + 1] * backward))
-        smoothed[t] = normalize(causal[t] * backward)
+        backward = _normalize_rows(step.backward(likelihood[t + 1 : t + 2] * backward), uniform)
+        smoothed[t] = _normalize_rows(causal[t : t + 1] * backward, uniform)[0]
     return causal, smoothed
 
 
@@ -797,10 +867,7 @@ def decode(
     best = posterior.argmax(axis=1)
     decoded_deg = model.bin_centers_deg[best]
     actual_deg = data.heading_deg[bin_index]
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        terms = np.where(posterior > 0, posterior * np.log2(posterior), 0.0)
-    entropy = -terms.sum(axis=1)
+    entropy = _entropy_bits(posterior)
 
     result = Decoded(
         label=label,
@@ -817,11 +884,30 @@ def decode(
         bin_centers_deg=model.bin_centers_deg,
         posterior=posterior.astype(np.float32) if keep_posterior else None,
     )
-    if with_metrics:
-        result.metrics = decoding_metrics(decoded_deg, actual_deg, tolerance_deg)
-    result.metrics["mean_posterior_max"] = float(np.mean(result.posterior_max))
-    result.metrics["mean_entropy_bits"] = float(np.mean(entropy))
+    result.metrics = _decode_metrics(
+        decoded_deg, actual_deg, result.posterior_max, entropy, with_metrics, tolerance_deg
+    )
     return result
+
+
+def _entropy_bits(posterior: np.ndarray) -> np.ndarray:
+    """Entropy of each posterior along its last axis, in bits."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        terms = np.where(posterior > 0, posterior * np.log2(posterior), 0.0)
+    return -terms.sum(axis=-1)
+
+
+def _decode_metrics(
+    decoded_deg, actual_deg, posterior_max, entropy_bits, with_metrics, tolerance_deg
+) -> dict:
+    """A decode's ``metrics``: shared by :func:`decode` and the shuffle workers."""
+    metrics = (
+        decoding_metrics(decoded_deg, actual_deg, tolerance_deg) if with_metrics else {}
+    )
+    metrics["mean_posterior_max"] = float(np.mean(posterior_max))
+    if entropy_bits is not None:
+        metrics["mean_entropy_bits"] = float(np.mean(entropy_bits))
+    return metrics
 
 
 def metrics_by_group(
@@ -937,7 +1023,14 @@ def shuffle_test(
     min_shift_s: float = 30.0,
     seed: int = 0,
     progress: bool = False,
-    **decode_kwargs,
+    n_jobs: int | None = None,
+    max_batch_bytes: int = 2**30,
+    movement_var_deg2: float | None = None,
+    acausal: bool = True,
+    max_gap_s: float = 1.0,
+    min_run_s: float = 1.0,
+    with_metrics: bool = True,
+    tolerance_deg: float = 30.0,
 ) -> ShuffleTest:
     """Re-decode `n_shuffles` times with the coding destroyed, for comparison.
 
@@ -959,6 +1052,24 @@ def shuffle_test(
     the same shuffled decodes -- the raw and the offset-corrected error, say --
     without paying for the decodes twice. The result is then a dict
     ``{metric: ShuffleTest}`` in that order.
+
+    The remaining keywords are :func:`decode`'s, and each shuffle is decoded
+    exactly as :func:`decode` would decode it. Two things make that fast:
+
+    ``n_jobs`` worker processes split the shuffles between them (default
+    None: one per CPU core, capped by the number of shuffles; 1 runs them
+    here). Every shift or permutation is drawn up front, in the order the
+    one-at-a-time loop drew them, so the null does not depend on ``n_jobs``.
+
+    Within a worker, shuffles are decoded in batches, stepping every one of
+    them through the forward-backward together: neither kind of shuffle
+    changes which bins are decoded, so one step is a single (batch x angle) @
+    (angle x angle) product rather than a vector product per shuffle. A batch
+    holds each shuffle's causal posterior over a run, ``8 x run bins x angle
+    bins`` bytes, and ``max_batch_bytes`` caps that per worker, so the batches
+    are smaller over long runs. Batching changes the order of floating-point
+    sums, so a null can differ from a one-at-a-time decode's in the last
+    digits, and where two headings tie, in the MAP bin.
     """
     if kind not in ("shift", "units"):
         raise ValueError(f"kind must be 'shift' or 'units', got {kind!r}")
@@ -966,7 +1077,10 @@ def shuffle_test(
     if not metrics:
         raise ValueError("no metric to test")
 
-    rng = np.random.default_rng(seed)
+    decode_kwargs = dict(
+        movement_var_deg2=movement_var_deg2, acausal=acausal, max_gap_s=max_gap_s,
+        min_run_s=min_run_s, with_metrics=with_metrics, tolerance_deg=tolerance_deg,
+    )
     observed = decode(
         data, model, mask, keep_posterior=False, label="observed", **decode_kwargs
     )
@@ -974,55 +1088,192 @@ def shuffle_test(
         if name not in observed.metrics:
             raise ValueError(f"metric {name!r} is not one of {sorted(observed.metrics)}")
 
-    null = np.empty((len(metrics), n_shuffles))
-    for i in range(n_shuffles):
-        if kind == "shift":
-            min_shift = max(1, round(min_shift_s / data.bin_s))
-            if 2 * min_shift >= data.n_bins:
-                raise ValueError(
-                    f"min_shift_s={min_shift_s} leaves no room to shift "
-                    f"{data.duration_s.sum():.0f}s of data"
-                )
-            shift = int(rng.integers(min_shift, data.n_bins - min_shift))
-            surrogate = DecoderData(
-                counts=np.roll(data.counts, shift, axis=0),
-                heading_deg=data.heading_deg,
-                duration_s=data.duration_s,
-                time_s=data.time_s,
-                edges=data.edges,
-                unit_ids=data.unit_ids,
-                bin_frames=data.bin_frames,
+    # every draw up front, in the order the one-at-a-time loop made them
+    rng = np.random.default_rng(seed)
+    identity = np.arange(len(model.unit_ids))
+    if kind == "shift":
+        min_shift = max(1, round(min_shift_s / data.bin_s))
+        if n_shuffles and 2 * min_shift >= data.n_bins:
+            raise ValueError(
+                f"min_shift_s={min_shift_s} leaves no room to shift "
+                f"{data.duration_s.sum():.0f}s of data"
             )
-            shuffled_model = model
-        else:
-            surrogate = data
-            order = rng.permutation(len(model.unit_ids))
-            shuffled_model = EncodingModel(
-                bin_centers_deg=model.bin_centers_deg,
-                rate_hz=model.rate_hz[order],
-                unit_ids=model.unit_ids,
-                occupancy_s=model.occupancy_s,
-                train_time_s=model.train_time_s,
-                min_rate_hz=model.min_rate_hz,
-            )
+        shifts = [int(rng.integers(min_shift, data.n_bins - min_shift)) for _ in range(n_shuffles)]
+        orders = [identity] * n_shuffles
+    else:
+        shifts = [0] * n_shuffles
+        orders = [rng.permutation(len(model.unit_ids)) for _ in range(n_shuffles)]
 
-        run = decode(
-            surrogate,
-            shuffled_model,
-            mask,
-            keep_posterior=False,
-            label=f"shuffle {i}",
-            **decode_kwargs,
-        )
-        null[:, i] = [run.metrics[name] for name in metrics]
-        if progress and (i + 1) % 10 == 0:
-            print(f"      shuffle {i + 1}/{n_shuffles}", end="\r")
+    if movement_var_deg2 is None:
+        movement_var_deg2 = movement_variance(data)
+    runs = _runs(mask, data.duration_s, max_gap_s, min_run_s)
+    bin_index = np.concatenate([np.arange(a, b) for a, b in runs])
+    job = dict(
+        counts=data.counts,
+        duration_s=data.duration_s,
+        actual_deg=data.heading_deg[bin_index],
+        runs=runs,
+        rate_hz=model.rate_hz,
+        bin_centers_deg=model.bin_centers_deg,
+        transition=ring_transition(model.n_angle_bins, movement_var_deg2),
+        acausal=acausal,
+        metrics=metrics,
+        with_metrics=with_metrics,
+        tolerance_deg=tolerance_deg,
+        max_batch_bytes=max_batch_bytes,
+    )
+
+    n_workers = min(n_shuffles, _default_jobs() if n_jobs is None else max(1, n_jobs))
+    chunks = np.array_split(np.arange(n_shuffles), max(1, n_workers))
+    null = np.empty((len(metrics), n_shuffles))
+    if n_workers <= 1:
+        if n_shuffles:
+            null[:] = _shuffle_null(shifts=shifts, orders=orders, **job)
+    else:
+        with _single_threaded_children(), ProcessPoolExecutor(n_workers) as pool:
+            futures = {
+                pool.submit(
+                    _shuffle_null,
+                    shifts=[shifts[i] for i in chunk],
+                    orders=[orders[i] for i in chunk],
+                    **job,
+                ): chunk
+                for chunk in chunks
+            }
+            done = 0
+            for future in as_completed(futures):
+                null[:, futures[future]] = future.result()
+                done += len(futures[future])
+                if progress:
+                    print(f"      shuffle {done}/{n_shuffles}", end="\r")
 
     tests = {
         name: _judge(name, observed.metrics[name], null[k], kind)
         for k, name in enumerate(metrics)
     }
     return tests[metric] if isinstance(metric, str) else tests
+
+
+def _default_jobs() -> int:
+    """One worker per CPU core this process may use."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:  # Windows, macOS
+        return max(1, os.cpu_count() or 1)
+
+
+_CHUNK_BINS = 2048  # bins of likelihood a shuffle worker holds at a time
+
+_THREAD_VARIABLES = (
+    "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS",
+)
+
+
+@contextmanager
+def _single_threaded_children():
+    """Start worker processes with one BLAS thread each.
+
+    Every worker already has a core to itself; a BLAS that also spreads each
+    small product over every core just has the workers fight over them. A
+    child reads these when it imports numpy, so they are set only while the
+    pool starts its workers, and this process's own BLAS is untouched.
+    """
+    saved = {name: os.environ.get(name) for name in _THREAD_VARIABLES}
+    os.environ.update({name: "1" for name in _THREAD_VARIABLES})
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _shuffle_null(
+    counts, duration_s, actual_deg, runs, rate_hz, bin_centers_deg, transition,
+    acausal, metrics, with_metrics, tolerance_deg, max_batch_bytes, shifts, orders,
+) -> np.ndarray:
+    """``metrics`` of each shuffle's decode, as a (metric, shuffle) array.
+
+    Shuffle ``k`` decodes ``np.roll(counts, shifts[k])`` with the tuning
+    curves reordered by ``orders[k]``, over the same runs as the observed
+    decode, and is scored as :func:`decode` scores it. Module level, so worker
+    processes can import it.
+    """
+    n_shuffles = len(shifts)
+    n_bins = len(duration_s)
+    n_angles = transition.shape[0]
+    n_decoded = sum(b - a for a, b in runs)
+    rates = [rate_hz[order] for order in orders]
+    want_entropy = "mean_entropy_bits" in metrics
+    best = np.empty((n_shuffles, n_decoded), dtype=np.intp)
+    peak = np.empty((n_shuffles, n_decoded))
+    entropy = np.empty((n_shuffles, n_decoded)) if want_entropy else None
+    step = _RingStep(transition)
+    uniform = step.uniform
+
+    def likelihood(ks, a, b):
+        """exp(log-likelihood - row max) of bins a:b, for shuffles `ks`."""
+        out = np.empty((len(ks), b - a, n_angles))
+        for j, k in enumerate(ks):
+            rows = (np.arange(a, b) - shifts[k]) % n_bins  # np.roll(counts, shift)[a:b]
+            log_likelihood = poisson_log_likelihood(counts[rows], duration_s[a:b], rates[k])
+            out[j] = np.exp(log_likelihood - log_likelihood.max(axis=1, keepdims=True))
+        return out
+
+    def record(batch, position, posterior):
+        best[batch, position] = which = posterior.argmax(axis=1)
+        peak[batch, position] = posterior[np.arange(len(which)), which]
+        if want_entropy:
+            entropy[batch, position] = _entropy_bits(posterior)
+
+    chunk = _CHUNK_BINS
+    start = 0
+    for a, b in runs:
+        n_t = b - a
+        # the causal posteriors the backward pass reads back
+        per_shuffle = 8 * n_angles * (n_t if acausal else min(n_t, chunk))
+        size = int(min(n_shuffles, max(1, max_batch_bytes // per_shuffle)))
+        for first in range(0, n_shuffles, size):
+            batch = slice(first, min(first + size, n_shuffles))
+            ks = range(n_shuffles)[batch]
+            causal = np.empty((len(ks), n_t, n_angles)) if acausal else None
+            posterior = None
+            for c in range(a, b, chunk):
+                lik = likelihood(ks, c, min(c + chunk, b))
+                for i in range(lik.shape[1]):
+                    t = c - a + i
+                    prior = uniform if t == 0 else step.forward(posterior)
+                    posterior = _normalize_rows(prior * lik[:, i], uniform)
+                    if acausal:
+                        causal[:, t] = posterior
+                    else:
+                        record(batch, start + t, posterior)
+            if acausal:
+                record(batch, start + n_t - 1, causal[:, -1])
+                backward = np.ones((len(ks), n_angles))
+                following = None  # likelihood of bin t + 1
+                for c in reversed(range(a, b, chunk)):
+                    lik = likelihood(ks, c, min(c + chunk, b))
+                    for i in reversed(range(lik.shape[1])):
+                        t = c - a + i
+                        if t < n_t - 1:
+                            backward = _normalize_rows(step.backward(following * backward), uniform)
+                            record(batch, start + t, _normalize_rows(causal[:, t] * backward, uniform))
+                        following = lik[:, i]
+        start += n_t
+
+    decoded_deg = bin_centers_deg[best]
+    null = np.empty((len(metrics), n_shuffles))
+    for k in range(n_shuffles):
+        values = _decode_metrics(
+            decoded_deg[k], actual_deg, peak[k],
+            entropy[k] if want_entropy else None, with_metrics, tolerance_deg,
+        )
+        null[:, k] = [values[name] for name in metrics]
+    return null
 
 
 def _judge(metric: str, observed: float, null: np.ndarray, kind: str) -> ShuffleTest:
@@ -1118,6 +1369,7 @@ def run_decoder(
     verbose: bool = True,
     within=None,
     interval_mask=None,
+    n_jobs: int | None = None,
 ) -> DecoderRun:
     """Train on wake, test on held-out wake against a shuffle, then decode REM.
     ``sorting``: may be a sorting or a sorting analyzer
@@ -1154,6 +1406,7 @@ def run_decoder(
     ``keep_posterior``: whether to save posteriors for REM analysis. Default True
     ``seed``: seed for generating the random train/test split. Default 0
     ``verbose``: print progress on model generation. Default True
+    ``n_jobs``: worker processes for the shuffles. Default None (one per CPU core); 1 runs them in this process
 
     Tuning guide
     ------------
@@ -1338,6 +1591,7 @@ def run_decoder(
             n_shuffles=n_shuffles,
             min_shift_s=min_shift_s,
             seed=seed,
+            n_jobs=n_jobs,
             **shared,
         )
         if verbose:
@@ -1373,6 +1627,7 @@ def run_decoder(
                     n_shuffles=n_shuffles,
                     seed=seed,
                     with_metrics=False,
+                    n_jobs=n_jobs,
                     **shared,
                 )
                 if verbose:
@@ -1505,6 +1760,7 @@ def apply_decoder(
     keep_posterior: bool = False,
     label: str = "transfer",
     verbose: bool = True,
+    n_jobs: int | None = None,
 ) -> TransferRun:
     """Decode another recording with a model fitted on the baseline.
 
@@ -1521,7 +1777,8 @@ def apply_decoder(
     time-shift null. REM is decoded and judged against the unit-permutation
     null exactly as :func:`run_decoder` does. ``movement_var_deg2`` should be
     the baseline run's, so the prior is the one the model was scored with, and
-    the remaining settings should match that run's too.
+    the remaining settings should match that run's too. ``n_jobs`` is
+    :func:`shuffle_test`'s.
     """
     model_units = list(unit_map)
     if not model_units:
@@ -1558,7 +1815,7 @@ def apply_decoder(
         movement_var_deg2=movement_var_deg2, acausal=acausal,
         tolerance_deg=tolerance_deg, n_shuffles=n_shuffles,
         min_shift_s=min_shift_s, seed=seed, keep_posterior=keep_posterior,
-        label=label, verbose=verbose,
+        label=label, verbose=verbose, n_jobs=n_jobs,
     )
 
 
@@ -1573,6 +1830,7 @@ def reference_decode(
     keep_posterior: bool = False,
     label: str = "baseline",
     verbose: bool = True,
+    n_jobs: int | None = None,
 ) -> TransferRun:
     """The fitting recording's own held-out wake and REM, decoded with only `unit_ids`.
 
@@ -1589,13 +1847,14 @@ def reference_decode(
         movement_var_deg2=run.movement_var_deg2, acausal=acausal,
         tolerance_deg=tolerance_deg, n_shuffles=n_shuffles,
         min_shift_s=min_shift_s, seed=seed, keep_posterior=keep_posterior,
-        label=label, verbose=verbose,
+        label=label, verbose=verbose, n_jobs=n_jobs,
     )
 
 
 def _read_out(
     data, model, partner_ids, wake_mask, rem_mask, movement_var_deg2, acausal,
     tolerance_deg, n_shuffles, min_shift_s, seed, keep_posterior, label, verbose,
+    n_jobs=None,
 ) -> TransferRun:
     """Decode wake and REM with `model` and judge both against their nulls."""
     shared = {
@@ -1613,7 +1872,8 @@ def _read_out(
     if n_shuffles:
         wake_shuffles = shuffle_test(
             data, model, wake_mask, kind="shift", metric=WAKE_SHUFFLE_METRICS,
-            n_shuffles=n_shuffles, min_shift_s=min_shift_s, seed=seed, **shared,
+            n_shuffles=n_shuffles, min_shift_s=min_shift_s, seed=seed,
+            n_jobs=n_jobs, **shared,
         )
         if verbose:
             for test in wake_shuffles.values():
@@ -1633,7 +1893,8 @@ def _read_out(
         if n_shuffles:
             rem_shuffle = shuffle_test(
                 data, model, rem_mask, kind="units", metric="mean_posterior_max",
-                n_shuffles=n_shuffles, seed=seed, with_metrics=False, **shared,
+                n_shuffles=n_shuffles, seed=seed, with_metrics=False,
+                n_jobs=n_jobs, **shared,
             )
             if verbose:
                 print(f"    {rem_shuffle}")

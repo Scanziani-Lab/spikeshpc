@@ -52,6 +52,38 @@ def break_at(x, y, breaks, wrap_threshold: float = 180.0):
     return np.insert(x, at, np.nan), np.insert(y, at, np.nan)
 
 
+def wrap_through(x, y, breaks=(), top: float = 360.0):
+    """A heading line that crosses north the short way, out of one edge of the axis and in at the other.
+
+    Where two neighbouring points are more than half the ring apart on the
+    axis, the short way between them crosses 0/360: the line runs to the top
+    (or bottom) edge at the time it would reach it, breaks, and comes back in
+    from the opposite edge -- as the heading itself does. :func:`break_at`
+    cuts there instead, which leaves a gap wherever the heading crosses north.
+    ``breaks`` are cut outright (a splice, say), as in :func:`break_at`.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(y) < 2:
+        return x, y
+
+    cut = np.array(sorted({int(i) for i in breaks if 0 < int(i) < len(y)}), dtype=int)
+    joined = np.ones(len(y) - 1, dtype=bool)
+    joined[cut - 1] = False
+    step = np.diff(y)
+    i = np.flatnonzero(joined & (np.abs(step) > top / 2))  # between points i and i + 1
+    short = step[i] - top * np.sign(step[i])
+    edge = np.where(short > 0, top, 0.0)
+    at_edge = x[i] + (edge - y[i]) / short * (x[i + 1] - x[i])
+    gap = np.full(len(i), np.nan)
+
+    position = np.concatenate([cut, np.repeat(i + 1, 3)])
+    new_x = np.concatenate([np.full(len(cut), np.nan), np.column_stack([at_edge, gap, at_edge]).ravel()])
+    new_y = np.concatenate([np.full(len(cut), np.nan), np.column_stack([edge, gap, top - edge]).ravel()])
+    order = np.argsort(position, kind="stable")
+    return np.insert(x, position[order], new_x[order]), np.insert(y, position[order], new_y[order])
+
+
 class DecodedWidget:
     """Scroll through a decoded stretch; arrow keys and a slider.
 

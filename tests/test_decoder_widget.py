@@ -20,6 +20,7 @@ from spikeshpc.decoder_widget import (  # noqa: E402
     DecodedWidget,
     break_at,
     show_decoded,
+    wrap_through,
 )
 from spikeshpc.raster import unit_raster  # noqa: E402
 
@@ -95,6 +96,38 @@ def test_a_clean_line_is_left_alone():
 def test_a_single_point_does_not_crash_the_cutter():
     bx, by = break_at([1.0], [10.0], [])
     assert len(bx) == 1
+
+
+# ── the line that goes round ────────────────────────────────────────────
+@pytest.mark.parametrize(
+    "y, expected_y, expected_x",
+    [
+        ([350.0, 10.0], [350.0, 360.0, np.nan, 0.0, 10.0], [0.0, 0.5, np.nan, 0.5, 1.0]),  # up
+        ([10.0, 350.0], [10.0, 0.0, np.nan, 360.0, 350.0], [0.0, 0.5, np.nan, 0.5, 1.0]),  # down
+        # a 170-degree hop the short way through north, 95/170 of the way along
+        ([265.0, 75.0], [265.0, 360.0, np.nan, 0.0, 75.0], [0.0, 95 / 170, np.nan, 95 / 170, 1.0]),
+    ],
+)
+def test_a_line_crosses_north_out_of_one_edge_and_in_at_the_other(y, expected_y, expected_x):
+    wx, wy = wrap_through([0.0, 1.0], y)
+    np.testing.assert_allclose(wy, expected_y)
+    np.testing.assert_allclose(wx, expected_x)
+
+
+def test_a_step_under_half_the_ring_is_joined_however_big():
+    wx, wy = wrap_through([0.0, 1.0, 2.0], [100.0, 270.0, 95.0])
+    np.testing.assert_array_equal(wy, [100.0, 270.0, 95.0])
+
+
+def test_a_splice_is_cut_not_wrapped():
+    wx, wy = wrap_through([0.0, 1.0, 2.0], [350.0, 10.0, 20.0], breaks=[1])
+    np.testing.assert_array_equal(np.isnan(wy), [False, True, False, False])
+    assert np.nanmax(wy) == 350.0 and np.nanmin(wy) == 10.0  # no edge points added
+
+
+def test_a_single_point_does_not_crash_the_wrapper():
+    wx, wy = wrap_through([1.0], [10.0])
+    assert len(wx) == 1
 
 
 # ── layout and colours ──────────────────────────────────────────────────

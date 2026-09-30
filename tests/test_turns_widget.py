@@ -158,7 +158,7 @@ def test_no_line_joins_across_a_splice_or_a_jump(widget):
     widget._draw()
     velocity = widget.velocity_line.get_ydata()
     assert np.isnan(velocity).sum() >= 2  # one cut at the splice, one at the jump
-    assert widget.decoded_dots.get_linestyle() == "None"  # dots: they never join
+    assert widget.decoded_line.get_linestyle() == "None"  # dots: they never join
 
 
 def test_the_title_gives_the_window_and_the_whole_trace(widget):
@@ -241,8 +241,8 @@ def test_apply_offset_moves_the_decoded_heading_and_nothing_else(trace):
     moved = TurnWidget(time, heading, turns, run_index=run_index, apply_offset=True,
                        offset_deg=-44.0)
     try:
-        expected = (plain.decoded_dots.get_ydata() + 44.0) % 360.0
-        np.testing.assert_allclose(moved.decoded_dots.get_ydata(), expected)
+        expected = (plain.decoded_line.get_ydata() + 44.0) % 360.0
+        np.testing.assert_allclose(moved.decoded_line.get_ydata(), expected)
         np.testing.assert_allclose(moved.velocity_line.get_ydata(), plain.velocity_line.get_ydata())
         assert moved.heading_ax.get_title() == plain.heading_ax.get_title()  # same turns, drift
         labels = [t.get_text() for t in moved.heading_ax.get_legend().get_texts()]
@@ -265,6 +265,72 @@ def test_apply_offset_without_an_offset_is_refused(trace):
     time, heading, _, turns = trace
     with pytest.raises(ValueError, match="apply_offset needs offset_deg"):
         TurnWidget(time, heading, turns, apply_offset=True)
+
+
+# ── dots or a line ──────────────────────────────────────────────────────
+def test_the_decoded_heading_is_dots_by_default(widget):
+    assert widget.decoded_marker == "dots"
+    assert widget.decoded_line.get_marker() == "."
+    assert widget.decoded_line.get_linestyle() == "None"
+
+
+@pytest.mark.parametrize("offset", [None, -300.0])
+def test_as_a_line_it_is_cut_at_splices_and_jumps_and_goes_round_at_north(trace, offset):
+    """-300 moves most of the trace across 0/360, so north is crossed too."""
+    time, heading, run_index, turns = trace
+    w = TurnWidget(time, heading, turns, run_index=run_index, decoded_marker="line",
+                   apply_offset=offset is not None, offset_deg=offset)
+    try:
+        w.window_s = w.total_s
+        w.t0 = 0.0
+        w._draw()
+        line = w.decoded_line
+        assert line.get_linestyle() == "-" and line.get_marker() in ("", "None", None)
+        y = line.get_ydata()
+        assert np.isnan(y).sum() >= 2  # at the splice and at the jump
+        # every step the line does draw is a real one: none as big as a jump
+        assert np.nanmax(np.abs(np.diff(y))) <= turns.max_step_deg
+        if offset is not None:  # it crossed north by running to the edges
+            assert 0.0 in y and 360.0 in y
+        labels = [t.get_text() for t in w.heading_ax.get_legend().get_texts()]
+        assert labels[0].startswith("decoded")
+    finally:
+        plt.close(w.fig)
+
+
+def test_with_no_jump_limit_a_hop_across_north_is_one_line_through_the_edge():
+    """max_step_deg=np.inf keeps every hop; the line must not gap where one crosses north."""
+    time = np.arange(100) * BIN
+    heading = np.where(np.arange(100) < 50, 265.0, 75.0)
+    turns = find_turns(time, heading, turn_threshold=30.0, bin_s=BIN, max_step_deg=np.inf)
+    assert turns.n_jumps == 0
+    w = TurnWidget(time, heading, turns, decoded_marker="line")
+    try:
+        y = w.decoded_line.get_ydata()
+        np.testing.assert_array_equal(y[48:54], [265.0, 265.0, 360.0, np.nan, 0.0, 75.0])
+        assert np.isnan(y).sum() == 1  # only the step off the top edge and back in at the bottom
+    finally:
+        plt.close(w.fig)
+
+
+def test_the_measured_line_is_cut_at_splices_but_not_at_the_decoders_jumps(trace):
+    time, heading, run_index, turns = trace
+    w = TurnWidget(time, heading, turns, run_index=run_index,
+                   measured_deg=np.full(time.size, 45.0))
+    try:
+        w.window_s = w.total_s
+        w.t0 = 0.0
+        w._draw()
+        assert turns.n_jumps == 1 and w.breaks.size == 1
+        assert np.isnan(w.measured_line.get_ydata()).sum() == 1  # the splice alone
+    finally:
+        plt.close(w.fig)
+
+
+def test_a_marker_that_is_neither_is_refused(trace):
+    time, heading, _, turns = trace
+    with pytest.raises(ValueError, match="decoded_marker must be 'dots' or 'line'"):
+        TurnWidget(time, heading, turns, decoded_marker="bars")
 
 
 def test_a_trace_that_does_not_match_its_turns_is_refused(trace):

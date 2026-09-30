@@ -20,6 +20,8 @@ from spikeshpc.optitrack.tuning import (  # noqa: E402
     compute_all_units_tuning_curves,
     compute_hd_tuning_significance,
     find_bimodal_threshold,
+    get_kilosort_unit_locations,
+    plot_hd_tuning_on_probe,
     plot_hd_tuning_population,
 )
 
@@ -236,3 +238,52 @@ def test_nothing_tuned_says_so(loaded):
     apply_mvl_cutoff(loaded.stats, 1.0)
     with pytest.raises(ValueError, match="none are significantly tuned"):
         plot_hd_tuning_population(loaded)
+
+
+# ── the probe bubble plot ───────────────────────────────────────────────
+@pytest.fixture(scope="module")
+def probe():
+    probeinterface = pytest.importorskip("probeinterface")
+    p = probeinterface.generate_linear_probe(num_elec=40, ypitch=50)
+    p.create_auto_shape()
+    return p
+
+
+def test_kilosort_unit_location_is_the_median_of_its_spikes(tmp_path):
+    positions = np.array([[0, 100], [10, 110], [99, 900], [20, 500], [30, 520]], float)
+    np.save(tmp_path / "spike_positions.npy", positions.astype(np.float32))
+    np.save(tmp_path / "spike_clusters.npy", np.array([3, 3, 3, 7, 7]))
+    loc = get_kilosort_unit_locations(tmp_path)
+    assert loc == {3: (10.0, 110.0), 7: (25.0, 510.0)}  # the stray spike moves nothing
+    assert list(get_kilosort_unit_locations(tmp_path, unit_ids=[7])) == [7]
+    with pytest.raises(KeyError):
+        get_kilosort_unit_locations(tmp_path, unit_ids=[5])
+
+
+def test_one_bubble_per_tuned_unit_sized_by_mvl_colored_by_direction(loaded, probe):
+    locations = {u: (5.0, 100.0 * i) for i, u in enumerate(loaded.unit_ids)}
+    fig, axes = plot_hd_tuning_on_probe(
+        loaded, locations, probe, inset_depth_um=(0, 500), size_per_mvl=1000.0
+    )
+    bubbles = axes["inset"].collections[-1]
+    tuned = list(loaded.tuned_ids)
+    assert len(bubbles.get_offsets()) == len(tuned)
+    by_y = {locations[u][1]: u for u in tuned}
+    for (_, y), size, color in zip(
+        bubbles.get_offsets(), bubbles.get_sizes(), bubbles.get_facecolors()
+    ):
+        stats = loaded.stats[by_y[y]]
+        assert size == pytest.approx(1000.0 * stats.mean_vector_length)
+        hue = (stats.preferred_direction_deg % 360) / 360
+        assert np.allclose(color[:3], matplotlib.colormaps["hsv"](hue)[:3])
+    assert np.all(np.diff(bubbles.get_sizes()) <= 0)  # largest drawn first
+    assert axes["inset"].get_ylim() == (0, 500)
+    # the untuned units are the grey dots underneath
+    dots = axes["probe"].collections[-2]
+    assert len(dots.get_offsets()) == len(loaded.unit_ids) - len(tuned)
+    plt.close(fig)
+
+
+def test_probe_plot_needs_a_location_for_every_bubble(loaded, probe):
+    with pytest.raises(KeyError):
+        plot_hd_tuning_on_probe(loaded, {}, probe)

@@ -44,6 +44,7 @@ __all__ = [
 ]
 
 STATES = ("wake", "REM")
+REM_SHADE = "0.93"  # behind the REM columns of the summary
 
 
 def clockwise_sign(flip_direction: bool) -> int:
@@ -269,13 +270,16 @@ def plot_turn_summary(table: pd.DataFrame, recordings, colors: dict, units: dict
     measured heading, an open square; drawn for wake only) or "reference" (the
     baseline decoded with that recording's units, an open black diamond, as in
     :func:`~spikeshpc.decoder.plot_transfer_summary`). Columns run in
-    ``recordings`` order, wake then REM; ``units`` and ``types`` label them.
+    ``recordings`` order, wake then REM, the REM ones shaded gray; ``units``
+    and ``types`` label them. In a wake column the decode and the measured
+    heading sit side by side, and the diamond stands apart to their left.
 
     Four panels: percent of time at a constant heading; turns per minute, with
-    each trace's total count above its marker; clockwise over counterclockwise
-    turns on a log axis, where 1 is no preference, with the two counts above
-    each marker; and net drift in deg/min, clockwise up, which does not depend
-    on the threshold. Returns the four axes.
+    each trace's total count beside its marker (a pair's pointing away from
+    each other, so they never overprint); clockwise over counterclockwise turns
+    on a log axis, where 1 is no preference, with the two counts placed the
+    same way; and net drift in deg/min, clockwise up, which does not depend on
+    the threshold. Returns the four axes.
     """
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
@@ -291,9 +295,12 @@ def plot_turn_summary(table: pd.DataFrame, recordings, colors: dict, units: dict
     constant_ax, rate_ax, ratio_ax, drift_ax = axes
 
     rows = {(row.recording, row.state, row.source): row for row in table.itertuples()}
-    placement = {  # x offset within a column; OptiTrack is drawn for wake only
-        ("wake", "decoded"): -0.27, ("wake", "optitrack"): 0.27, ("wake", "reference"): 0.0,
-        ("REM", "decoded"): -0.15, ("REM", "reference"): 0.15,
+    # x offset within a column: a wake decode and the measured heading as a pair,
+    # the baseline with the same units set apart to the left; each source keeps
+    # its offset in both columns. OptiTrack is drawn for wake only.
+    placement = {
+        ("wake", "reference"): -0.36, ("wake", "decoded"): -0.06, ("wake", "optitrack"): 0.1,
+        ("REM", "reference"): -0.36, ("REM", "decoded"): -0.06,
     }
     styles = {
         "decoded": lambda c: dict(marker="o", ls="none", color=c, ms=7, zorder=3),
@@ -302,8 +309,17 @@ def plot_turn_summary(table: pd.DataFrame, recordings, colors: dict, units: dict
         "reference": lambda c: dict(marker="D", ls="none", mfc="none", mec="k", mew=1.2, ms=7,
                                     zorder=4),
     }
-    count_style = dict(xytext=(0, 7), textcoords="offset points", ha="center", fontsize=6,
-                       color="0.3")
+    # counts beside a decode's and the measured heading's markers. Side by side,
+    # two labels at one height would print over each other, so a pair's point
+    # outward: the higher marker's above, the lower one's below (the decode's
+    # above on a tie).
+    above = dict(xytext=(0, 7), textcoords="offset points", ha="center", va="bottom",
+                 fontsize=6, color="0.3")
+    below = dict(above, xytext=(0, -7), va="top")
+    counted = (  # panel, the measure it draws, its label
+        (rate_ax, "turns_per_min", lambda row: f"{row.n_turns}"),
+        (ratio_ax, "cw_ccw_ratio", lambda row: f"{row.n_cw}:{row.n_ccw}"),
+    )
 
     ticks, labels, constants, rates, ratios, drifts = [], [], [], [], [], []
     for j, recording in enumerate(recordings):
@@ -311,6 +327,7 @@ def plot_turn_summary(table: pd.DataFrame, recordings, colors: dict, units: dict
             x = 2 * j + k
             ticks.append(x)
             labels.append(state)
+            labelled = {}  # source -> (x, row) of the markers that carry counts
             for source, style in styles.items():
                 row = rows.get((recording, state, source))
                 offset = placement.get((state, source))
@@ -323,17 +340,27 @@ def plot_turn_summary(table: pd.DataFrame, recordings, colors: dict, units: dict
                 constant_ax.plot(x + offset, row.constant_pct, **marker)
                 rate_ax.plot(x + offset, row.turns_per_min, **marker)
                 drift_ax.plot(x + offset, row.drift_deg_per_min, **marker)
-                if source != "reference":
-                    rate_ax.annotate(f"{row.n_turns}", (x + offset, row.turns_per_min),
-                                     **count_style)
                 if np.isfinite(row.cw_ccw_ratio) and row.cw_ccw_ratio > 0:
                     ratios.append(row.cw_ccw_ratio)
                     ratio_ax.plot(x + offset, row.cw_ccw_ratio, **marker)
-                    if source != "reference":
-                        ratio_ax.annotate(f"{row.n_cw}:{row.n_ccw}",
-                                          (x + offset, row.cw_ccw_ratio), **count_style)
-        if j:
-            for ax in axes:
+                if source != "reference":
+                    labelled[source] = (x + offset, row)
+            for ax, measure, text in counted:
+                ys = {
+                    source: getattr(row, measure) for source, (_, row) in labelled.items()
+                    if np.isfinite(getattr(row, measure))
+                    and (measure != "cw_ccw_ratio" or getattr(row, measure) > 0)  # as drawn
+                }
+                up = {source: True for source in ys}
+                if len(ys) == 2:
+                    up = {"decoded": ys["decoded"] >= ys["optitrack"],
+                          "optitrack": ys["optitrack"] > ys["decoded"]}
+                for source, y in ys.items():
+                    ax.annotate(text(labelled[source][1]), (labelled[source][0], y),
+                                **(above if up[source] else below))
+        for ax in axes:
+            ax.axvspan(2 * j + 0.5, 2 * j + 1.5, color=REM_SHADE, lw=0, zorder=0)
+            if j:
                 ax.axvline(2 * j - 0.5, color="0.85", lw=0.8, zorder=0)
 
     # markers, not bars, so the percent axis can start near the lowest value
@@ -342,7 +369,7 @@ def plot_turn_summary(table: pd.DataFrame, recordings, colors: dict, units: dict
     constant_ax.set_ylabel("constant heading\n(% of time)")
     highest = np.nanmax(rates) if np.isfinite(rates).any() else 1.0
     rate_ax.set_ylim(0, 1.2 * highest if highest > 0 else 1.0)  # room for the counts
-    rate_ax.set_ylabel("turns per minute\n(total above each)")
+    rate_ax.set_ylabel("turns per minute\n(total beside each)")
     ratio_ax.set_yscale("log", base=2)
     ratio_ax.axhline(1.0, color="0.6", lw=0.8, zorder=0)
     widest = max((abs(np.log2(r)) for r in ratios), default=0.0)

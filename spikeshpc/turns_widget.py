@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .decoder_widget import break_at
+from .decoder_widget import break_at, wrap_through
 from .optitrack.widgets._backend import warn_if_noninteractive_backend
 from .raster import RasterPanel
 from .turns import Turns, _runs
@@ -41,6 +41,13 @@ class TurnWidget:
     found in; ``measured_deg`` optionally the measured heading in the same bins.
     The window grows to ``max_window_s``, by default the whole trace or 15
     minutes, whichever is shorter.
+
+    ``decoded_marker`` draws the decoded heading as ``"dots"``, one per decoded
+    bin, or as a ``"line"``. The line is cut only where joining two bins would
+    draw a movement that did not happen: at a splice, and at a jump (a step over
+    ``max_step_deg`` -- none with ``np.inf``). Where the heading crosses 0/360
+    it goes the short way, out through one edge of the axis and back in at the
+    other, as the measured line does.
 
     ``raster`` (a :class:`~spikeshpc.raster.UnitRaster`) adds the spikes of the
     units the decoder read, on top: a row per unit, sorted by preferred
@@ -73,6 +80,7 @@ class TurnWidget:
         max_raster_spikes: int = 150_000,
         apply_offset: bool = False,
         offset_deg: float | None = None,
+        decoded_marker: str = "dots",
     ):
         import matplotlib.pyplot as plt
         from matplotlib.lines import Line2D
@@ -99,6 +107,9 @@ class TurnWidget:
             raise ValueError(
                 "apply_offset needs offset_deg: the decode's wake_offset_deg from notebook 3"
             )
+        if decoded_marker not in ("dots", "line"):
+            raise ValueError(f"decoded_marker must be 'dots' or 'line', not {decoded_marker!r}")
+        self.decoded_marker = decoded_marker
         self.turns = turns
         self.color = color
         self.offset_deg = float(offset_deg) if apply_offset else 0.0
@@ -143,8 +154,9 @@ class TurnWidget:
         label = turns.label or "decoded"
         if apply_offset:
             label += f", {self.offset_deg:+.0f} deg offset removed"
-        (self.decoded_dots,) = self.heading_ax.plot(
-            [], [], ".", color=color, ms=3.5, label=label, zorder=4
+        style = dict(marker=".", ls="none", ms=3.5) if decoded_marker == "dots" else dict(lw=1.3)
+        (self.decoded_line,) = self.heading_ax.plot(
+            [], [], color=color, label=label, zorder=4, **style
         )
         (self.velocity_line,) = self.velocity_ax.plot([], [], color=color, lw=1.1, zorder=3)
         self._drawn = []  # turn spans, jump and splice lines: redrawn with the window
@@ -179,7 +191,7 @@ class TurnWidget:
             )
             self.raster_panel.add_colorbar(self.fig)
 
-        handles = [self.decoded_dots]
+        handles = [self.decoded_line]
         if self.measured_deg is not None:
             handles.append(self.measured_line)
         handles += [
@@ -265,11 +277,16 @@ class TurnWidget:
             return
         first, last = index[0], index[-1]
         x = self.centers[index]
-        cuts = self._cuts[(self._cuts > first) & (self._cuts <= last)] - first
+        cuts = self._cuts[(self._cuts > first) & (self._cuts <= last)] - first  # splices, jumps
+        splice_cuts = self.breaks[(self.breaks > first) & (self.breaks <= last)] - first
 
-        self.decoded_dots.set_data(x, self.shown_deg[index])
+        if self.decoded_marker == "line":
+            self.decoded_line.set_data(*wrap_through(x, self.shown_deg[index], cuts))
+        else:
+            self.decoded_line.set_data(x, self.shown_deg[index])
         if self.measured_deg is not None:
-            self.measured_line.set_data(*break_at(x, self.measured_deg[index], cuts))
+            # the head does not jump when the decoder does: cut only where the stretches meet
+            self.measured_line.set_data(*wrap_through(x, self.measured_deg[index], splice_cuts))
         self.velocity_line.set_data(
             *break_at(x, self.turns.velocity_deg_s[index], cuts, wrap_threshold=np.inf)
         )
@@ -335,8 +352,9 @@ def show_turns(time_s, heading_deg, turns: Turns, window_s: float = 60.0, **kwar
     anywhere. Pass the trace ``turns`` was found in; ``run_index``,
     ``measured_deg`` and ``color`` go to :class:`TurnWidget`, as do ``raster``
     and ``raster_color`` (the decoder's units' spikes on top, colored by
-    preferred direction, default ``"hsv"``) and ``apply_offset`` with
+    preferred direction, default ``"hsv"``), ``apply_offset`` with
     ``offset_deg`` (notebook 3's wake offset, subtracted from the decoded
-    heading before it is drawn).
+    heading before it is drawn) and ``decoded_marker`` (``"dots"``, the
+    default, or ``"line"``).
     """
     return TurnWidget(time_s, heading_deg, turns, window_s=window_s, **kwargs)

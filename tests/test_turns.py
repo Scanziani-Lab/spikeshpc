@@ -245,6 +245,49 @@ def test_plot_turn_summary_draws_wake_then_rem_per_recording():
     plt.close(axes[0].figure)
 
 
+def test_the_wake_pair_sits_together_and_rem_is_shaded():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    axes = plot_turn_summary(summary_table(), ["s1", "s2"], {"s1": "k", "s2": "r"})
+    try:
+        rate_ax = axes[1]
+        # s2's wake column, at x = 2: the decode, the measured heading and the diamond
+        x = {line.get_marker(): line.get_xdata()[0] for line in rate_ax.get_lines()
+             if line.get_marker() in ("o", "s", "D") and 1.5 < line.get_xdata()[0] < 2.5}
+        pair = abs(x["o"] - x["s"])
+        assert pair < abs(x["o"] - x["D"]) and pair < abs(x["s"] - x["D"])
+        for ax in axes:
+            shaded = sorted((p.get_x(), p.get_x() + p.get_width()) for p in ax.patches)
+            assert shaded == [(0.5, 1.5), (2.5, 3.5)]  # behind each REM column
+        # the pair's counts on either side of their markers, where they cannot collide
+        offsets = sorted(t.xyann[1] for t in rate_ax.texts if 1.5 < t.xy[0] < 2.5)
+        assert offsets == [-7, 7]
+    finally:
+        plt.close(axes[0].figure)
+
+
+@pytest.mark.parametrize("measured_rate, decoded_label, measured_label", [
+    (1.0, 7, -7),  # the measured heading turned less: its count goes below
+    (99.0, -7, 7),  # turned more: its count goes above, the decode's below
+])
+def test_a_pairs_counts_point_away_from_each_other(measured_rate, decoded_label, measured_label):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    table = summary_table()
+    measured = (table["recording"] == "s1") & (table["state"] == "wake") & (table["source"] == "optitrack")
+    table.loc[measured, "turns_per_min"] = measured_rate
+    axes = plot_turn_summary(table, ["s1", "s2"], {"s1": "k", "s2": "r"})
+    try:
+        offset = {round(t.xy[0], 2): t.xyann[1] for t in axes[1].texts if t.xy[0] < 0.5}
+        assert offset == {-0.06: decoded_label, 0.1: measured_label}  # s1 wake: decode, measured
+    finally:
+        plt.close(axes[0].figure)
+
+
 def test_plot_turn_sweep_draws_each_measure_against_the_threshold():
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")

@@ -11,6 +11,9 @@ second, internal heading. That is the situation the whole module exists for:
 recovering a heading that no camera can see.
 """
 
+import warnings
+from dataclasses import replace
+
 import numpy as np
 import pytest
 from scipy.ndimage import gaussian_filter1d
@@ -492,6 +495,30 @@ def test_a_confident_decode_recovers_from_a_teleport():
     assert caught_up.size and caught_up[0] < 20
 
 
+@pytest.mark.parametrize(
+    "n_angle, variance, fast",
+    [
+        (360, 4.98, True),  # the band notebook 3 runs with
+        (180, 25.0, True),
+        (90, 1.75, True),  # under half a bin: one bin each way
+        (36, 200.0, False),  # too wide to gain: kept as a matrix
+        (20, np.inf, True),  # uniform
+        (24, 0.0, True),  # stay put, plus the leak
+    ],
+)
+def test_the_ring_step_is_the_matrix_product(n_angle, variance, fast):
+    from spikeshpc.decoder import _RingStep
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        transition = ring_transition(n_angle, movement_var_deg2=variance)
+    step = _RingStep(transition)
+    assert step.fast == fast
+    rows = np.random.default_rng(0).random((4, n_angle))
+    np.testing.assert_allclose(step.forward(rows), rows @ transition, rtol=1e-12)
+    np.testing.assert_allclose(step.backward(rows), (transition @ rows.T).T, rtol=1e-12)
+
+
 def test_infinite_variance_is_a_uniform_transition():
     transition = ring_transition(20, movement_var_deg2=np.inf)
     np.testing.assert_allclose(transition, 1.0 / 20)
@@ -760,6 +787,79 @@ def test_several_metrics_are_judged_on_one_set_of_shuffles(data, model, split):
     assert list(both) == list(WAKE_SHUFFLE_METRICS)
     np.testing.assert_allclose(both["median_abs_error_deg"].null, alone.null)
     assert all(test.better == "lower" for test in both.values())
+
+
+def one_at_a_time_null(data, model, mask, kind, metrics, n_shuffles, seed,
+                       min_shift_s=30.0, **decode_kwargs):
+    """The null as shuffle_test used to make it: a decode() per surrogate."""
+    rng = np.random.default_rng(seed)
+    null = []
+    for _ in range(n_shuffles):
+        if kind == "shift":
+            min_shift = max(1, round(min_shift_s / data.bin_s))
+            shift = int(rng.integers(min_shift, data.n_bins - min_shift))
+            surrogate = replace(data, counts=np.roll(data.counts, shift, axis=0))
+            shuffled = model
+        else:
+            surrogate = data
+            order = rng.permutation(len(model.unit_ids))
+            shuffled = replace(model, rate_hz=model.rate_hz[order])
+        run = decode(surrogate, shuffled, mask, keep_posterior=False, **decode_kwargs)
+        null.append([run.metrics[name] for name in metrics])
+    return np.array(null).T
+
+
+ALL_WAKE_METRICS = [*WAKE_SHUFFLE_METRICS, "mean_posterior_max", "mean_entropy_bits"]
+
+
+@pytest.mark.parametrize("acausal", [True, False])
+@pytest.mark.parametrize("kind", ["shift", "units"])
+def test_batched_shuffles_decode_each_surrogate_as_decode_would(
+    data, model, split, monkeypatch, kind, acausal
+):
+    """Batches split mid-way and likelihood chunks cut across runs change nothing."""
+    import spikeshpc.decoder as decoder
+
+    monkeypatch.setattr(decoder, "_CHUNK_BINS", 37)
+    tests = shuffle_test(
+        data, model, split[1], kind=kind, metric=ALL_WAKE_METRICS, n_shuffles=5,
+        seed=3, acausal=acausal, tolerance_deg=10.0, n_jobs=1,
+        max_batch_bytes=2 * 8 * model.n_angle_bins * 400,  # 2 shuffles over 400 bins
+    )
+    expected = one_at_a_time_null(
+        data, model, split[1], kind, ALL_WAKE_METRICS, 5, seed=3,
+        acausal=acausal, tolerance_deg=10.0,
+    )
+    for k, name in enumerate(ALL_WAKE_METRICS):
+        np.testing.assert_allclose(tests[name].null, expected[k], rtol=1e-12, err_msg=name)
+
+
+def test_rem_unit_shuffles_match_one_at_a_time_decodes(session, data, model):
+    rem_mask = state_interval_mask(data, session["intervals"], "REM")
+    test = shuffle_test(
+        data, model, rem_mask, kind="units", metric="mean_posterior_max",
+        n_shuffles=6, seed=4, with_metrics=False, n_jobs=1,
+    )
+    expected = one_at_a_time_null(
+        data, model, rem_mask, "units", ["mean_posterior_max"], 6, seed=4,
+        with_metrics=False,
+    )
+    np.testing.assert_allclose(test.null, expected[0], rtol=1e-12)
+
+
+def test_the_null_does_not_depend_on_how_many_workers_share_it(data, model, split):
+    kwargs = dict(metric=WAKE_SHUFFLE_METRICS, n_shuffles=6, seed=5, tolerance_deg=10.0)
+    here = shuffle_test(data, model, split[1], n_jobs=1, **kwargs)
+    pooled = shuffle_test(data, model, split[1], n_jobs=3, **kwargs)
+    for name in WAKE_SHUFFLE_METRICS:
+        np.testing.assert_allclose(pooled[name].null, here[name].null, rtol=1e-12)
+        assert pooled[name].p_value == here[name].p_value
+
+
+def test_no_shuffles_still_scores_the_observed_decode(data, model, split):
+    test = shuffle_test(data, model, split[1], n_shuffles=0)
+    assert test.null.shape == (0,)
+    assert np.isfinite(test.observed)
 
 
 # ── REM ──────────────────────────────────────────────────────────────────

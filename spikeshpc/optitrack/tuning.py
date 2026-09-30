@@ -427,6 +427,43 @@ def get_unit_depths(analyzer, unit_ids=None) -> dict:
     return {unit_id: depth_by_unit[unit_id] for unit_id in unit_ids}
 
 
+def get_kilosort_unit_locations(ks_path, unit_ids=None) -> dict:
+    """``{unit_id: (x, y)}`` in probe coordinates, from kilosort's own spike positions.
+
+    kilosort4 estimates an (x, y) for every spike (``spike_positions.npy``)
+    but saves no per-cluster location, so a unit's is taken here as the median
+    over its spikes -- robust to the few spikes localized off onto a
+    neighbouring column. This is kilosort's estimate, not the analyzer's
+    center-of-mass one that :func:`get_unit_depths` reads.
+
+    Clusters come from ``spike_clusters.npy``, i.e. after any curation merges,
+    matching the unit ids ``si.read_kilosort`` gives. ``unit_ids`` restricts
+    and orders the result (default: every cluster with spikes).
+    """
+    from pathlib import Path
+
+    ks_path = Path(ks_path)
+    positions = np.load(ks_path / "spike_positions.npy")
+    clusters = np.load(ks_path / "spike_clusters.npy").ravel()
+    if len(positions) != len(clusters):
+        raise ValueError(
+            f"{len(positions)} spike positions but {len(clusters)} spike clusters in {ks_path}"
+        )
+    order = np.argsort(clusters, kind="stable")
+    ids, starts = np.unique(clusters[order], return_index=True)
+    groups = np.split(positions[order], starts[1:])
+    location_by_unit = {
+        int(unit): tuple(float(v) for v in np.median(group, axis=0))
+        for unit, group in zip(ids, groups)
+    }
+    if unit_ids is None:
+        return location_by_unit
+    missing = [u for u in unit_ids if int(u) not in location_by_unit]
+    if missing:
+        raise KeyError(f"no kilosort spikes for units {missing[:10]}")
+    return {u: location_by_unit[int(u)] for u in unit_ids}
+
+
 def compute_all_units_tuning_curves(
     analyzer,
     heading_deg: np.ndarray,
@@ -645,4 +682,173 @@ def plot_tuning_comparison(
     axes.flat[0].legend(fontsize=7, frameon=False)
     fig.supxlabel("heading (deg)", fontsize=9)
     fig.tight_layout()
+    return fig, axes
+
+
+def _draw_direction_wheel(ax, cmap, n: int = 360):
+    """A ring colored by ``cmap`` around the heading circle, as the color key."""
+    theta = np.linspace(0.0, 2 * np.pi, n + 1)
+    ax.pcolormesh(
+        theta, [0.6, 1.0], (theta[:-1] / (2 * np.pi))[None, :],
+        cmap=cmap, vmin=0.0, vmax=1.0, shading="flat",
+    )
+    ax.set_ylim(0, 1.0)
+    ax.set_yticks([])
+    ax.set_xticks(np.deg2rad([0, 90, 180, 270]))
+    ax.set_xticklabels(["0", "90", "180", "270"], fontsize=7)
+    ax.tick_params(pad=0)
+    ax.grid(False)
+    ax.spines["polar"].set_visible(False)
+    ax.set_title("Preferred\ndirection (deg)", fontsize=8, pad=10)
+
+
+def plot_hd_tuning_on_probe(
+    hd_tuning,
+    unit_locations: dict,
+    probe,
+    significant_only: bool = True,
+    show_untuned: bool = True,
+    inset_depth_um=(1800.0, 2400.0),
+    cmap="hsv",
+    size_per_mvl: float = 600.0,
+    legend_mvls=(0.4, 0.6, 0.8),
+    figsize=(8.0, 10.0),
+):
+    """Where the head-direction units sit on the probe: one bubble per unit.
+
+    Each bubble is drawn at the unit's ``unit_locations`` (``{unit_id: (x, y)}``
+    in probe coordinates, e.g. :func:`get_kilosort_unit_locations`), over the
+    probe outline and contacts as :func:`probeinterface.plotting.plot_probe`
+    draws them. Its *area* is proportional to the unit's mean vector length
+    (``size_per_mvl`` points^2 per unit MVL, a fixed scale so sessions can be
+    compared) and its color is the MVL's preferred direction on the cyclic
+    ``cmap``, keyed by the color wheel.
+
+    ``hd_tuning`` is an :class:`optitrack.store.HDTuning`. ``significant_only``
+    bubbles just its ``tuned_ids``; with ``show_untuned`` every other unit in
+    it is marked as a small grey dot, so the tuned ones can be read against
+    where units were recorded at all. ``probe`` is a probeinterface ``Probe``
+    or a path to a probeinterface JSON (the pipeline's ``probe.json``; its
+    first probe is used).
+
+    Left: the whole probe. Right: ``inset_depth_um`` (``(low, high)`` in the
+    probe's y coordinates, or None for no inset) enlarged, its span boxed on
+    the left panel. Depth is the probe's y, measured up from the tip. The
+    whole-probe bubbles are drawn at a third of the inset's size, since that
+    panel is compressed several-fold; the MVL legend is at the inset's scale.
+
+    Returns ``(fig, axes)``, ``axes`` a dict with ``"probe"``, ``"inset"``
+    (absent without one) and ``"wheel"``.
+    """
+    import matplotlib
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import ConnectionPatch, Rectangle
+    from probeinterface import read_probeinterface
+    from probeinterface.plotting import plot_probe
+
+    if not hasattr(probe, "contact_positions"):
+        probe = read_probeinterface(probe).probes[0]
+    cmap = matplotlib.colormaps.get_cmap(cmap)
+
+    all_ids = list(hd_tuning.unit_ids)
+    shown = list(hd_tuning.tuned_ids) if significant_only else all_ids
+    if not shown:
+        raise ValueError(
+            "no units to plot" + (" -- none are significantly tuned" if significant_only else "")
+        )
+    missing = [u for u in shown if u not in unit_locations]
+    if missing:
+        raise KeyError(f"no location for units {missing[:10]}")
+    # biggest first, so a small bubble is never hidden under a large one
+    mvl = np.array([hd_tuning.stats[u].mean_vector_length for u in shown])
+    order = np.argsort(-mvl, kind="stable")
+    shown = [shown[i] for i in order]
+    mvl = mvl[order]
+    pref = np.array([hd_tuning.stats[u].preferred_direction_deg for u in shown]) % 360.0
+    xy = np.array([unit_locations[u] for u in shown], dtype=float)
+    shown_set = set(shown)
+    background = [u for u in all_ids if u not in shown_set and u in unit_locations]
+    bg_xy = np.array([unit_locations[u] for u in background], dtype=float).reshape(-1, 2)
+    show_bg = show_untuned and len(bg_xy) > 0
+
+    contacts = probe.contact_positions
+    x_lo, x_hi = contacts[:, 0].min(), contacts[:, 0].max()
+    pad_x = max(40.0, 0.6 * (x_hi - x_lo))
+    xlims = (x_lo - pad_x, x_hi + pad_x)
+    full_ylims = (contacts[:, 1].min() - 150.0, contacts[:, 1].max() + 100.0)
+
+    def draw(ax, ylims, bubble_scale):
+        plot_probe(
+            probe, ax=ax, title=False, xlims=xlims, ylims=ylims,
+            contacts_colors="0.8",
+            contact_kwargs=dict(alpha=1.0, edgecolor="none", lw=0, zorder=2),
+            # plot_probe adds the outline after the contacts; keep it underneath
+            probe_shape_kwargs=dict(facecolor="0.95", edgecolor="0.6", lw=0.8, alpha=1.0, zorder=1),
+        )
+        ax.set_aspect("auto")
+        if show_bg:
+            ax.scatter(bg_xy[:, 0], bg_xy[:, 1], s=8 * bubble_scale, c="0.45",
+                       lw=0, alpha=0.7, zorder=3)
+        ax.scatter(
+            xy[:, 0], xy[:, 1], s=size_per_mvl * mvl * bubble_scale,
+            c=cmap(pref / 360.0), edgecolors="k", linewidths=0.5, alpha=0.85, zorder=4,
+        )
+        ax.set_xlabel("x (µm)", fontsize=9)
+        ax.set_ylabel("Depth from tip (µm)", fontsize=9)
+        ax.tick_params(labelsize=8)
+        ax.spines[["top", "right"]].set_visible(False)
+
+    fig = plt.figure(figsize=figsize)
+    has_inset = inset_depth_um is not None
+    if has_inset:
+        grid = fig.add_gridspec(1, 2, width_ratios=[1, 2.2], wspace=0.35,
+                                left=0.1, right=0.76, bottom=0.07, top=0.92)
+        ax_probe = fig.add_subplot(grid[0])
+        ax_inset = fig.add_subplot(grid[1])
+    else:
+        ax_probe = fig.add_axes([0.15, 0.07, 0.5, 0.85])
+    draw(ax_probe, full_ylims, 1 / 3 if has_inset else 1.0)
+    ax_probe.set_title("Whole probe", fontsize=10)
+    axes = {"probe": ax_probe}
+
+    if has_inset:
+        lo, hi = sorted(inset_depth_um)
+        draw(ax_inset, (lo, hi), 1.0)
+        n_in = int(np.sum((xy[:, 1] >= lo) & (xy[:, 1] <= hi)))
+        ax_inset.set_title(f"{lo:g}–{hi:g} µm ({n_in} of {len(shown)} units)", fontsize=10)
+        ax_probe.add_patch(Rectangle(
+            (xlims[0], lo), xlims[1] - xlims[0], hi - lo,
+            fill=False, edgecolor="k", lw=1.0, ls="--", zorder=5,
+        ))
+        for y in (lo, hi):
+            fig.add_artist(ConnectionPatch(
+                xyA=(xlims[1], y), coordsA=ax_probe.transData,
+                xyB=(xlims[0], y), coordsB=ax_inset.transData,
+                color="0.4", lw=0.8, ls="--",
+            ))
+        axes["inset"] = ax_inset
+
+    ax_wheel = fig.add_axes([0.81, 0.72, 0.14, 0.14], projection="polar")
+    _draw_direction_wheel(ax_wheel, cmap)
+    axes["wheel"] = ax_wheel
+
+    handles = [
+        Line2D([], [], ls="", marker="o", markersize=np.sqrt(size_per_mvl * m),
+               markerfacecolor="0.7", markeredgecolor="k", markeredgewidth=0.5,
+               label=f"{m:g}")
+        for m in legend_mvls
+    ]
+    if show_bg:
+        handles.append(Line2D([], [], ls="", marker="o", markersize=np.sqrt(8),
+                              markerfacecolor="0.45", markeredgecolor="none",
+                              label="untuned" if significant_only else "no location"))
+    fig.legend(
+        handles=handles, title="MVL" + ("\n(inset scale)" if has_inset else ""),
+        loc="upper left", bbox_to_anchor=(0.79, 0.62),
+        frameon=False, fontsize=8, title_fontsize=8, labelspacing=1.6, borderpad=1.0,
+    )
+
+    which = "significantly tuned units" if significant_only else "units"
+    fig.suptitle(f"{hd_tuning.session}: {len(shown)} {which} on the probe", fontsize=11)
     return fig, axes
