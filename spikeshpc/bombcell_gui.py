@@ -1,33 +1,27 @@
 """bombcell's unit-quality GUI, fast enough to curate with, and in one window.
 
-``bombcell.unit_quality_gui()`` takes about a minute to move between units on
-a long recording. Nearly all of that is the "Units by depth" panel, which
-re-derives every unit's firing rate from the full spike train on every redraw:
-one pass over all spikes per unit, ~500 passes per click, for numbers that
-never change. The other panels each rescan the whole spike train again to
-find the current unit's spikes, and its loader reads ``pc_features.npy`` --
-tens of GB on a long session -- into memory for a GUI that never looks at it.
+``bombcell.unit_quality_gui()`` takes ~1 min to move between units on long
+recordings. Mostly due to re-deriving every unit's firing rate from the full
+spike train on every redraw. Loader also reads large ``pc_features.npy``
+into memory but never accesses it.
 
-:class:`FastUnitQualityGUI` subclasses bombcell's GUI and keeps its figure:
-same panels, same buttons, same saved classification files. What changes:
+:class:`FastUnitQualityGUI` subclasses bombcell's GUI and keeps the same panels,
+buttons, saved classification files. What changes:
 
-  * the units-by-depth data is computed once, and the panel is one scatter
+  * units-by-depth data is computed once, and its panel is one scatter
     instead of one per unit
-  * every panel sees only the current unit's spikes, indexed once per unit
+  * every panel sees only the selected unit's spikes, indexed once per unit
     rather than once per panel
-  * the scaling-factor panel's cutoff-Gaussian fit -- bombcell's, unchanged,
-    but up to 4 s a unit, since a quarter of units run it to its 5000-
-    evaluation limit -- is cached, and the next unit's is fitted in a
-    background process while you look at the current one
-  * the PC features are not loaded
+  * the scaling-factor panel's cutoff-Gaussian fit is cached, and the next
+    unit's is fitted in a background process while looking at the current one
+  * pc_features.npy is not loaded
   * under ``%matplotlib qt`` the controls are Qt widgets in the figure's own
     window (with Left/Right for prev/next unit), and the figure is redrawn in
     place rather than rebuilt as a new window; otherwise the ipywidgets
     controls are as before, above an inline figure
-  * the layout is laid out for a screen rather than a 30 x 25 inch page:
-    the per-unit panels in two rows, the metric histograms as a block of
-    squares on the right, margins sized in points so nothing is cut off, and
-    font sizes a screen can read (``font_scale`` scales them all)
+  * Layout changes:
+    per-unit panels in two rows, metric histograms as a block of squares on the
+    right, margins sized in points so nothing is cut off, readable font sizes
 """
 
 from __future__ import annotations
@@ -45,12 +39,22 @@ __all__ = ["FastUnitQualityGUI", "load_gui_inputs", "unit_quality_gui"]
 NOTEBOOK_FIG_SIZE = (17, 9.5)  # inches; the Qt figure follows its window instead
 DPI = 100
 WINDOW_TITLE = "bombcell unit quality"
-# font sizes (pt, before font_scale) for what bombcell sizes for a 30 x 25 inch page
-FONT = {"title": 13, "label": 11, "tick": 10, "legend": 9, "header": 11,
-        "hist_label": 9, "hist_tick": 8}
-# the layout, in points (before font_scale): room for text, so it scales with it
+# font sizes (pt, before font_scale)
+FONT = {
+    "title": 13,
+    "label": 11,
+    "tick": 10,
+    "legend": 9,
+    "header": 11,
+    "hist_label": 9,
+    "hist_tick": 8,
+}
+# layout, in points (before font_scale): leaves room for text
 MARGIN = {"top": 26, "bottom": 36, "left": 62, "right": 18}
-LOCATION_W, LOCATION_GAP = 55, 48  # the units-by-depth strip; the gap after it holds a y axis
+LOCATION_W, LOCATION_GAP = (
+    55,
+    48,
+)  # units-by-depth strip; the gap after it holds a y axis
 PANEL_GAP_W = 48  # between the per-unit panels: a y label and its ticks
 TOP_GAP_H, BIN_GAP_H, BIN_H = 70, 58, 58  # below the top row / above the bin metrics
 HIST_COLS, HIST_ROW_GAP, HIST_COL_GAP, HIST_PAD = 3, 28, 30, 40
@@ -66,16 +70,16 @@ HIST_SHORT_LABELS = {
     "maximum drift": "max drift",
     "isolation dist.": "isolation dist.",
 }
-# the per-spike arrays: sliced down to the current unit before any panel sees them
+# per-spike arrays: sliced down to the current unit before passing to panels
 PER_SPIKE_KEYS = ("spike_times", "spike_clusters", "template_amplitudes")
-TYPE_COLORS = {  # bombcell's own, by unit type code
+TYPE_COLORS = {  # bombcell's, by unit type code
     0: [1, 0, 0],  # noise
     1: [0, 0.7, 0],  # good
     2: [1, 0.7, 0.2],  # MUA
     3: [0, 0, 1],  # non-somatic
     4: [0, 0, 1],  # non-somatic MUA
 }
-# the metric behind each of bombcell's histograms, by the x label it gives it
+# metric behind each of bombcell's histograms, by the x label it gives it
 HISTOGRAM_METRICS = {
     "# peaks": "nPeaks",
     "# troughs": "nTroughs",
@@ -95,7 +99,7 @@ HISTOGRAM_METRICS = {
     "isolation dist.": "isolationDistance",
     "L-ratio": "Lratio",
 }
-BUTTON_COLORS = {  # the ipywidgets button_style palette
+BUTTON_COLORS = {  # ipywidgets button_style palette
     "info": "#5bc0de",
     "success": "#5cb85c",
     "warning": "#f0ad4e",
@@ -105,7 +109,7 @@ BUTTON_COLORS = {  # the ipywidgets button_style palette
 
 
 def load_gui_inputs(ks_dir, param: dict, save_path=None):
-    """bombcell's ``load_metrics_for_gui``, minus the PC features.
+    """bombcell's ``load_metrics_for_gui``, minus pc_features.
 
     Returns ``(ephys_data, raw_waveforms, param)``. ``param`` is a copy, with
     ``ephysKilosortPath`` filled in if it was missing so bombcell can find its
@@ -126,7 +130,9 @@ def load_gui_inputs(ks_dir, param: dict, save_path=None):
     amplitudes = np.load(ks_dir / "amplitudes.npy").squeeze().astype(np.float64)
 
     whitened = np.load(ks_dir / "templates.npy")
-    templates = (whitened @ np.load(ks_dir / "whitening_mat_inv.npy")).astype(whitened.dtype)
+    templates = (whitened @ np.load(ks_dir / "whitening_mat_inv.npy")).astype(
+        whitened.dtype
+    )
     pc_ind_file = ks_dir / "pc_feature_ind.npy"
     # only the (small) channel index is needed, for merged/split units
     pc_ind = np.load(pc_ind_file).squeeze() if pc_ind_file.exists() else np.nan
@@ -159,8 +165,8 @@ def load_gui_inputs(ks_dir, param: dict, save_path=None):
 
 
 def _gaussian_cut(x, a, x0, sigma, xcut):
-    """bombcell's cutoff Gaussian: a Gaussian, zeroed below ``xcut``."""
-    g = a * np.exp(-(x - x0) ** 2 / (2 * sigma**2))
+    """bombcell's cutoff Gaussian: zeroed below ``xcut``."""
+    g = a * np.exp(-((x - x0) ** 2) / (2 * sigma**2))
     g[x < xcut] = 0
     return g
 
@@ -173,8 +179,9 @@ def _fit_cut_gaussian(bin_centers, hist_counts, p0, bounds):
     from scipy.optimize import curve_fit
 
     try:
-        popt, _ = curve_fit(_gaussian_cut, bin_centers, hist_counts, p0=p0,
-                            bounds=bounds, maxfev=5000)
+        popt, _ = curve_fit(
+            _gaussian_cut, bin_centers, hist_counts, p0=p0, bounds=bounds, maxfev=5000
+        )
     except Exception:
         return None
     return popt
@@ -242,7 +249,9 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         self._qt = _resolve_window(window)
         self._dpi = dpi or DPI
         self._notebook_dpi = notebook_dpi or self._dpi
-        self._font_scale = float(font_scale) if font_scale else _default_font_scale(self._qt)
+        self._font_scale = (
+            float(font_scale) if font_scale else _default_font_scale(self._qt)
+        )
         self.fig = None
         super().__init__(ephys_data, quality_metrics, **kwargs)  # draws the first unit
 
@@ -260,7 +269,7 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
 
     @contextmanager
     def _scoped_to(self, unit_id):
-        """``self.ephys_data`` restricted to one unit's spikes, for the duration.
+        """``self.ephys_data`` restricted to one unit's spikes
 
         bombcell's panels each find the unit's spikes with
         ``ephys_data["spike_clusters"] == unit_id``; handed only that unit's
@@ -291,7 +300,9 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         if busy:
             from matplotlib.backends.qt_compat import QtCore, QtGui, QtWidgets
 
-            QtWidgets.QApplication.setOverrideCursor(QtGui.QCursor(QtCore.Qt.CursorShape.WaitCursor))
+            QtWidgets.QApplication.setOverrideCursor(
+                QtGui.QCursor(QtCore.Qt.CursorShape.WaitCursor)
+            )
         try:
             with self._scoped_to(self.unique_units[self.current_unit_idx]):
                 super().update_display()
@@ -308,15 +319,17 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         else:
             self._prefetch(nxt)
 
-    # ── the amplitude fit: bombcell's, cached and fitted ahead ───────────
+    # ── amplitude fit: cached and fitted ahead of time ───────────
     def _amplitude_fit_inputs(self, unit_data):
-        """The amplitudes bombcell's panel fits, and ``(bin_centers, counts, p0, bounds, bin_width)``.
+        """The amplitudes that bombcell's panel fits, and ``(bin_centers, counts, p0, bounds, bin_width)``.
 
-        The second is ``None`` when there are too few spikes to fit.
+        The second output is ``None`` when there are too few spikes to fit.
         """
         spike_times = unit_data["spike_times"]
         metrics = unit_data["metrics"]
-        amplitudes = self._full_ephys["template_amplitudes"][self._spike_index(unit_data["unit_id"])]
+        amplitudes = self._full_ephys["template_amplitudes"][
+            self._spike_index(unit_data["unit_id"])
+        ]
         if self.param and self.param.get("computeTimeChunks", False):
             starts = metrics.get("useTheseTimesStart", None)
             stops = metrics.get("useTheseTimesStop", None)
@@ -329,15 +342,23 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         if len(amplitudes) <= 10:
             return amplitudes, None
 
-        hist_counts, bin_edges = np.histogram(amplitudes, bins=min(50, int(len(amplitudes) / 10)))
+        hist_counts, bin_edges = np.histogram(
+            amplitudes, bins=min(50, int(len(amplitudes) / 10))
+        )
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
         lo, hi, median = np.min(amplitudes), np.max(amplitudes), np.median(amplitudes)
         p0 = [np.max(hist_counts), median, np.std(amplitudes), lo]
         bounds = ([0, lo, 0, lo], [np.inf, hi, np.ptp(amplitudes), median])
-        return amplitudes, (bin_centers, hist_counts, p0, bounds, bin_edges[1] - bin_edges[0])
+        return amplitudes, (
+            bin_centers,
+            hist_counts,
+            p0,
+            bounds,
+            bin_edges[1] - bin_edges[0],
+        )
 
     def _cut_gaussian_fit(self, unit_id, inputs):
-        """The fit for ``unit_id``: from the cache, the background worker, or here."""
+        """Fit for ``unit_id``: from the cache, the background worker, or here."""
         entry = self._fits.get(unit_id)
         if isinstance(entry, Future):
             # finished, or already running (so its answer comes soonest); a
@@ -386,7 +407,9 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         amp_ylim = getattr(self, "_amplitude_ylim", None)
 
         def note(text, **kw):
-            ax.text(0.5, 0.5, text, ha="center", va="center", transform=ax.transAxes, **kw)
+            ax.text(
+                0.5, 0.5, text, ha="center", va="center", transform=ax.transAxes, **kw
+            )
 
         if not len(unit_data["spike_times"]):
             note("No spike data\navailable", fontfamily="DejaVu Sans")
@@ -398,26 +421,45 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
                 note("Insufficient data\nfor scaling factor fit")
             else:
                 bin_centers, hist_counts, _, _, bin_width = inputs
-                ax.barh(bin_centers, hist_counts, height=bin_width * 0.8,
-                        facecolor="grey", edgecolor="black")
+                ax.barh(
+                    bin_centers,
+                    hist_counts,
+                    height=bin_width * 0.8,
+                    facecolor="grey",
+                    edgecolor="black",
+                )
                 popt = self._cut_gaussian_fit(unit_data["unit_id"], inputs)
                 if popt is None:
                     note("Fit failed")
                 else:
                     y_smooth = np.linspace(np.min(amplitudes), np.max(amplitudes), 200)
                     ax.plot(_gaussian_cut(y_smooth, *popt), y_smooth, "r-", linewidth=2)
-                    percent_missing = 100 * (1 - norm.cdf((popt[1] - popt[3]) / popt[2]))
-                    ax.text(0.5, 0.98, f"{percent_missing:.1f}", transform=ax.transAxes,
-                            va="top", ha="center", color=[0.7, 0.7, 0.7], fontsize=13,
-                            weight="bold")
+                    percent_missing = 100 * (
+                        1 - norm.cdf((popt[1] - popt[3]) / popt[2])
+                    )
+                    ax.text(
+                        0.5,
+                        0.98,
+                        f"{percent_missing:.1f}",
+                        transform=ax.transAxes,
+                        va="top",
+                        ha="center",
+                        color=[0.7, 0.7, 0.7],
+                        fontsize=13,
+                        weight="bold",
+                    )
                 ax.set_xlabel("count", **font)
                 ax.set_ylabel("Scaling factor", **font)
                 ax.tick_params(labelsize=13)
                 if amp_ylim is not None:
                     ax.set_ylim(amp_ylim)
 
-        ax.set_title("Scaling factor \n distribution", fontsize=15, fontweight="bold",
-                     fontfamily="DejaVu Sans")
+        ax.set_title(
+            "Scaling factor \n distribution",
+            fontsize=15,
+            fontweight="bold",
+            fontfamily="DejaVu Sans",
+        )
         self.add_metrics_text(ax, unit_data, "amplitude_fit")
 
     # ── the units-by-depth panel, from numbers computed once ─────────────
@@ -444,9 +486,22 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
             duration = last[unit_id] - first[unit_id]
             if max_ch >= len(positions) or not counts[unit_id] or not duration > 0:
                 continue
-            rate = max(counts[unit_id] / duration, 0.01)  # bombcell's floor, for the log
-            code = None if self.bombcell_unit_types is None else self.bombcell_unit_types[i]
-            rows.append((i, np.log10(rate), positions[max_ch, 1], TYPE_COLORS.get(code, TYPE_COLORS[1])))
+            rate = max(
+                counts[unit_id] / duration, 0.01
+            )  # bombcell's floor, for the log
+            code = (
+                None
+                if self.bombcell_unit_types is None
+                else self.bombcell_unit_types[i]
+            )
+            rows.append(
+                (
+                    i,
+                    np.log10(rate),
+                    positions[max_ch, 1],
+                    TYPE_COLORS.get(code, TYPE_COLORS[1]),
+                )
+            )
 
         idx, log_rate, depth, color = zip(*rows) if rows else ((), (), (), ())
         self._locations = {
@@ -458,25 +513,49 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         return self._locations
 
     def plot_unit_location(self, ax, unit_data):
-        """bombcell's panel, drawn from :meth:`_location_data`: same look, one scatter."""
+        """drawn from :meth:`_location_data`: single scatter plot."""
         loc = self._location_data()
-        ax.set_title("Units by depth", fontsize=15, fontweight="bold", fontfamily="DejaVu Sans")
+        ax.set_title(
+            "Units by depth", fontsize=15, fontweight="bold", fontfamily="DejaVu Sans"
+        )
         if not len(loc["unit_idx"]):
-            ax.text(0.5, 0.5, "No units with\nvalid locations", ha="center", va="center",
-                    transform=ax.transAxes)
+            ax.text(
+                0.5,
+                0.5,
+                "No units with\nvalid locations",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
             return
 
         current = loc["unit_idx"] == self.current_unit_idx
-        ax.scatter(loc["log_rate"][~current], loc["depth"][~current],
-                   c=loc["color"][~current], s=30, alpha=0.7, zorder=5)
-        ax.scatter(loc["log_rate"][current], loc["depth"][current],
-                   c=loc["color"][current], s=80, edgecolors="black", linewidths=2, zorder=10)
+        ax.scatter(
+            loc["log_rate"][~current],
+            loc["depth"][~current],
+            c=loc["color"][~current],
+            s=30,
+            alpha=0.7,
+            zorder=5,
+        )
+        ax.scatter(
+            loc["log_rate"][current],
+            loc["depth"][current],
+            c=loc["color"][current],
+            s=80,
+            edgecolors="black",
+            linewidths=2,
+            zorder=10,
+        )
         ax.set_xlabel("log₁₀ rate (sp/s)", fontsize=13, fontfamily="DejaVu Sans")
         # bombcell draws an arrow and "deepest = tip" / "most superficial"
         # beside the axes, off the edge of the figure; the label says it,
         # read bottom to top. The color key is in the histogram grid's key.
-        ax.set_ylabel("probe tip  ←  depth (μm)  →  superficial", fontsize=13,
-                      fontfamily="DejaVu Sans")
+        ax.set_ylabel(
+            "probe tip  ←  depth (μm)  →  superficial",
+            fontsize=13,
+            fontfamily="DejaVu Sans",
+        )
         ax.tick_params(labelsize=13)
 
         # one handler per canvas: in Qt the figure is redrawn, not replaced,
@@ -492,8 +571,10 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         if event.inaxes is not ax or event.xdata is None or not len(loc["unit_idx"]):
             return
         (x0, x1), (y0, y1) = ax.get_xlim(), ax.get_ylim()
-        dist = np.hypot((loc["log_rate"] - event.xdata) / (x1 - x0),
-                        (loc["depth"] - event.ydata) / (y1 - y0))
+        dist = np.hypot(
+            (loc["log_rate"] - event.xdata) / (x1 - x0),
+            (loc["depth"] - event.ydata) / (y1 - y0),
+        )
         nearest = int(np.argmin(dist))
         if dist[nearest] < 0.1:
             target = int(loc["unit_idx"][nearest])
@@ -532,10 +613,8 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
     def _draw_landscape(self, fig, unit_data):
         """bombcell's panels for one unit, into ``fig``, in :meth:`_layout`'s grid.
 
-        In the Qt window the figure outlives the unit, and the histogram panel
-        -- the same fourteen histograms for every unit, bar a marker -- is
-        drawn once; later units clear and redraw only their own panels and
-        move the markers.
+        In the Qt window the figure outlives the unit, and the histogram panel is
+        drawn once; later units clear and redraw only their own panels and move the markers.
         """
         import matplotlib.pyplot as plt
 
@@ -557,15 +636,25 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         self.plot_unit_location(fig.add_subplot(loc[0, 0]), unit_data)
         ax_template = fig.add_subplot(grid[0, 0])
         self.plot_template_waveform(ax_template, unit_data)
-        _compact_legend(ax_template, loc="upper center", bbox_to_anchor=(0.5, -0.01), ncol=3,
-                        markerscale=0.6, handlelength=1.2, columnspacing=0.8, frameon=False)
+        _compact_legend(
+            ax_template,
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.01),
+            ncol=3,
+            markerscale=0.6,
+            handlelength=1.2,
+            columnspacing=0.8,
+            frameon=False,
+        )
         self.plot_raw_waveforms(fig.add_subplot(grid[0, 2]), unit_data)
         self.plot_spatial_decay(fig.add_subplot(grid[0, 4]), unit_data)
         self.plot_autocorrelogram(fig.add_subplot(grid[0, 6]), unit_data)
         ax_amplitude = fig.add_subplot(grid[2, 0:5])
         self.plot_amplitudes_over_time(ax_amplitude, unit_data)
         _scatter_to_markers(ax_amplitude)
-        self.plot_time_bin_metrics(fig.add_subplot(grid[4, 0:5], sharex=ax_amplitude), unit_data)
+        self.plot_time_bin_metrics(
+            fig.add_subplot(grid[4, 0:5], sharex=ax_amplitude), unit_data
+        )
         self.plot_amplitude_fit(fig.add_subplot(grid[2:5, 6]), unit_data)
 
         if reuse:
@@ -577,25 +666,33 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         # its firing-rate twin, ... -- bombcell hides the ticks of 1-3, 5, 6
         self._format_axes(unit_axes, bare=(1, 2, 3, 5, 6))
         if not reuse:
-            for ax in hist_axes:  # bombcell pads its "  Noise" labels; a square has no room
+            for (
+                ax
+            ) in hist_axes:  # bombcell pads its "  Noise" labels; a square has no room
                 for text in ax.texts:
                     text.set_text(text.get_text().strip())
-            self._format_axes(hist_axes, text_scale=0.4, min_text_pt=6,
-                              label_pt=FONT["hist_label"], tick_pt=FONT["hist_tick"])
-            for i, ax in enumerate(hist_axes):  # one shared 0-1 scale: label it once a row
+            self._format_axes(
+                hist_axes,
+                text_scale=0.4,
+                min_text_pt=6,
+                label_pt=FONT["hist_label"],
+                tick_pt=FONT["hist_tick"],
+            )
+            for i, ax in enumerate(
+                hist_axes
+            ):  # one shared 0-1 scale: label it once a row
                 if i % HIST_COLS:
                     ax.set_yticklabels([])
                     ax.set_ylabel("")
 
     def _layout(self, fig, n_hist=None):
-        """The grid specs for ``fig`` at its current size: made once, then updated.
+        """Grid specs for ``fig`` at its current size: made once, then updated.
 
-        Everything is sized in points -- room for a title, a label and its
-        ticks -- so the figure's text fits at any window size; the histograms
-        are squares, as many rows as it takes at ``HIST_COLS`` a row, as tall
-        as the figure allows, against the right edge. The per-unit panels get
-        the rest: four across the top, amplitude and bin metrics below three
-        of them, the scaling-factor distribution below the fourth.
+        Everything is sized in points so the figure's text should fit at any window size;
+        the histograms are squares, as many rows as it takes at ``HIST_COLS`` per row, as tall
+        as the figure allows, against the right edge. Per-unit panels get the rest:
+        four across the top, amplitude and bin metrics below three of them, scaling-factor
+        distribution below the fourth.
         """
         k = self._font_scale
         if n_hist is None:
@@ -612,12 +709,22 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         side = max(min(side, (0.36 * W - (HIST_COLS - 1) * col_gap) / HIST_COLS), 10.0)
         hist_w = HIST_COLS * side + (HIST_COLS - 1) * col_gap
         hist_h = rows * side + (rows - 1) * row_gap
-        hist = dict(left=1 - (right + hist_w) / W, right=1 - right / W, top=1 - top / H,
-                    bottom=1 - (top + hist_h) / H, wspace=col_gap / side, hspace=row_gap / side)
+        hist = dict(
+            left=1 - (right + hist_w) / W,
+            right=1 - right / W,
+            top=1 - top / H,
+            bottom=1 - (top + hist_h) / H,
+            wspace=col_gap / side,
+            hspace=row_gap / side,
+        )
 
         # units by depth: a strip on the left
-        location = dict(left=left / W, right=(left + LOCATION_W * k) / W,
-                        top=1 - top / H, bottom=bottom / H)
+        location = dict(
+            left=left / W,
+            right=(left + LOCATION_W * k) / W,
+            top=1 - top / H,
+            bottom=bottom / H,
+        )
 
         # per-unit panels: columns [panel, gap] x 3 + [panel]; rows
         # [top panels, gap, amplitude, gap, bin metrics]
@@ -627,8 +734,14 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         panel_w = max((unit_right - unit_left - 3 * gap_w) / 4, 1.0)
         top_gap, bin_gap, bin_h = TOP_GAP_H * k, BIN_GAP_H * k, BIN_H * k
         rest = max(height - top_gap - bin_gap - bin_h, 2.0)
-        unit = dict(left=unit_left / W, right=max(unit_right, unit_left + 4) / W,
-                    top=1 - top / H, bottom=bottom / H, wspace=0, hspace=0)
+        unit = dict(
+            left=unit_left / W,
+            right=max(unit_right, unit_left + 4) / W,
+            top=1 - top / H,
+            bottom=bottom / H,
+            wspace=0,
+            hspace=0,
+        )
         width_ratios = [panel_w, gap_w] * 3 + [panel_w]
         height_ratios = [0.55 * rest, top_gap, 0.45 * rest, bin_gap, bin_h]
 
@@ -639,8 +752,9 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
                 "rows": rows,
                 "hist": fig.add_gridspec(rows, HIST_COLS, **hist),
                 "loc": fig.add_gridspec(1, 1, **location),
-                "unit": fig.add_gridspec(5, 7, width_ratios=width_ratios,
-                                         height_ratios=height_ratios, **unit),
+                "unit": fig.add_gridspec(
+                    5, 7, width_ratios=width_ratios, height_ratios=height_ratios, **unit
+                ),
             }
         else:
             grids = self._grids
@@ -662,11 +776,7 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
             self.fig.canvas.draw_idle()
 
     def _adopt_histograms(self, fig, axes):
-        """Put bombcell's histograms in the square grid; add the key; make the markers movable.
-
-        bombcell's marker (s=500) and threshold bars (lw=6) are sized for its
-        30-inch figure; both are scaled to the squares here.
-        """
+        """Put bombcell's histograms in the square grid, add key, make markers movable."""
         import matplotlib.pyplot as plt
 
         k = self._font_scale
@@ -688,32 +798,69 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
                 continue
             for collection in list(ax.collections):  # bombcell's one marker
                 collection.remove()
-            edges = np.array([b.get_x() for b in bars] + [bars[-1].get_x() + bars[-1].get_width()])
+            edges = np.array(
+                [b.get_x() for b in bars] + [bars[-1].get_x() + bars[-1].get_width()]
+            )
             heights = np.array([b.get_height() for b in bars])
-            marker = ax.scatter([np.nan], [np.nan], marker="v", s=150 * k**2, color="black",
-                                alpha=1.0, zorder=15, edgecolors="white", linewidths=1.5)
+            marker = ax.scatter(
+                [np.nan],
+                [np.nan],
+                marker="v",
+                s=150 * k**2,
+                color="black",
+                alpha=1.0,
+                zorder=15,
+                edgecolors="white",
+                linewidths=1.5,
+            )
             markers.append((metric, edges, heights, marker))
 
         # the key, in the grid's last cell: the depth panel's colors, the marker, a threshold
         key_ax = fig.add_subplot(grid[self._grids["rows"] - 1, HIST_COLS - 1])
         key_ax.axis("off")
         handles = [
-            plt.Line2D([0], [0], marker="o", linestyle="none", markerfacecolor=TYPE_COLORS[code],
-                       markeredgecolor="none", markersize=7 * k, label=name)
-            for code, name in ((1, "good"), (2, "MUA"), (0, "noise"), (3, "non-somatic"))
+            plt.Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="none",
+                markerfacecolor=TYPE_COLORS[code],
+                markeredgecolor="none",
+                markersize=7 * k,
+                label=name,
+            )
+            for code, name in (
+                (1, "good"),
+                (2, "MUA"),
+                (0, "noise"),
+                (3, "non-somatic"),
+            )
         ] + [
-            plt.Line2D([0], [0], marker="v", linestyle="none", color="black",
-                       markersize=9 * k, label="current unit"),
+            plt.Line2D(
+                [0],
+                [0],
+                marker="v",
+                linestyle="none",
+                color="black",
+                markersize=9 * k,
+                label="current unit",
+            ),
             plt.Line2D([0], [0], color="black", linewidth=2, label="threshold"),
         ]
-        key_ax.legend(handles=handles, loc="center", frameon=False,
-                      fontsize=FONT["legend"] * k, handletextpad=0.4, labelspacing=0.35)
+        key_ax.legend(
+            handles=handles,
+            loc="center",
+            frameon=False,
+            fontsize=FONT["legend"] * k,
+            handletextpad=0.4,
+            labelspacing=0.35,
+        )
 
         self._hist = {"fig": fig, "axes": set(axes) | {key_ax}, "markers": markers}
         self._move_histogram_markers()
 
     def _move_histogram_markers(self):
-        """Put each histogram's marker over the current unit, as bombcell places it."""
+        """Put each histogram's marker over the current unit"""
         idx = self.current_unit_idx
         for metric, edges, heights, marker in self._hist["markers"]:
             values = np.asarray(self.quality_metrics[metric], dtype=float)
@@ -726,22 +873,31 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
             marker.set_offsets([[value, height + 0.15]])
             marker.set_visible(True)
 
-    def _format_axes(self, axes, bare=(), text_scale=0.55, min_text_pt=7.0, label_pt=None,
-                     tick_pt=None):
-        """bombcell's font and tick pass, at sizes for a screen.
+    def _format_axes(
+        self,
+        axes,
+        bare=(),
+        text_scale=0.55,
+        min_text_pt=7.0,
+        label_pt=None,
+        tick_pt=None,
+    ):
+        """bombcell's font and tick pass
 
         ``bare`` are the positions in ``axes`` that bombcell strips of ticks and
-        labels. The other axes get ticks at their limits only, as bombcell does.
-        Text bombcell writes inside the axes -- metric boxes, channel numbers,
-        classification labels -- is scaled by ``text_scale`` from its size.
-        ``label_pt`` and ``tick_pt`` override the axis label and tick sizes.
+        labels. The other axes get ticks at their limits only. Text that
+        bombcell writes inside the axes (metric boxes, channel numbers,
+        classification labels) is scaled by ``text_scale``. ``label_pt`` and
+        ``tick_pt`` override the axis label and tick sizes.
         """
         k = self._font_scale
         label_pt = (label_pt or FONT["label"]) * k
         tick_pt = (tick_pt or FONT["tick"]) * k
         for i, ax in enumerate(axes):
             if ax.get_title():
-                ax.set_title(ax.get_title(), fontsize=FONT["title"] * k, fontweight="bold")
+                ax.set_title(
+                    ax.get_title(), fontsize=FONT["title"] * k, fontweight="bold"
+                )
             if ax.get_xlabel():
                 ax.set_xlabel(ax.get_xlabel(), fontsize=label_pt, labelpad=1)
             if ax.get_ylabel():
@@ -759,11 +915,16 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
                 ):
                     set_ticks([lim[0], lim[1]])
                     set_labels(
-                        [f"{v:.2f}" if 0.01 < abs(v) < 1000 else f"{v:.0f}" for v in lim],
+                        [
+                            f"{v:.2f}" if 0.01 < abs(v) < 1000 else f"{v:.0f}"
+                            for v in lim
+                        ],
                         fontsize=tick_pt,
                     )
             for text in ax.texts:
-                text.set_fontsize(k * max(min_text_pt, text_scale * text.get_fontsize()))
+                text.set_fontsize(
+                    k * max(min_text_pt, text_scale * text.get_fontsize())
+                )
             legend = ax.get_legend()
             if legend:
                 for text in legend.get_texts():
@@ -771,7 +932,7 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
 
     # ── navigation ───────────────────────────────────────────────────────
     def goto_unit_number(self, b=None):
-        """bombcell's, without its second redraw of the same unit."""
+        """no second redraw of the same unit."""
         requested = int(self.unit_input.value)
         ids = self.unique_units
         if requested in ids:
@@ -779,7 +940,9 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         else:
             above = np.flatnonzero(ids >= requested)
             idx = int(above[0]) if len(above) else self.n_units - 1
-            self._say(f"Unit {requested} doesn't exist (no spikes); showing unit {ids[idx]} instead.")
+            self._say(
+                f"Unit {requested} doesn't exist (no spikes); showing unit {ids[idx]} instead."
+            )
         self.current_unit_idx = idx
         self.unit_slider.value = idx
 
@@ -789,8 +952,10 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         if self._qt:
             names = {0: "noise", 1: "good", 2: "MUA", 3: "non-somatic"}
             done = int(np.sum(self.manual_unit_types != -1))
-            self._say(f"Unit {unit_id} marked {names.get(classification, classification)} "
-                      f"-- {done}/{self.n_units} classified")
+            self._say(
+                f"Unit {unit_id} marked {names.get(classification, classification)} "
+                f"-- {done}/{self.n_units} classified"
+            )
 
     def _say(self, message):
         if self._qt:
@@ -802,7 +967,10 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         """Qt: show unit ``idx`` and bring the controls into line with it."""
         idx = int(min(max(int(idx), 0), self.n_units - 1))
         self.current_unit_idx = idx
-        for widget, value in ((self._slider, idx), (self._spin, int(self.unique_units[idx]))):
+        for widget, value in (
+            (self._slider, idx),
+            (self._spin, int(self.unique_units[idx])),
+        ):
             widget.blockSignals(True)
             widget.setValue(value)
             widget.blockSignals(False)
@@ -837,9 +1005,14 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         plt.close(WINDOW_TITLE)  # re-running the cell replaces the window
         # a first size only: the window opens maximized, and the figure --
         # and its layout, on every resize -- follows the canvas
-        self.fig = plt.figure(WINDOW_TITLE, dpi=self._dpi,
-                              figsize=(0.9 * screen.width() / self._dpi,
-                                       0.7 * screen.height() / self._dpi))
+        self.fig = plt.figure(
+            WINDOW_TITLE,
+            dpi=self._dpi,
+            figsize=(
+                0.9 * screen.width() / self._dpi,
+                0.7 * screen.height() / self._dpi,
+            ),
+        )
         canvas = self.fig.canvas
         canvas.mpl_connect("close_event", lambda event: self.close())
         canvas.mpl_connect("resize_event", self._relayout)
@@ -853,7 +1026,9 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
                 f" font-size: {font_pt:.1f}pt; border-radius: 4px; padding: 6px 12px;}}"
                 f"QPushButton:pressed {{background: {color.darker(130).name()};}}"
             )
-            b.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)  # arrow keys stay with the window
+            b.setFocusPolicy(
+                QtCore.Qt.FocusPolicy.NoFocus
+            )  # arrow keys stay with the window
             if width:
                 b.setMinimumWidth(width)
             b.clicked.connect(lambda *_: slot())
@@ -865,8 +1040,10 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
             for item in items:
                 if isinstance(item, str):
                     label = QtWidgets.QLabel(item)
-                    label.setStyleSheet(f"font-weight: bold; font-size: {font_pt:.1f}pt;"
-                                        " padding: 0 6px;")
+                    label.setStyleSheet(
+                        f"font-weight: bold; font-size: {font_pt:.1f}pt;"
+                        " padding: 0 6px;"
+                    )
                     layout.addWidget(label)
                 else:
                     layout.addWidget(item)
@@ -879,7 +1056,9 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
 
         self._slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self._slider.setRange(0, self.n_units - 1)
-        self._slider.setTracking(False)  # one redraw on release, not one per pixel dragged
+        self._slider.setTracking(
+            False
+        )  # one redraw on release, not one per pixel dragged
         self._slider.setMinimumWidth(400)
         self._slider.valueChanged.connect(self._go_to)
         self._spin = QtWidgets.QSpinBox()
@@ -896,30 +1075,40 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         layout.setContentsMargins(6, 2, 6, 2)
         layout.setSpacing(3)
         layout.addWidget(self._title)
-        layout.addLayout(row(
-            button("◀", "info", self.prev_unit, 60), button("▶", "info", self.next_unit, 60),
-            "unit", self._slider, "go to ID:", self._spin,
-            button("Go", "primary", self.goto_unit_number),
-        ))
-        layout.addLayout(row(
-            "bombcell type:",
-            button("◀ good", "success", self.goto_prev_good),
-            button("good ▶", "success", self.goto_next_good),
-            button("◀ MUA", "warning", self.goto_prev_mua),
-            button("MUA ▶", "warning", self.goto_next_mua),
-            button("◀ non-somatic", "primary", self.goto_prev_nonsomatic),
-            button("non-somatic ▶", "primary", self.goto_next_nonsomatic),
-            button("◀ noise", "danger", self.goto_prev_noise),
-            button("noise ▶", "danger", self.goto_next_noise),
-        ))
-        layout.addLayout(row(
-            button("▶ next unclassified", "info", self.goto_next_unclassified),
-            "manual classification:",
-            button("mark as good", "success", lambda: self.classify_unit(1)),
-            button("mark as MUA", "warning", lambda: self.classify_unit(2)),
-            button("mark as non-somatic", "primary", lambda: self.classify_unit(3)),
-            button("mark as noise", "danger", lambda: self.classify_unit(0)),
-        ))
+        layout.addLayout(
+            row(
+                button("◀", "info", self.prev_unit, 60),
+                button("▶", "info", self.next_unit, 60),
+                "unit",
+                self._slider,
+                "go to ID:",
+                self._spin,
+                button("Go", "primary", self.goto_unit_number),
+            )
+        )
+        layout.addLayout(
+            row(
+                "bombcell type:",
+                button("◀ good", "success", self.goto_prev_good),
+                button("good ▶", "success", self.goto_next_good),
+                button("◀ MUA", "warning", self.goto_prev_mua),
+                button("MUA ▶", "warning", self.goto_next_mua),
+                button("◀ non-somatic", "primary", self.goto_prev_nonsomatic),
+                button("non-somatic ▶", "primary", self.goto_next_nonsomatic),
+                button("◀ noise", "danger", self.goto_prev_noise),
+                button("noise ▶", "danger", self.goto_next_noise),
+            )
+        )
+        layout.addLayout(
+            row(
+                button("▶ next unclassified", "info", self.goto_next_unclassified),
+                "manual classification:",
+                button("mark as good", "success", lambda: self.classify_unit(1)),
+                button("mark as MUA", "warning", lambda: self.classify_unit(2)),
+                button("mark as non-somatic", "primary", lambda: self.classify_unit(3)),
+                button("mark as noise", "danger", lambda: self.classify_unit(0)),
+            )
+        )
 
         # the figure's own window: controls above the canvas, toolbar kept
         window.takeCentralWidget()  # detaches the canvas without deleting it
@@ -930,7 +1119,9 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         stack.addWidget(controls)
         stack.addWidget(canvas, 1)
         window.setCentralWidget(central)
-        window.statusBar().showMessage("← → previous/next unit;  click a unit in 'Units by depth' to jump to it")
+        window.statusBar().showMessage(
+            "← → previous/next unit;  click a unit in 'Units by depth' to jump to it"
+        )
 
         self._shortcuts = []
         for key, slot in (("Left", self.prev_unit), ("Right", self.next_unit)):
@@ -943,9 +1134,14 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         self.unit_input = _Value(self._spin.value, self._spin.setValue)
         # bombcell's title is an <h1> with 10px margins; tighter, and sized with the rest
         title_px = round(20 * k)
-        self.unit_info = _Value(self._title.text, lambda html: self._title.setText(
-            html.replace("margin: 10px 0", "margin: 2px 0")
-                .replace("font-size: 24px", f"font-size: {title_px}px")))
+        self.unit_info = _Value(
+            self._title.text,
+            lambda html: self._title.setText(
+                html.replace("margin: 10px 0", "margin: 2px 0").replace(
+                    "font-size: 24px", f"font-size: {title_px}px"
+                )
+            ),
+        )
 
         window.statusBar().setFont(font)
         window.showMaximized()
@@ -954,11 +1150,10 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
 
 
 def _scatter_to_markers(ax, min_points: int = 5000):
-    """Redraw big one-color scatters as marker-only lines: same look, a fraction of the draw.
+    """Redraw big one-color scatters as marker-only lines
 
-    A scatter draws every point as its own path; a line's markers are stamped.
-    For the amplitude-over-time panel -- one dot per spike, hundreds of
-    thousands of them -- that is most of the figure's draw time.
+    Scatter plot draws every point as its own path. This saves
+    time on the amplitude-over-time panel.
     """
     from matplotlib.collections import PathCollection
 
@@ -969,9 +1164,16 @@ def _scatter_to_markers(ax, min_points: int = 5000):
         if len(sizes) != 1 or len(faces) != 1:  # per-point sizes or colors: leave it be
             continue
         xy = np.asarray(coll.get_offsets())
-        ax.plot(xy[:, 0], xy[:, 1], linestyle="none", marker="o",
-                markersize=np.sqrt(sizes[0]), markerfacecolor=faces[0],
-                markeredgecolor="none", zorder=coll.get_zorder())
+        ax.plot(
+            xy[:, 0],
+            xy[:, 1],
+            linestyle="none",
+            marker="o",
+            markersize=np.sqrt(sizes[0]),
+            markerfacecolor=faces[0],
+            markeredgecolor="none",
+            zorder=coll.get_zorder(),
+        )
         coll.remove()
 
 
@@ -998,7 +1200,9 @@ def _default_font_scale(qt: bool) -> float:
     app = QtWidgets.QApplication.instance()
     if app is None or app.primaryScreen() is None:
         return 1.0
-    return float(np.clip(app.primaryScreen().availableGeometry().height() / 1000, 0.75, 1.0))
+    return float(
+        np.clip(app.primaryScreen().availableGeometry().height() / 1000, 0.75, 1.0)
+    )
 
 
 def _resolve_window(window: str) -> bool:
@@ -1035,14 +1239,16 @@ def unit_quality_gui(
 ) -> FastUnitQualityGUI:
     """Drop-in for ``bombcell.unit_quality_gui(ks_dir=..., ...)``; see :class:`FastUnitQualityGUI`.
 
-    Run ``%matplotlib qt`` in a cell before this one to get the whole GUI in
+    Run ``%matplotlib qt`` in a cell before this to get the whole GUI in
     one Qt window; under the inline backend it keeps bombcell's notebook
     controls. ``font_scale`` makes all the text bigger or smaller. Manual
-    classifications are read from and saved to ``save_path`` exactly as
-    bombcell's GUI does.
+    classifications are read from and saved to ``save_path`` as bombcell's
+    GUI does.
     """
     if param is None:
-        raise ValueError("param is required: it holds the sample rate and the thresholds")
+        raise ValueError(
+            "param is required: it holds the sample rate and the thresholds"
+        )
     if save_path is None:
         save_path = ks_dir  # bombcell's default
     ephys_data, raw_waveforms, param = load_gui_inputs(ks_dir, param, save_path)

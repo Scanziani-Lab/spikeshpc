@@ -22,10 +22,6 @@ def _is_sync_label(label) -> bool:
 def drop_sync_channels(rec):
     """Remove the SpikeGLX sync channel (SY0) so it is not concatenated/sorted.
 
-    Recent neo/spikeinterface expose sync as its own '<stream>-SYNC' stream, so
-    the AP stream is usually already clean -- this is a no-op then. Older
-    versions carry SY0 as the last channel of the AP stream.
-
     Returns (recording, removed_labels).
     """
     names = rec.get_property("channel_names")
@@ -46,13 +42,11 @@ def drop_sync_channels(rec):
 def align_channels_by_location(recs, tolerance_um: float = 1.0):
     """Reorder recordings so channel [i] is the same electrode site in all of them.
 
-    SpikeGLX and OpenEphys name and order channels differently, and even two
-    SpikeGLX runs will disagree if the imro table changed between them
-    -- channel 'AP100' is a slot, not a site. spikeinterface's
-    concatenate_recordings only checks that the channel *id arrays* are equal,
-    so it will stack mismatched sites (or refuse outright across systems).
-    Matching on the probe geometry instead makes channel [i] mean the same thing
-    for the whole concatenated recording.
+    SpikeGLX and OpenEphys name and order channels differently, and two SpikeGLX
+    runs will disagree if the imro table changed between them. spikeinterface's
+    concatenate_recordings only checks that channel *id arrays* are equal and
+    will stack mismatched sites. Matching on the probe geometry instead so channel
+    indices are consistent across recordings.
 
     Each recording is matched to the first one by nearest contact position,
     accepting pairs within `tolerance_um`. Sites missing from any recording
@@ -136,11 +130,7 @@ def align_channels_by_location(recs, tolerance_um: float = 1.0):
 
 
 def check_gain_consistency(recs):
-    """Warn if recordings disagree on gain/offset -- µV scaling would be mixed.
-
-    Not fatal: the concatenated int16 samples are still valid, but any
-    amplitude-based metric spans recordings on different scales.
-    """
+    """Warn if recordings disagree on gain/offset -- µV scaling would be mixed."""
     gains = [rec.get_property("gain_to_uV") for rec in recs]
     offsets = [rec.get_property("offset_to_uV") for rec in recs]
     consistent = True
@@ -162,8 +152,8 @@ def detect_bad_channels_auto(rec, output_dir: Path, config: dict, manual=None):
 
     Writes bad_channels.json (every channel's label, plus what was detected,
     what was listed manually, and the union actually applied) so the call can
-    be reviewed -- and so a later post-processing-only re-run can reuse exactly
-    the set that was sorted rather than re-detecting.
+    be reviewed -- and so a later post-processing-only re-run can reuse the
+    set that was sorted.
 
     Returns the detected channel ids as strings.
     """

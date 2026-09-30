@@ -1,6 +1,6 @@
 """Bayesian decoding of head direction from head-direction-tuned units.
 
-Taken from Moritz's ``run_decoder.py``: a sorted-spikes point process decoder
+Taken from Moritz's ``run_decoder.py``. a sorted-spikes point process decoder
 on a ring state space. Per-unit tuning curves are the encoding model, the
 likelihood of a time bin is Poisson given those curves, and a Gaussian random
 walk on the ring supplies the dynamics that carry belief from one bin to the next.
@@ -13,12 +13,6 @@ unmaintained, does not install on this environment's Python, and its ring
 direction does not need -- a circle is already one-dimensional and periodic.
 The maths below is the same; what it drops is a dependency and the
 interpolation layer RTC's fixed-rate time grid demanded.
-
-Everything is indexed by *inter-frame interval*, exactly as
-:mod:`spikeshpc.optitrack.tuning` is. That is what makes the decoder's encoding
-model literally the tuning curves the units were selected on, and it means the
-ground truth is measured rather than resampled: a decoder bin is a whole number
-of camera frames, so its edges are real shutter-closure timestamps.
 
 Typical use, from a notebook that already has the objects
 ``1_calculate_HD_tuning.ipynb`` builds::
@@ -171,7 +165,9 @@ def _unit_positions(have, want) -> np.ndarray:
     position = {u: i for i, u in enumerate(np.asarray(have).tolist())}
     missing = [u for u in want if u not in position]
     if missing:
-        raise ValueError(f"units {missing[:10]} are not among the {len(position)} held here")
+        raise ValueError(
+            f"units {missing[:10]} are not among the {len(position)} held here"
+        )
     return np.array([position[u] for u in want], dtype=int)
 
 
@@ -289,7 +285,10 @@ def bins_in_interval_mask(data: DecoderData, interval_mask) -> np.ndarray:
     n_used = data.n_bins * data.bin_frames
     # prepare_decoder_data drops the frames past the last whole bin, so the
     # full mask is up to bin_frames - 1 intervals longer than the bins use
-    if interval_mask.ndim != 1 or not n_used <= len(interval_mask) < n_used + data.bin_frames:
+    if (
+        interval_mask.ndim != 1
+        or not n_used <= len(interval_mask) < n_used + data.bin_frames
+    ):
         raise ValueError(
             f"interval_mask has {interval_mask.shape} entries, which is not the "
             f"inter-frame intervals of the frames behind {data.n_bins} bins of "
@@ -302,7 +301,9 @@ def restrict_data(data: DecoderData, unit_ids) -> DecoderData:
     """The same bins, holding only `unit_ids`' counts, in that order."""
     unit_ids = list(unit_ids)
     index = _unit_positions(data.unit_ids, unit_ids)
-    return replace(data, counts=data.counts[:, index], unit_ids=np.asarray(data.unit_ids)[index])
+    return replace(
+        data, counts=data.counts[:, index], unit_ids=np.asarray(data.unit_ids)[index]
+    )
 
 
 # ── train / test split ───────────────────────────────────────────────────
@@ -665,18 +666,16 @@ class _RingStep:
     def forward(self, p):
         if not self.fast:
             return p @ self.dense
-        return (
-            correlate1d(p, self.forward_weights, axis=-1, mode="wrap")
-            + self.floor * p.sum(axis=-1, keepdims=True)
-        )
+        return correlate1d(
+            p, self.forward_weights, axis=-1, mode="wrap"
+        ) + self.floor * p.sum(axis=-1, keepdims=True)
 
     def backward(self, v):
         if not self.fast:
             return v @ self.dense_t
-        return (
-            correlate1d(v, self.backward_weights, axis=-1, mode="wrap")
-            + self.floor * v.sum(axis=-1, keepdims=True)
-        )
+        return correlate1d(
+            v, self.backward_weights, axis=-1, mode="wrap"
+        ) + self.floor * v.sum(axis=-1, keepdims=True)
 
 
 def _normalize_rows(p, uniform):
@@ -723,7 +722,9 @@ def _forward_backward(log_likelihood, transition, acausal=True):
     smoothed[-1] = causal[-1]
     backward = np.ones((1, n_x))
     for t in range(n_t - 2, -1, -1):
-        backward = _normalize_rows(step.backward(likelihood[t + 1 : t + 2] * backward), uniform)
+        backward = _normalize_rows(
+            step.backward(likelihood[t + 1 : t + 2] * backward), uniform
+        )
         smoothed[t] = _normalize_rows(causal[t : t + 1] * backward, uniform)[0]
     return causal, smoothed
 
@@ -885,7 +886,12 @@ def decode(
         posterior=posterior.astype(np.float32) if keep_posterior else None,
     )
     result.metrics = _decode_metrics(
-        decoded_deg, actual_deg, result.posterior_max, entropy, with_metrics, tolerance_deg
+        decoded_deg,
+        actual_deg,
+        result.posterior_max,
+        entropy,
+        with_metrics,
+        tolerance_deg,
     )
     return result
 
@@ -1078,15 +1084,21 @@ def shuffle_test(
         raise ValueError("no metric to test")
 
     decode_kwargs = dict(
-        movement_var_deg2=movement_var_deg2, acausal=acausal, max_gap_s=max_gap_s,
-        min_run_s=min_run_s, with_metrics=with_metrics, tolerance_deg=tolerance_deg,
+        movement_var_deg2=movement_var_deg2,
+        acausal=acausal,
+        max_gap_s=max_gap_s,
+        min_run_s=min_run_s,
+        with_metrics=with_metrics,
+        tolerance_deg=tolerance_deg,
     )
     observed = decode(
         data, model, mask, keep_posterior=False, label="observed", **decode_kwargs
     )
     for name in metrics:
         if name not in observed.metrics:
-            raise ValueError(f"metric {name!r} is not one of {sorted(observed.metrics)}")
+            raise ValueError(
+                f"metric {name!r} is not one of {sorted(observed.metrics)}"
+            )
 
     # every draw up front, in the order the one-at-a-time loop made them
     rng = np.random.default_rng(seed)
@@ -1098,7 +1110,10 @@ def shuffle_test(
                 f"min_shift_s={min_shift_s} leaves no room to shift "
                 f"{data.duration_s.sum():.0f}s of data"
             )
-        shifts = [int(rng.integers(min_shift, data.n_bins - min_shift)) for _ in range(n_shuffles)]
+        shifts = [
+            int(rng.integers(min_shift, data.n_bins - min_shift))
+            for _ in range(n_shuffles)
+        ]
         orders = [identity] * n_shuffles
     else:
         shifts = [0] * n_shuffles
@@ -1165,8 +1180,11 @@ def _default_jobs() -> int:
 _CHUNK_BINS = 2048  # bins of likelihood a shuffle worker holds at a time
 
 _THREAD_VARIABLES = (
-    "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
-    "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
 )
 
 
@@ -1192,8 +1210,20 @@ def _single_threaded_children():
 
 
 def _shuffle_null(
-    counts, duration_s, actual_deg, runs, rate_hz, bin_centers_deg, transition,
-    acausal, metrics, with_metrics, tolerance_deg, max_batch_bytes, shifts, orders,
+    counts,
+    duration_s,
+    actual_deg,
+    runs,
+    rate_hz,
+    bin_centers_deg,
+    transition,
+    acausal,
+    metrics,
+    with_metrics,
+    tolerance_deg,
+    max_batch_bytes,
+    shifts,
+    orders,
 ) -> np.ndarray:
     """``metrics`` of each shuffle's decode, as a (metric, shuffle) array.
 
@@ -1219,7 +1249,9 @@ def _shuffle_null(
         out = np.empty((len(ks), b - a, n_angles))
         for j, k in enumerate(ks):
             rows = (np.arange(a, b) - shifts[k]) % n_bins  # np.roll(counts, shift)[a:b]
-            log_likelihood = poisson_log_likelihood(counts[rows], duration_s[a:b], rates[k])
+            log_likelihood = poisson_log_likelihood(
+                counts[rows], duration_s[a:b], rates[k]
+            )
             out[j] = np.exp(log_likelihood - log_likelihood.max(axis=1, keepdims=True))
         return out
 
@@ -1260,8 +1292,14 @@ def _shuffle_null(
                     for i in reversed(range(lik.shape[1])):
                         t = c - a + i
                         if t < n_t - 1:
-                            backward = _normalize_rows(step.backward(following * backward), uniform)
-                            record(batch, start + t, _normalize_rows(causal[:, t] * backward, uniform))
+                            backward = _normalize_rows(
+                                step.backward(following * backward), uniform
+                            )
+                            record(
+                                batch,
+                                start + t,
+                                _normalize_rows(causal[:, t] * backward, uniform),
+                            )
                         following = lik[:, i]
         start += n_t
 
@@ -1269,8 +1307,12 @@ def _shuffle_null(
     null = np.empty((len(metrics), n_shuffles))
     for k in range(n_shuffles):
         values = _decode_metrics(
-            decoded_deg[k], actual_deg, peak[k],
-            entropy[k] if want_entropy else None, with_metrics, tolerance_deg,
+            decoded_deg[k],
+            actual_deg,
+            peak[k],
+            entropy[k] if want_entropy else None,
+            with_metrics,
+            tolerance_deg,
         )
         null[:, k] = [values[name] for name in metrics]
     return null
@@ -1693,7 +1735,9 @@ class TransferRun:
                 "median_abs_error_corrected_deg", np.nan
             ),
             "wake_frac_within_deg": wake.get("frac_within_deg", np.nan),
-            "wake_frac_within_corrected_deg": wake.get("frac_within_corrected_deg", np.nan),
+            "wake_frac_within_corrected_deg": wake.get(
+                "frac_within_corrected_deg", np.nan
+            ),
             "wake_circular_correlation": wake.get("circular_correlation", np.nan),
             "wake_offset_deg": self.offset_deg,
             "wake_mean_posterior_max": wake.get("mean_posterior_max", np.nan),
@@ -1807,15 +1851,27 @@ def apply_decoder(
             )
         wake_mask &= bins_in_interval_mask(data, interval_mask)
         if not wake_mask.any():
-            raise ValueError(f"{label}: no WAKE decoder bin lies wholly inside `interval_mask`")
+            raise ValueError(
+                f"{label}: no WAKE decoder bin lies wholly inside `interval_mask`"
+            )
     rem_mask = state_interval_mask(data, intervals, "REM") if decode_rem else None
 
     return _read_out(
-        data, model, np.asarray(partners), wake_mask, rem_mask,
-        movement_var_deg2=movement_var_deg2, acausal=acausal,
-        tolerance_deg=tolerance_deg, n_shuffles=n_shuffles,
-        min_shift_s=min_shift_s, seed=seed, keep_posterior=keep_posterior,
-        label=label, verbose=verbose, n_jobs=n_jobs,
+        data,
+        model,
+        np.asarray(partners),
+        wake_mask,
+        rem_mask,
+        movement_var_deg2=movement_var_deg2,
+        acausal=acausal,
+        tolerance_deg=tolerance_deg,
+        n_shuffles=n_shuffles,
+        min_shift_s=min_shift_s,
+        seed=seed,
+        keep_posterior=keep_posterior,
+        label=label,
+        verbose=verbose,
+        n_jobs=n_jobs,
     )
 
 
@@ -1843,17 +1899,39 @@ def reference_decode(
     model = restrict_model(run.model, unit_ids)
     data = restrict_data(run.data, unit_ids)
     return _read_out(
-        data, model, np.asarray(unit_ids), run.test_mask, run.rem_mask,
-        movement_var_deg2=run.movement_var_deg2, acausal=acausal,
-        tolerance_deg=tolerance_deg, n_shuffles=n_shuffles,
-        min_shift_s=min_shift_s, seed=seed, keep_posterior=keep_posterior,
-        label=label, verbose=verbose, n_jobs=n_jobs,
+        data,
+        model,
+        np.asarray(unit_ids),
+        run.test_mask,
+        run.rem_mask,
+        movement_var_deg2=run.movement_var_deg2,
+        acausal=acausal,
+        tolerance_deg=tolerance_deg,
+        n_shuffles=n_shuffles,
+        min_shift_s=min_shift_s,
+        seed=seed,
+        keep_posterior=keep_posterior,
+        label=label,
+        verbose=verbose,
+        n_jobs=n_jobs,
     )
 
 
 def _read_out(
-    data, model, partner_ids, wake_mask, rem_mask, movement_var_deg2, acausal,
-    tolerance_deg, n_shuffles, min_shift_s, seed, keep_posterior, label, verbose,
+    data,
+    model,
+    partner_ids,
+    wake_mask,
+    rem_mask,
+    movement_var_deg2,
+    acausal,
+    tolerance_deg,
+    n_shuffles,
+    min_shift_s,
+    seed,
+    keep_posterior,
+    label,
+    verbose,
     n_jobs=None,
 ) -> TransferRun:
     """Decode wake and REM with `model` and judge both against their nulls."""
@@ -1863,17 +1941,28 @@ def _read_out(
         "tolerance_deg": tolerance_deg,
     }
     wake = decode(
-        data, model, wake_mask, keep_posterior=keep_posterior,
-        label=f"{label} wake", **shared,
+        data,
+        model,
+        wake_mask,
+        keep_posterior=keep_posterior,
+        label=f"{label} wake",
+        **shared,
     )
     if verbose:
         print(f"  {wake}")
     wake_shuffles = {}
     if n_shuffles:
         wake_shuffles = shuffle_test(
-            data, model, wake_mask, kind="shift", metric=WAKE_SHUFFLE_METRICS,
-            n_shuffles=n_shuffles, min_shift_s=min_shift_s, seed=seed,
-            n_jobs=n_jobs, **shared,
+            data,
+            model,
+            wake_mask,
+            kind="shift",
+            metric=WAKE_SHUFFLE_METRICS,
+            n_shuffles=n_shuffles,
+            min_shift_s=min_shift_s,
+            seed=seed,
+            n_jobs=n_jobs,
+            **shared,
         )
         if verbose:
             for test in wake_shuffles.values():
@@ -1881,20 +1970,34 @@ def _read_out(
 
     rem = rem_shuffle = None
     if rem_mask is not None and not rem_mask.any():
-        warnings.warn(f"{label}: no decoder bin falls inside a REM interval", stacklevel=3)
+        warnings.warn(
+            f"{label}: no decoder bin falls inside a REM interval", stacklevel=3
+        )
         rem_mask = None
     if rem_mask is not None:
         rem = decode(
-            data, model, rem_mask, keep_posterior=keep_posterior,
-            with_metrics=False, label=f"{label} REM", **shared,
+            data,
+            model,
+            rem_mask,
+            keep_posterior=keep_posterior,
+            with_metrics=False,
+            label=f"{label} REM",
+            **shared,
         )
         if verbose:
             print(f"  {rem}")
         if n_shuffles:
             rem_shuffle = shuffle_test(
-                data, model, rem_mask, kind="units", metric="mean_posterior_max",
-                n_shuffles=n_shuffles, seed=seed, with_metrics=False,
-                n_jobs=n_jobs, **shared,
+                data,
+                model,
+                rem_mask,
+                kind="units",
+                metric="mean_posterior_max",
+                n_shuffles=n_shuffles,
+                seed=seed,
+                with_metrics=False,
+                n_jobs=n_jobs,
+                **shared,
             )
             if verbose:
                 print(f"    {rem_shuffle}")
@@ -2218,8 +2321,9 @@ def plot_metrics_by_group(
     return axes
 
 
-def plot_transfer_summary(runs: dict, colors: dict | None = None, references: dict | None = None,
-                          axes=None):
+def plot_transfer_summary(
+    runs: dict, colors: dict | None = None, references: dict | None = None, axes=None
+):
     """How one decoder did on each recording, each against its own nulls.
 
     ``runs`` is ``{recording: TransferRun}`` in the order to draw them, the
@@ -2253,7 +2357,9 @@ def plot_transfer_summary(runs: dict, colors: dict | None = None, references: di
         _, axes = plt.subplots(1, 3, figsize=(max(9.0, 6.0 + 1.3 * len(names)), 3.8))
     error_ax, offset_ax, rem_ax = axes
     null_style = dict(color="0.8", lw=7, zorder=1)
-    reference_style = dict(marker="D", ls="none", mfc="none", mec="k", mew=1.2, ms=7, zorder=4)
+    reference_style = dict(
+        marker="D", ls="none", mfc="none", mec="k", mew=1.2, ms=7, zorder=4
+    )
 
     for i, name in enumerate(names):
         run, color = runs[name], colors[name]
@@ -2261,28 +2367,59 @@ def plot_transfer_summary(runs: dict, colors: dict | None = None, references: di
         raw_null = run.wake_shuffles.get("median_abs_error_deg")
         if raw_null is not None:
             error_ax.vlines(i, *np.percentile(raw_null.null, [5, 95]), **null_style)
-        error_ax.plot(i - 0.12, wake["median_abs_error_deg"], "o", color=color, ms=7, zorder=3)
-        error_ax.plot(i + 0.12, wake["median_abs_error_corrected_deg"], "o", mfc="none",
-                      mec=color, mew=1.5, ms=7, zorder=3)
+        error_ax.plot(
+            i - 0.12, wake["median_abs_error_deg"], "o", color=color, ms=7, zorder=3
+        )
+        error_ax.plot(
+            i + 0.12,
+            wake["median_abs_error_corrected_deg"],
+            "o",
+            mfc="none",
+            mec=color,
+            mew=1.5,
+            ms=7,
+            zorder=3,
+        )
         offset_ax.plot(i, run.offset_deg, "o", color=color, ms=7, zorder=3)
         if run.rem is not None:
             if run.rem_shuffle is not None:
-                rem_ax.vlines(i, *np.percentile(run.rem_shuffle.null, [5, 95]), **null_style)
-            rem_ax.plot(i, run.rem.metrics["mean_posterior_max"], "o", color=color, ms=7,
-                        zorder=3)
+                rem_ax.vlines(
+                    i, *np.percentile(run.rem_shuffle.null, [5, 95]), **null_style
+                )
+            rem_ax.plot(
+                i,
+                run.rem.metrics["mean_posterior_max"],
+                "o",
+                color=color,
+                ms=7,
+                zorder=3,
+            )
 
         reference = references.get(name)
         if reference is not None:
-            error_ax.plot(i, reference.wake.metrics["median_abs_error_deg"], **reference_style)
+            error_ax.plot(
+                i, reference.wake.metrics["median_abs_error_deg"], **reference_style
+            )
             offset_ax.plot(i, reference.offset_deg, **reference_style)
             if reference.rem is not None:
-                rem_ax.plot(i, reference.rem.metrics["mean_posterior_max"], **reference_style)
+                rem_ax.plot(
+                    i, reference.rem.metrics["mean_posterior_max"], **reference_style
+                )
 
     # the legend in black, whatever color each recording's markers are
     handles = [
         Line2D([], [], marker="o", ls="none", color="k", ms=7, label="raw"),
-        Line2D([], [], marker="o", ls="none", mfc="none", mec="k", mew=1.5, ms=7,
-               label="offset removed"),
+        Line2D(
+            [],
+            [],
+            marker="o",
+            ls="none",
+            mfc="none",
+            mec="k",
+            mew=1.5,
+            ms=7,
+            label="offset removed",
+        ),
     ]
     if any(run.wake_shuffles for run in runs.values()):
         handles.insert(0, Line2D([], [], color="0.8", lw=7, label="shuffled"))

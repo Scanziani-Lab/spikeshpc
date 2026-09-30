@@ -1,38 +1,18 @@
-"""Hand bombcell, UnitRefine and SLAy's calls to spikeinterface-gui, and read back yours.
+"""Feed classifications from bombcell, UnitRefine and SLAy to spikeinterface-gui
+and read back manual calls.
 
 Three automated tools each have an opinion about every unit. bombcell and
-UnitRefine label it (good / MUA / noise, each in its own words); SLAy proposes
-which units kilosort split in two. This module puts all three in front of
-spikeinterface-gui at once -- each tool's call as a sortable column in the unit
-table, a quality label pre-filled wherever bombcell and UnitRefine agree, SLAy's
-pairs listed in the Merge tab to accept or ignore -- and turns what you save
-there into a per-unit table.
+UnitRefine label (good / MUA / noise, each in its own words); SLAy proposes
+merges. This module puts all three into of spikeinterface-gui at once as
+sortable columns in the unit table. Quality labels are pre-filled wherever
+bombcell and UnitRefine agree. SLAy's pairs are listed in the Merge tab to
+accept or ignore -- and turns what you save there into a per-unit table.
 
-Everything passes through files in the session's curation folder, not through
-objects, because the GUI runs in a process of its own (``python -m
-spikeshpc.curation``, started by :func:`launch_gui`). Two things force that:
-
-  * Qt bindings. ``%matplotlib qt`` in the notebook loads PyQt6 (matplotlib's
-    first choice). spikeinterface-gui imports PySide6, and pyqtgraph, finding
-    both, takes PyQt6: widgets of two bindings in one window, which fails. A
-    fresh interpreter has only PySide6.
-  * Size. On a 13 h session the GUI's controller builds several GB of spike
-    arrays before the window appears; if that dies, it should not take the
-    notebook's kernel -- and an afternoon of SLAy -- with it.
-
-Two more things this module exists to get right:
-
-  * valid_unit_periods. Splitting or merging units makes spikeinterface
-    recompute it for the new units in a process pool whose initializer is
-    handed the whole sorting. Windows starts workers by pickling that through
-    a pipe, and at 10^8 spikes the write fails (OSError 22) -- which is what
-    stopped SLAy's automatic parameter search, and what would stop
-    ``apply_curation``. :func:`detached_extensions` hides it from both.
-  * Staleness. Every cache here is keyed by unit id, and a re-sort numbers
-    its units 0..N-1 all over again, so a label for unit 12 from last week's
-    sorting reloads without complaint onto a different unit 12.
-    :func:`check_curation_dir` ties the folder to one sorting and refuses to
-    mix it with another.
+Everything passes through files in the session's curation folder rather than through
+objects because the GUI runs in a process of its own (``python -m
+spikeshpc.curation``, started by :func:`launch_gui`). Helpful because on a
+12 h session the GUI's controller builds several GB of spike arrays before
+the window appears, so prevents crashing the whole kernel
 """
 
 from __future__ import annotations
@@ -79,11 +59,20 @@ QUALITY = {"quality": {"label_options": ["good", "noise", "MUA"], "exclusive": T
 # names of your calls in bombcell's GUI, and UnitRefine's. Non-somatic units
 # and missing calls have none, so they never count as agreement.
 TO_QUALITY = {
-    "GOOD": "good", "MUA": "MUA", "NOISE": "noise",
-    "good": "good", "noise": "noise",
-    "sua": "good", "mua": "MUA",
+    "GOOD": "good",
+    "MUA": "MUA",
+    "NOISE": "noise",
+    "good": "good",
+    "noise": "noise",
+    "sua": "good",
+    "mua": "MUA",
 }
-BOMBCELL_MANUAL_NAMES = {0: "noise", 1: "good", 2: "MUA", 3: "non-somatic"}  # -1 = not yet classified
+BOMBCELL_MANUAL_NAMES = {
+    0: "noise",
+    1: "good",
+    2: "MUA",
+    3: "non-somatic",
+}  # -1 = not yet classified
 
 TEXT_COLUMNS = ("auto_label", "bc_label", "bc_manual", "ur_label", "slay_partners")
 NUMERIC_COLUMNS = ("ur_prob", "slay_group", "slay_score")
@@ -91,8 +80,14 @@ NUMERIC_COLUMNS = ("ur_prob", "slay_group", "slay_score")
 # quality metrics and sorting properties shown next to the automated calls,
 # which the GUI appends after these; any missing from this analyzer are skipped
 DISPLAYED_COLUMNS = [
-    "KSLabel", "num_spikes", "firing_rate", "snr", "amplitude_median",
-    "rp_contamination", "presence_ratio", "y",
+    "KSLabel",
+    "num_spikes",
+    "firing_rate",
+    "snr",
+    "amplitude_median",
+    "rp_contamination",
+    "presence_ratio",
+    "y",
 ]
 
 # the GUI process's Qt: PySide6 throughout, pyqtgraph included
@@ -103,13 +98,7 @@ _running = {}  # curation folder -> the GUI process launched for it
 
 # ── staleness ─────────────────────────────────────────────────────────────
 def sorting_fingerprint(analyzer) -> dict:
-    """What identifies the sorting an analyzer holds, and the waveforms it measured.
-
-    Unit ids alone identify nothing -- every sorting has a unit 0 -- but the
-    spike count of every unit does, and a checksum of the average templates
-    also catches an analyzer rebuilt on a different binary around the same
-    sorting.
-    """
+    """Identifies sorting that went into an analyzer as well as the waveforms it measured."""
     counts = analyzer.sorting.count_num_spikes_per_unit(outputs="array")
     templates = analyzer.get_extension("templates")
     digest = None
@@ -128,10 +117,10 @@ def sorting_fingerprint(analyzer) -> dict:
 def check_curation_dir(curation_dir, analyzer) -> None:
     """Refuse to use a curation folder made for a different sorting.
 
-    The first call writes ``sorting.json``, tying the folder -- and whatever is
-    in it already -- to this analyzer's sorting. Every later call compares, and
+    The first call writes ``sorting.json``, tying the folder and whatever is
+    in it already to this analyzer's sorting. Every later call compares, and
     raises on any difference rather than let a cache from the previous sort
-    load onto this one. Nothing is moved or deleted: that is left to you.
+    load onto this one
     """
     curation_dir = Path(curation_dir)
     curation_dir.mkdir(parents=True, exist_ok=True)
@@ -139,14 +128,22 @@ def check_curation_dir(curation_dir, analyzer) -> None:
     current = sorting_fingerprint(analyzer)
 
     if not path.is_file():
-        record = {"analyzer": str(getattr(analyzer, "folder", None)),
-                  "created": datetime.now().isoformat(timespec="seconds"), **current}
+        record = {
+            "analyzer": str(getattr(analyzer, "folder", None)),
+            "created": datetime.now().isoformat(timespec="seconds"),
+            **current,
+        }
         path.write_text(json.dumps(record))
         others = [p.name for p in curation_dir.iterdir() if p.name != SORTING_FILE]
-        note = (f" The {len(others)} file(s) already there are taken to be from it too."
-                if others else "")
-        print(f"{curation_dir} now belongs to this sorting "
-              f"({current['n_units']} units, {current['n_spikes']:,} spikes).{note}")
+        note = (
+            f" The {len(others)} file(s) already there are taken to be from it too."
+            if others
+            else ""
+        )
+        print(
+            f"{curation_dir} now belongs to this sorting "
+            f"({current['n_units']} units, {current['n_spikes']:,} spikes).{note}"
+        )
         return
 
     saved = json.loads(path.read_text())
@@ -154,11 +151,17 @@ def check_curation_dir(curation_dir, analyzer) -> None:
     if saved["unit_ids"] != current["unit_ids"]:
         changes.append(f"units {saved['n_units']} -> {current['n_units']}")
     elif saved["num_spikes"] != current["num_spikes"]:
-        changed = sum(a != b for a, b in zip(saved["num_spikes"], current["num_spikes"]))
-        changes.append(f"spike counts differ for {changed} units "
-                       f"({saved['n_spikes']:,} -> {current['n_spikes']:,} spikes)")
-    if None not in (saved.get("templates_sha1"), current["templates_sha1"]) and \
-            saved["templates_sha1"] != current["templates_sha1"]:
+        changed = sum(
+            a != b for a, b in zip(saved["num_spikes"], current["num_spikes"])
+        )
+        changes.append(
+            f"spike counts differ for {changed} units "
+            f"({saved['n_spikes']:,} -> {current['n_spikes']:,} spikes)"
+        )
+    if (
+        None not in (saved.get("templates_sha1"), current["templates_sha1"])
+        and saved["templates_sha1"] != current["templates_sha1"]
+    ):
         changes.append("the templates differ (analyzer rebuilt?)")
     if changes:
         raise RuntimeError(
@@ -171,14 +174,18 @@ def check_curation_dir(curation_dir, analyzer) -> None:
 # ── valid_unit_periods on Windows ─────────────────────────────────────────
 @contextmanager
 def detached_extensions(analyzer, *names):
-    """Hide extensions from `analyzer` for the length of a with-block.
+    """Hide extensions from `analyzer` for the length of a with-block
 
     Splits and merges carry over only the extensions the analyzer has loaded,
     so an extension popped from ``analyzer.extensions`` is simply not
     recomputed for the new units. Memory only: the saved analyzer keeps it,
     and it is put back when the block ends, however it ends.
     """
-    held = {name: analyzer.extensions.pop(name) for name in names if name in analyzer.extensions}
+    held = {
+        name: analyzer.extensions.pop(name)
+        for name in names
+        if name in analyzer.extensions
+    }
     try:
         yield analyzer
     finally:
@@ -196,10 +203,15 @@ def save_slay(curation_dir, merges, metrics) -> dict:
     np.savez(
         Path(curation_dir) / SLAY_FILE,
         group_members=np.array([u for group in merges for u in group], dtype=np.int64),
-        group_index=np.array([g for g, group in enumerate(merges) for _ in group], dtype=np.int64),
+        group_index=np.array(
+            [g for g, group in enumerate(merges) for _ in group], dtype=np.int64
+        ),
         **{name: np.asarray(metrics[name], dtype=float) for name in SLAY_METRICS},
     )
-    return {"merges": merges, **{name: np.asarray(metrics[name], dtype=float) for name in SLAY_METRICS}}
+    return {
+        "merges": merges,
+        **{name: np.asarray(metrics[name], dtype=float) for name in SLAY_METRICS},
+    }
 
 
 def load_slay(curation_dir, n_units: int) -> dict:
@@ -219,7 +231,7 @@ def load_slay(curation_dir, n_units: int) -> dict:
 
 
 def slay_pairs(slay, unit_ids) -> list:
-    """Every pair within each SLAy group, most confident first.
+    """Get every pair within each SLAy group, most confident first.
 
     The Merge tab takes pairs: its table has a column per pairwise score only
     when every group has two units (larger groups make it fail), and pairs let
@@ -228,14 +240,17 @@ def slay_pairs(slay, unit_ids) -> list:
     """
     position = {_py(u): i for i, u in enumerate(unit_ids)}
     score = slay["final_metric"]
-    pairs = [pair for group in slay["merges"] for pair in itertools.combinations(group, 2)]
+    pairs = [
+        pair for group in slay["merges"] for pair in itertools.combinations(group, 2)
+    ]
     pairs.sort(key=lambda p: -score[position[p[0]], position[p[1]]])
     return [list(p) for p in pairs]
 
 
 # ── the per-unit table ────────────────────────────────────────────────────
-def automated_labels(unit_ids, bc_qm, bc_type_string, ur_labels, slay=None,
-                     bc_manual_file=None) -> pd.DataFrame:
+def automated_labels(
+    unit_ids, bc_qm, bc_type_string, ur_labels, slay=None, bc_manual_file=None
+) -> pd.DataFrame:
     """Every tool's call for every unit, indexed by unit id in the analyzer's order.
 
     Columns:
@@ -262,9 +277,13 @@ def automated_labels(unit_ids, bc_qm, bc_type_string, ur_labels, slay=None,
 
     if bc_manual_file is not None and Path(bc_manual_file).is_file():
         manual = pd.read_csv(bc_manual_file)
-        codes = pd.Series(manual["manual_classification"].to_numpy(),
-                          index=manual["unit_id"].to_numpy().astype(np.int64))
-        table["bc_manual"] = codes.reindex(index).map(BOMBCELL_MANUAL_NAMES).fillna("").astype(str)
+        codes = pd.Series(
+            manual["manual_classification"].to_numpy(),
+            index=manual["unit_id"].to_numpy().astype(np.int64),
+        )
+        table["bc_manual"] = (
+            codes.reindex(index).map(BOMBCELL_MANUAL_NAMES).fillna("").astype(str)
+        )
 
     _require_overlap(index, ur_labels.index, "UnitRefine's labels")
     unitrefine = ur_labels.reindex(index)
@@ -279,18 +298,24 @@ def automated_labels(unit_ids, bc_qm, bc_type_string, ur_labels, slay=None,
         # .loc would quietly add a row for a unit the analyzer does not have
         unknown = sorted({u for group in slay["merges"] for u in group} - set(position))
         if unknown:
-            raise ValueError(f"SLAy's merge groups name units this analyzer does not have: {unknown[:10]}")
+            raise ValueError(
+                f"SLAy's merge groups name units this analyzer does not have: {unknown[:10]}"
+            )
         score = slay["final_metric"]
         for g, group in enumerate(slay["merges"]):
             for u in group:
                 partners = [p for p in group if p != u]
                 table.loc[u, "slay_group"] = g
                 table.loc[u, "slay_partners"] = ",".join(str(p) for p in partners)
-                table.loc[u, "slay_score"] = max(score[position[u], position[p]] for p in partners)
+                table.loc[u, "slay_score"] = max(
+                    score[position[u], position[p]] for p in partners
+                )
 
     bombcell_call = table["bc_label"]
     if "bc_manual" in table:
-        bombcell_call = table["bc_manual"].where(table["bc_manual"] != "", table["bc_label"])
+        bombcell_call = table["bc_manual"].where(
+            table["bc_manual"] != "", table["bc_label"]
+        )
     ours, theirs = bombcell_call.map(TO_QUALITY), table["ur_label"].map(TO_QUALITY)
     table["auto_label"] = ours.where(ours.notna() & (ours == theirs), "").astype(str)
     return table[["auto_label", *[c for c in table.columns if c != "auto_label"]]]
@@ -303,7 +328,9 @@ def read_automated_labels(curation_dir) -> pd.DataFrame:
     label becomes NaN (then the string "nan"), and a partner list that is a
     single unit id becomes a number.
     """
-    table = pd.read_csv(Path(curation_dir) / AUTOMATED_FILE, dtype=str, keep_default_na=False)
+    table = pd.read_csv(
+        Path(curation_dir) / AUTOMATED_FILE, dtype=str, keep_default_na=False
+    )
     table = table.set_index("unit_id")
     try:
         table.index = table.index.astype(np.int64)
@@ -337,7 +364,9 @@ def final_unit_labels(curation_dir, unit_ids=None) -> pd.Series:
         raise ValueError(f"{path} lists some unit_id more than once")
 
     manual = table["classification_source"].eq("manual").to_numpy()
-    codes = np.where(manual, table["manual_classification"], table["bombcell_classification"])
+    codes = np.where(
+        manual, table["manual_classification"], table["bombcell_classification"]
+    )
     codes = pd.Series(codes, dtype=float).fillna(-1).astype(int)
     labels = pd.Series(
         [BOMBCELL_KEYS.get(code, "NA") for code in codes],
@@ -446,8 +475,12 @@ def open_gui(analyzer, table, slay, curation_dir, recording=None, title=None):
     curation_dir = Path(curation_dir)
     unit_index = pd.Index([_py(u) for u in analyzer.unit_ids], name="unit_id")
     if set(table.index) != set(unit_index):
-        raise ValueError(f"{AUTOMATED_FILE} does not list this analyzer's units: rebuild it (cell 2.5)")
-    table = table.reindex(unit_index)  # the GUI takes each column as an array in unit order
+        raise ValueError(
+            f"{AUTOMATED_FILE} does not list this analyzer's units: rebuild it (cell 2.5)"
+        )
+    table = table.reindex(
+        unit_index
+    )  # the GUI takes each column as an array in unit order
 
     saved = curation_dir / CURATION_FILE
     if saved.is_file():
@@ -462,7 +495,9 @@ def open_gui(analyzer, table, slay, curation_dir, recording=None, title=None):
         except Exception as e:
             from spikeinterface_gui.myqt import QT
 
-            QT.QMessageBox.critical(win, "Curation not saved", f"{type(e).__name__}: {e}")
+            QT.QMessageBox.critical(
+                win, "Curation not saved", f"{type(e).__name__}: {e}"
+            )
             raise
 
     win = run_mainwindow(
@@ -484,10 +519,15 @@ def open_gui(analyzer, table, slay, curation_dir, recording=None, title=None):
         view.proposed_merge_unit_groups_all = slay_pairs(slay, analyzer.unit_ids)
         view.merge_info = {name: slay[name] for name in SLAY_METRICS}
         view._refresh()  # refresh() skips a tab that is not in front
-    n_pairs = view.table.rowCount() if view is not None and view.table is not None else 0
+    n_pairs = (
+        view.table.rowCount() if view is not None and view.table is not None else 0
+    )
     n_labelled = len(win.controller.curation_data["manual_labels"])
-    print(f"GUI ready: {len(unit_index)} units, {n_labelled} labelled, {n_pairs} SLAy pairs "
-          f"in the Merge tab", flush=True)
+    print(
+        f"GUI ready: {len(unit_index)} units, {n_labelled} labelled, {n_pairs} SLAy pairs "
+        f"in the Merge tab",
+        flush=True,
+    )
     if title:
         win.setWindowTitle(title)
     return win
@@ -507,7 +547,9 @@ def launch_gui(processed_dir, curation_dir, analyzer=None, wait_s: float = 5.0):
     if analyzer is not None:
         check_curation_dir(curation_dir, analyzer)
     if not (curation_dir / AUTOMATED_FILE).is_file():
-        raise FileNotFoundError(f"no {curation_dir / AUTOMATED_FILE}: save automated_labels() there first")
+        raise FileNotFoundError(
+            f"no {curation_dir / AUTOMATED_FILE}: save automated_labels() there first"
+        )
     previous = _running.get(curation_dir)
     if previous is not None and previous.poll() is None:
         raise RuntimeError(
@@ -519,19 +561,34 @@ def launch_gui(processed_dir, curation_dir, analyzer=None, wait_s: float = 5.0):
     # utf-8: the progress bars would otherwise crash a child writing to a
     # file in Windows' ANSI code page; unbuffered, so the log is live
     env = {**os.environ, **QT_ENV, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
-    cmd = [sys.executable, "-m", "spikeshpc.curation", str(processed_dir),
-           "--curation-dir", str(curation_dir)]
+    cmd = [
+        sys.executable,
+        "-m",
+        "spikeshpc.curation",
+        str(processed_dir),
+        "--curation-dir",
+        str(curation_dir),
+    ]
     with open(log_path, "w", encoding="utf-8") as log:
-        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env,
-                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
     _running[curation_dir] = proc
     try:
         code = proc.wait(timeout=wait_s)
     except subprocess.TimeoutExpired:
-        print(f"SpikeInterface GUI starting in its own window (pid {proc.pid}); on a long "
-              f"session it takes a few minutes to appear. Progress and errors: {log_path}")
+        print(
+            f"SpikeInterface GUI starting in its own window (pid {proc.pid}); on a long "
+            f"session it takes a few minutes to appear. Progress and errors: {log_path}"
+        )
         return proc
-    raise RuntimeError(f"the GUI process exited at once (code {code}):\n\n{_tail(log_path)}")
+    raise RuntimeError(
+        f"the GUI process exited at once (code {code}):\n\n{_tail(log_path)}"
+    )
 
 
 def main(argv=None):
@@ -541,11 +598,17 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="python -m spikeshpc.curation",
         description="Open spikeinterface-gui on a session's analyzer with bombcell, "
-                    "UnitRefine and SLAy's calls from its curation folder.",
+        "UnitRefine and SLAy's calls from its curation folder.",
     )
-    parser.add_argument("processed_dir", type=Path, help="the pipeline's output_dir for the session")
-    parser.add_argument("--curation-dir", type=Path, default=None,
-                        help=f"default: <processed_dir>/{CURATION_DIRNAME}")
+    parser.add_argument(
+        "processed_dir", type=Path, help="the pipeline's output_dir for the session"
+    )
+    parser.add_argument(
+        "--curation-dir",
+        type=Path,
+        default=None,
+        help=f"default: <processed_dir>/{CURATION_DIRNAME}",
+    )
     args = parser.parse_args(argv)
     processed_dir = args.processed_dir
     curation_dir = args.curation_dir or processed_dir / CURATION_DIRNAME
@@ -562,18 +625,30 @@ def main(argv=None):
     recording, _ = load_concatenated(processed_dir)
     recording = analyzer_recording(recording, analyzer)
     table = read_automated_labels(curation_dir)
-    slay = load_slay(curation_dir, len(analyzer.unit_ids)) if (curation_dir / SLAY_FILE).is_file() else None
+    slay = (
+        load_slay(curation_dir, len(analyzer.unit_ids))
+        if (curation_dir / SLAY_FILE).is_file()
+        else None
+    )
     print(f"loaded in {time.perf_counter() - t0:.0f} s; building the GUI", flush=True)
 
     from spikeinterface_gui.myqt import mkQApp
     import pyqtgraph.Qt
 
     if pyqtgraph.Qt.QT_LIB != "PySide6":
-        raise RuntimeError(f"pyqtgraph is on {pyqtgraph.Qt.QT_LIB}, the GUI on PySide6: set "
-                           "PYQTGRAPH_QT_LIB=PySide6 before starting this process")
+        raise RuntimeError(
+            f"pyqtgraph is on {pyqtgraph.Qt.QT_LIB}, the GUI on PySide6: set "
+            "PYQTGRAPH_QT_LIB=PySide6 before starting this process"
+        )
     app = mkQApp()
-    win = open_gui(analyzer, table, slay, curation_dir, recording=recording,
-                   title=f"SpikeInterface GUI - {processed_dir.name}")
+    win = open_gui(
+        analyzer,
+        table,
+        slay,
+        curation_dir,
+        recording=recording,
+        title=f"SpikeInterface GUI - {processed_dir.name}",
+    )
     print(f"window open after {time.perf_counter() - t0:.0f} s", flush=True)
     app.exec()
     return win
