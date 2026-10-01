@@ -27,9 +27,15 @@ __all__ = ["RasterPanel", "UnitRaster", "on_decoded_axis", "unit_raster"]
 class UnitRaster:
     """The spikes of the units a decode used, and each unit's preferred direction.
 
-    ``spike_times`` holds one array per unit, in seconds on the recording clock
-    the decoder binned them on; ``preferred_deg`` and ``labels`` one entry per
-    unit, in the same order.
+    Attributes
+    ----------
+    spike_times : list of numpy.ndarray
+        One array per unit, in seconds on the recording clock the decoder
+        binned them on.
+    preferred_deg : numpy.ndarray
+        Preferred direction of each unit, in the same order.
+    labels : list
+        Label of each unit, in the same order.
     """
 
     spike_times: list
@@ -55,15 +61,31 @@ class UnitRaster:
 
 
 def unit_raster(sorting, unit_ids, preferred_deg, labels=None) -> UnitRaster:
-    """The raster of `unit_ids` in `sorting` (or a sorting analyzer), timed as the decoder timed them.
+    """Build the raster of `unit_ids`, timed as the decoder timed them.
 
     Spike times come from ``get_unit_spike_train(unit, return_times=True)``, the
     call :func:`~spikeshpc.decoder.prepare_decoder_data` bins, so each tick sits
-    in the bin it was decoded from. ``preferred_deg`` is each unit's preferred
-    direction in the decoder's model -- ``model.preferred_deg`` of an
-    :class:`~spikeshpc.decoder.EncodingModel`. For a decode read through matched
-    units, it is the preferred direction of the baseline unit each one stands
-    in for. ``labels`` default to the unit ids.
+    in the bin it was decoded from.
+
+    Parameters
+    ----------
+    sorting : spikeinterface BaseSorting or SortingAnalyzer
+        Source of the spike trains.
+    unit_ids : sequence
+        Units to include.
+    preferred_deg : array-like
+        Each unit's preferred direction in the decoder's model
+        (``model.preferred_deg`` of an
+        :class:`~spikeshpc.decoder.EncodingModel`). For a decode read through
+        matched units, the preferred direction of the baseline unit each one
+        stands in for.
+    labels : sequence, optional
+        Unit labels; defaults to the unit ids.
+
+    Returns
+    -------
+    UnitRaster
+        The raster.
     """
     sorting = _as_sorting(sorting)
     unit_ids = list(unit_ids)
@@ -75,12 +97,25 @@ def unit_raster(sorting, unit_ids, preferred_deg, labels=None) -> UnitRaster:
 
 
 def on_decoded_axis(times, bin_start_s, bin_stop_s, axis_edges) -> np.ndarray:
-    """Where each of `times` falls on a decoded-time axis; a time in no decoded bin is dropped.
+    """Map recording times onto the decoded-time axis.
 
-    ``bin_start_s`` and ``bin_stop_s`` are the decoded bins on the recording
-    clock, in time order and not overlapping; ``axis_edges`` is where each bin
-    starts on the decoded-time axis. A time keeps its offset into its bin, so
-    sorted times come back sorted.
+    A time keeps its offset into its bin, so sorted times come back sorted.
+
+    Parameters
+    ----------
+    times : array-like
+        Times on the recording clock, in seconds.
+    bin_start_s, bin_stop_s : array-like
+        Decoded bins on the recording clock, in time order and not
+        overlapping.
+    axis_edges : array-like
+        Where each bin starts on the decoded-time axis.
+
+    Returns
+    -------
+    numpy.ndarray
+        Positions on the decoded-time axis; a time in no decoded bin is
+        dropped.
     """
     times = np.asarray(times, dtype=float)
     bin_start_s = np.asarray(bin_start_s, dtype=float)
@@ -94,11 +129,24 @@ def on_decoded_axis(times, bin_start_s, bin_stop_s, axis_edges) -> np.ndarray:
 class RasterPanel:
     """A :class:`UnitRaster` drawn on one axes of a scrolling view, a window at a time.
 
-    ``bin_start_s`` / ``bin_stop_s`` are the view's decoded bins on the
-    recording clock and ``axis_edges`` where each starts on its decoded-time
-    axis. A window holding more than ``max_spikes`` spikes is not drawn -- the
-    axes says so instead -- since a view zoomed out over hours would otherwise
-    stall on hundreds of thousands of ticks.
+    A window holding more than `max_spikes` spikes is not drawn -- the axes
+    says so instead -- since a view zoomed out over hours would otherwise stall
+    on hundreds of thousands of ticks.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes to draw on.
+    raster : UnitRaster
+        Spikes to draw.
+    bin_start_s, bin_stop_s : array-like
+        The view's decoded bins on the recording clock.
+    axis_edges : array-like
+        Where each bin starts on the decoded-time axis.
+    cmap : str or matplotlib.colors.Colormap, default "hsv"
+        Colormap mapping preferred direction to color.
+    max_spikes : int, default 150000
+        Largest window, in spikes, that is drawn.
     """
 
     def __init__(self, ax, raster: UnitRaster, bin_start_s, bin_stop_s, axis_edges,
@@ -129,7 +177,18 @@ class RasterPanel:
         ax.set_ylabel("units by preferred\ndirection", fontsize=9)
 
     def draw(self, t0: float, stop: float) -> int:
-        """Draw the spikes between `t0` and `stop` on the decoded-time axis; returns how many."""
+        """Draw the spikes between `t0` and `stop` on the decoded-time axis.
+
+        Parameters
+        ----------
+        t0, stop : float
+            Window edges on the decoded-time axis.
+
+        Returns
+        -------
+        int
+            Number of spikes drawn.
+        """
         from matplotlib.collections import LineCollection
 
         for artist in (self._collection, self._note):
@@ -159,7 +218,22 @@ class RasterPanel:
         return total
 
     def add_colorbar(self, fig, width: float = 0.008, pad: float = 0.006):
-        """A strip right of the raster reading color back to preferred direction."""
+        """Add a strip right of the raster reading color back to preferred direction.
+
+        Parameters
+        ----------
+        fig : matplotlib.figure.Figure
+            Figure holding the raster axes.
+        width : float, default 0.008
+            Strip width, in figure fractions.
+        pad : float, default 0.006
+            Gap between the raster and the strip, in figure fractions.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The colorbar axes.
+        """
         from matplotlib.cm import ScalarMappable
         from matplotlib.colors import Normalize
 

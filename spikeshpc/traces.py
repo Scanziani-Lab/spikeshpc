@@ -39,23 +39,54 @@ def _time_vector(recording, segment_index):
 
     Never ``get_times()``: with no time vector that builds one, np.arange over
     every sample in the segment.
+
+    Parameters
+    ----------
+    recording : spikeinterface BaseRecording
+        Recording to read.
+    segment_index : int
+        Segment to read.
+
+    Returns
+    -------
+    array-like or None
+        The time vector, or None if the recording has none.
     """
     return recording.get_time_info(segment_index=segment_index)["time_vector"]
 
 
 def time_range_to_frames(recording, time_range, segment_index=None,
                          relative: bool = False):
-    """``(start_frame, end_frame)`` covering ``time_range`` seconds.
-
-    ``time_range`` is on the recording's own clock -- the synchronized
-    acquisition clock for anything read through
-    :func:`spikeshpc.io.read_openephys_synced`, which rarely starts at zero.
-    ``relative=True`` measures it from the segment's first sample instead.
+    """Convert a time range to the frames covering it.
 
     Raises rather than returning a span that cannot be right: an empty one
     (usually a range given on the wrong clock) or one holding more samples
-    than ``time_range`` has room for at the sampling rate, which only a time
+    than `time_range` has room for at the sampling rate, which only a time
     vector that is not increasing can produce.
+
+    Parameters
+    ----------
+    recording : spikeinterface BaseRecording
+        Recording to read.
+    time_range : tuple of float
+        Start and end, in seconds, on the recording's own clock -- the
+        synchronized acquisition clock for anything read through
+        :func:`spikeshpc.io.read_openephys_synced`, which rarely starts at
+        zero.
+    segment_index : int, optional
+        Segment to read.
+    relative : bool, default False
+        Measure `time_range` from the segment's first sample instead.
+
+    Returns
+    -------
+    start, end : int
+        First and last frame.
+
+    Raises
+    ------
+    ValueError
+        If the range is not increasing, is empty, or holds too many samples.
     """
     segment_index = _segment_index(recording, segment_index)
     t0, t1 = (float(t) for t in time_range)
@@ -138,15 +169,37 @@ def _read(recording, segment_index, start, end, channel_ids, return_in_uV,
 def get_traces(recording, time_range, *, segment_index=None, channel_ids=None,
                return_in_uV: bool = False, relative: bool = False,
                return_times: bool = False, max_gb: float = 1.0):
-    """Traces for ``time_range`` seconds only, ``(samples, channels)``.
+    """Read traces for a time range only.
 
     ``recording.get_traces`` addressed by time rather than frame, reading
-    nothing outside the range. See :func:`time_range_to_frames` for how
-    ``time_range`` and ``relative`` are read. Channels come back in the order
-    of ``channel_ids``. ``return_times=True`` also returns each sample's time,
-    on the same clock as ``time_range``.
+    nothing outside the range. Refuses anything over `max_gb` before reading
+    it.
 
-    Refuses anything over ``max_gb`` before reading it.
+    Parameters
+    ----------
+    recording : spikeinterface BaseRecording
+        Recording to read.
+    time_range : tuple of float
+        Start and end, in seconds; see :func:`time_range_to_frames`.
+    segment_index : int, optional
+        Segment to read.
+    channel_ids : sequence, optional
+        Channels to read; they come back in this order.
+    return_in_uV : bool, default False
+        Scale to microvolts.
+    relative : bool, default False
+        Measure `time_range` from the segment's first sample.
+    return_times : bool, default False
+        Also return each sample's time, on the same clock as `time_range`.
+    max_gb : float, default 1.0
+        Largest read allowed, in gigabytes.
+
+    Returns
+    -------
+    traces : numpy.ndarray
+        Shape (samples, channels).
+    times : numpy.ndarray
+        Only if `return_times`.
     """
     segment_index = _segment_index(recording, segment_index)
     start, end = time_range_to_frames(recording, time_range, segment_index,
@@ -190,20 +243,70 @@ def plot_traces(recording, time_range=None, *, segment_index=None,
                 scale: float = 1.0, vspacing_factor: float = 1.5,
                 with_colorbar: bool = True, add_legend: bool = True,
                 max_gb: float = 1.0, ax=None):
-    """``si.plot_traces`` for long recordings: reads ``time_range`` and nothing else.
+    """Plot traces like ``si.plot_traces``, but for long recordings.
 
-    Takes spikeinterface's keywords, so an existing call can switch over
-    unchanged (matplotlib only). ``recording`` may be one recording or a
-    dict/list of them drawn as overlaid layers; frames are resolved once, from
-    the first. ``time_range`` defaults to the first second, and is on the
-    recording's own clock unless ``relative=True`` (see
-    :func:`time_range_to_frames`); the x axis uses the same clock, and so do
-    ``events`` -- float times or a structured array with ``time`` and optional
-    ``duration``.
+    Reads `time_range` and nothing else. Takes spikeinterface's keywords, so
+    an existing call can switch over unchanged (matplotlib only).
 
-    ``mode="auto"`` draws lines up to 64 channels and a heat map above that.
-    ``order_channel_by_depth`` sorts the channels by probe position without
-    wrapping the recording in another preprocessing step. Returns the axes.
+    Parameters
+    ----------
+    recording : BaseRecording or dict or list
+        One recording, or several drawn as overlaid layers; frames are
+        resolved once, from the first.
+    time_range : tuple of float, optional
+        Start and end, in seconds; defaults to the first second. On the
+        recording's own clock unless `relative` (see
+        :func:`time_range_to_frames`); the x axis uses the same clock.
+    segment_index : int, optional
+        Segment to read.
+    channel_ids : sequence, optional
+        Channels to draw.
+    order_channel_by_depth : bool, default False
+        Sort channels by probe position without wrapping the recording in
+        another preprocessing step.
+    mode : {"auto", "line", "map"}, default "auto"
+        ``"auto"`` draws lines up to 64 channels and a heat map above that.
+    return_in_uV : bool, default False
+        Scale to microvolts.
+    relative : bool, default False
+        Measure `time_range` from the segment's first sample.
+    cmap : str, default "RdBu_r"
+        Colormap for ``mode="map"``.
+    clim : tuple of float, optional
+        Colour limits for ``mode="map"``.
+    show_channel_ids : bool, default False
+        Label channels with their ids.
+    events : array-like, optional
+        Float times, or a structured array with ``time`` and optional
+        ``duration``, on the same clock as the x axis.
+    events_color : str, default "gray"
+        Colour of the events.
+    events_alpha : float, default 0.5
+        Opacity of the events.
+    color : str, optional
+        Line colour.
+    scale : float, default 1.0
+        Amplitude scale.
+    vspacing_factor : float, default 1.5
+        Vertical spacing between lines.
+    with_colorbar : bool, default True
+        Add a colorbar in map mode.
+    add_legend : bool, default True
+        Add a legend when drawing several layers.
+    max_gb : float, default 1.0
+        Largest read allowed, in gigabytes.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw on.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+        The axes.
+
+    Raises
+    ------
+    ValueError
+        If `mode` is invalid, or ``mode="map"`` is given several recordings.
     """
     import matplotlib.pyplot as plt
 

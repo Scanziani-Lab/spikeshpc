@@ -81,6 +81,18 @@ class HeadFrame:
     ``forward`` (nose), ``left``, and ``up`` (dorsal) are orthonormal. The
     remaining fields describe how well the calibration that produced them was
     constrained -- see :func:`calibrate_head_frame`.
+
+    Attributes
+    ----------
+    forward, left, up : numpy.ndarray
+        Orthonormal axes, shape (3,), in the rigid body's local frame.
+    n_calibration_frames : int
+        Number of frames the calibration used.
+    concentration : float
+        Circular resultant length of heading minus travel direction, in
+        [0, 1].
+    residual_deg : float
+        Mean of heading minus travel direction; ~0 by construction.
     """
 
     forward: np.ndarray  # (3,)
@@ -150,6 +162,33 @@ def calibrate_head_frame(
     direction decouple at low speed -- on this take the circular concentration
     between them falls from 0.75 above 300 mm/s to 0.04 in the 50-100 mm/s
     band -- so a threshold well into running is what makes the fit sharp.
+
+    Parameters
+    ----------
+    rotation_xyzw : numpy.ndarray
+        World-from-body quaternions, shape (n_frames, 4).
+    position : numpy.ndarray
+        Positions in millimetres, shape (n_frames, 3).
+    times : numpy.ndarray
+        Frame times in seconds, shape (n_frames,).
+    speed_threshold_mm_s : float, default 150.0
+        Frames faster than this are locomotion bouts used for the fit.
+    smooth_window : int, default 31
+        Savitzky-Golay window length, in frames.
+    polyorder : int, default 3
+        Savitzky-Golay polynomial order.
+    min_calibration_frames : int, default 500
+        Fewest locomotion frames needed.
+
+    Returns
+    -------
+    HeadFrame
+        The calibrated axes and fit quality.
+
+    Raises
+    ------
+    ValueError
+        If there are too few locomotion frames to calibrate on.
     """
     rotation_xyzw = np.asarray(rotation_xyzw, dtype=float)
     matrices = Rotation.from_quat(rotation_xyzw).as_matrix()
@@ -190,7 +229,20 @@ def calibrate_head_frame(
 
 
 def _azimuth(matrices: np.ndarray, forward: np.ndarray) -> np.ndarray:
-    """Radian azimuth of ``forward`` carried into the world by each matrix."""
+    """Compute the azimuth of `forward` carried into the world by each matrix.
+
+    Parameters
+    ----------
+    matrices : numpy.ndarray
+        World-from-body rotation matrices, shape (n, 3, 3).
+    forward : numpy.ndarray
+        Forward axis in the body frame, shape (3,).
+
+    Returns
+    -------
+    numpy.ndarray
+        Azimuth in radians, shape (n,).
+    """
     v = matrices @ forward
     return np.arctan2(v[:, 0], v[:, 2])
 
@@ -219,6 +271,23 @@ def compute_heading(
     travel direction -- but the overhead camera's orientation relative to the
     arena axes isn't in the CSV, so they're the knobs for lining the compass up
     with a top-down video.
+
+    Parameters
+    ----------
+    rotation_xyzw : numpy.ndarray
+        World-from-body quaternions, shape (n_frames, 4).
+    head_frame : HeadFrame or numpy.ndarray
+        A :class:`HeadFrame` from :func:`calibrate_head_frame`, or a bare (3,)
+        forward vector in the rigid body's local frame.
+    flip_direction : bool, default False
+        Reverse the turn sense without moving the zero.
+    offset_deg : float, default 0.0
+        Rotate the zero reference.
+
+    Returns
+    -------
+    numpy.ndarray
+        Heading in degrees, wrapped to [0, 360).
     """
     rotation_xyzw = np.asarray(rotation_xyzw, dtype=float)
     matrices = Rotation.from_quat(rotation_xyzw).as_matrix()
@@ -239,6 +308,18 @@ def compute_head_elevation(
     Mask on this to drop frames where the animal is looking straight up or
     down; on the 2026-08-20 take only 0.9% of frames exceed 80 degrees, so it's
     a rare-event guard rather than a routine correction.
+
+    Parameters
+    ----------
+    rotation_xyzw : numpy.ndarray
+        World-from-body quaternions, shape (n_frames, 4).
+    head_frame : HeadFrame or numpy.ndarray
+        A :class:`HeadFrame`, or a bare (3,) forward vector.
+
+    Returns
+    -------
+    numpy.ndarray
+        Elevation per frame, in degrees.
     """
     rotation_xyzw = np.asarray(rotation_xyzw, dtype=float)
     matrices = Rotation.from_quat(rotation_xyzw).as_matrix()

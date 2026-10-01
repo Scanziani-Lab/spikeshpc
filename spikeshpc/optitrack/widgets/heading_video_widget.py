@@ -30,6 +30,21 @@ class HeadingVideoWidget:
     Requires an interactive matplotlib backend (``%matplotlib widget`` or
     ``%matplotlib qt`` in Jupyter) and the figure to have keyboard focus
     (click on it once) before arrow keys will do anything.
+
+    Parameters
+    ----------
+    video_path : str or pathlib.Path
+        Video file to step through.
+    heading_deg : numpy.ndarray
+        Heading per OptiTrack frame, in degrees.
+    take : OptitrackTake, optional
+        Parsed take, for frame times and labels.
+    frame_offset : int, default 0
+        Video frame ``i`` corresponds to CSV frame ``i + frame_offset``.
+    start_frame : int, default 0
+        Video frame shown first.
+    compass_rotation_offset_deg : float, default 0.0
+        Rotation applied to the compass arrow.
     """
 
     def __init__(
@@ -140,6 +155,26 @@ def show_heading_video_widget(
 
     Draws a compass arrow (upper-left) for that frame's ``heading_deg``,
     e.g. from :func:`optitrack.heading.compute_heading`.
+
+    Parameters
+    ----------
+    video_path : str or pathlib.Path
+        Video file to step through.
+    heading_deg : numpy.ndarray
+        Heading per OptiTrack frame, in degrees.
+    take : OptitrackTake, optional
+        Parsed take, for frame times and labels.
+    frame_offset : int, default 0
+        Video frame ``i`` corresponds to CSV frame ``i + frame_offset``.
+    start_frame : int, default 0
+        Video frame shown first.
+    compass_rotation_offset_deg : float, default 0.0
+        Rotation applied to the compass arrow.
+
+    Returns
+    -------
+    HeadingVideoWidget
+        The open widget.
     """
     return HeadingVideoWidget(
         video_path,

@@ -27,7 +27,22 @@ from .optitrack.sync import (
 
 
 def find_adc_stream(phys_path, phys_type: str, stream_name=None):
-    """Name of the analog/ADC stream carrying the camera TTL, or None."""
+    """Find the analog/ADC stream carrying the camera TTL.
+
+    Parameters
+    ----------
+    phys_path : str or pathlib.Path
+        Recording file or folder.
+    phys_type : str
+        Acquisition system, as returned by ``detect_phys_type``.
+    stream_name : str, optional
+        Stream to use as is, skipping the search.
+
+    Returns
+    -------
+    str or None
+        Stream name, or None if there is no ADC stream.
+    """
     if stream_name:
         return stream_name
     from .io import infer_stream_name
@@ -38,12 +53,32 @@ def find_adc_stream(phys_path, phys_type: str, stream_name=None):
 
 
 def pick_ttl_channel(events, channel_id=None, min_rail_fraction: float = 0.8):
-    """The channel carrying the shutter TTL.
+    """Find the channel carrying the shutter TTL.
 
     With `channel_id` given it is only checked; otherwise every channel on the
     stream is scanned and the one that actually looks like a square wave is
     used. Picking by name alone is how a floating input ends up being
     thresholded into millions of noise crossings.
+
+    Parameters
+    ----------
+    events : spikeinterface BaseRecording
+        The ADC stream.
+    channel_id : str, optional
+        Channel to check instead of searching.
+    min_rail_fraction : float, default 0.8
+        Smallest fraction of samples that must sit at either level for a
+        channel to count as a TTL.
+
+    Returns
+    -------
+    str
+        Channel id.
+
+    Raises
+    ------
+    ValueError
+        If `channel_id` does not look like a TTL, or no channel does.
     """
     if channel_id is not None:
         trace = events.get_traces(channel_ids=[channel_id], end_frame=None).flatten()
@@ -81,6 +116,11 @@ def _report_clock(events):
     should carry both: a future run whose ADC quietly falls back to the
     inferred clock is then one grep away rather than a mystery in a tuning
     curve months later.
+
+    Parameters
+    ----------
+    events : spikeinterface BaseRecording
+        The ADC stream.
     """
     times = events.get_times(segment_index=0)
     if len(times) < 2:
@@ -97,7 +137,7 @@ def _report_clock(events):
 
 
 def _to_probe_clock(times, phys_path, phys_type, folder, config):
-    """Move shutter times onto the clock the spikes are on. Returns (times, offset).
+    """Move shutter times onto the clock the spikes are on.
 
     The ADC and the probe are timestamped against the same acquisition epoch,
     but nothing downstream uses that epoch. Kilosort counts from the sorted
@@ -115,6 +155,26 @@ def _to_probe_clock(times, phys_path, phys_type, folder, config):
     Where the probe stream has no synchronized clock the times are left alone,
     since both stream and probe are then on inferred clocks that share an
     origin anyway.
+
+    Parameters
+    ----------
+    times : numpy.ndarray
+        Shutter times on the acquisition clock, in seconds.
+    phys_path : str or pathlib.Path
+        Recording file or folder.
+    phys_type : str
+        Acquisition system.
+    folder : pathlib.Path
+        Recording folder.
+    config : dict
+        Movement configuration.
+
+    Returns
+    -------
+    times : numpy.ndarray
+        Shutter times on the probe clock.
+    offset : float
+        Seconds subtracted from `times`.
     """
     from .io import probe_start_time, stream_start_time
 
@@ -145,11 +205,32 @@ def derive_shutter_times(
 ):
     """Extract, check, plot and cache shutter-close times for one recording.
 
-    Returns the path to the saved .npy, or None if the TTL could not be used.
     Re-running is cheap: an existing cache is returned untouched -- which also
     means it is returned unexamined, and no sanity plot is drawn, so a cache
     written by older code survives a re-run silently along with whatever was
     wrong with it. Pass ``force=True`` to extract and plot again regardless.
+
+    Parameters
+    ----------
+    phys_path : str or pathlib.Path
+        Recording file or folder.
+    output_dir : pathlib.Path
+        Run directory; the cache goes in its states folder.
+    session : str
+        Session name, used in file names.
+    config : dict
+        Movement configuration.
+    phys_type : str, optional
+        Acquisition system; detected from `phys_path` if omitted.
+    optitrack_csv : str or pathlib.Path, optional
+        OptiTrack export to compare the shutter times against.
+    force : bool, default False
+        Extract and plot again even if a cache exists.
+
+    Returns
+    -------
+    pathlib.Path or None
+        Path of the saved ``.npy``, or None if the TTL could not be used.
     """
     from .io import detect_phys_type, open_stream
 

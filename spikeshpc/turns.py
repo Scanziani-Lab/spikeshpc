@@ -48,19 +48,61 @@ REM_SHADE = "0.93"  # behind the REM columns of the summary
 
 
 def clockwise_sign(flip_direction: bool) -> int:
-    """+1 if heading grows clockwise (seen from above), -1 if it shrinks.
+    """Get the sign of clockwise rotation for a heading convention.
 
     ``optitrack.compute_heading`` measures from +Z toward +X, the right-handed
     sense about +Y (up): counterclockwise seen from above. ``flip_direction``
     negates it, so the tuning notebook's heading (``flip_direction=True``) grows
     clockwise.
+
+    Parameters
+    ----------
+    flip_direction : bool
+        The ``flip_direction`` the heading was computed with.
+
+    Returns
+    -------
+    int
+        +1 if heading grows clockwise (seen from above), -1 if it shrinks.
     """
     return 1 if flip_direction else -1
 
 
 @dataclass
 class Turns:
-    """One heading trace's turns, from :func:`find_turns`. Clockwise is positive."""
+    """One heading trace's turns, from :func:`find_turns`. Clockwise is positive.
+
+    Attributes
+    ----------
+    label : str
+        Name of the trace.
+    turn_threshold : float
+        Angular velocity above which a bin is turning, in deg/s.
+    smooth_s : float
+        Velocity smoothing window, in seconds.
+    max_step_deg : float
+        Largest step between bins that is not a jump.
+    bin_s : float
+        Bin width, in seconds.
+    duration_s : float
+        Length of every bin together, in seconds.
+    analysed_s : float
+        Time in bins with a velocity: not in a flicker between jumps.
+    constant_s : float
+        Of that, the time below `turn_threshold`.
+    net_rotation_deg : float
+        Net rotation over the analysed pieces, jumps left out.
+    velocity_deg_s : numpy.ndarray
+        Angular velocity per bin, NaN where not analysed.
+    jump_time_s : numpy.ndarray
+        The bin each jump landed in.
+    turn_start_s, turn_stop_s : numpy.ndarray
+        First and last turning bin of each turn.
+    turn_direction : numpy.ndarray
+        +1 clockwise, -1 counterclockwise, per turn.
+    turn_rotation_deg : numpy.ndarray
+        Signed rotation over each turn and half a window either side.
+    """
 
     label: str
     turn_threshold: float  # deg/s
@@ -104,7 +146,15 @@ class Turns:
 
     @property
     def drift_deg_per_min(self) -> float:
-        """Net rotation per analysed minute: a steady spin shows here, back-and-forth turning does not."""
+        """Net rotation per analysed minute.
+
+        A steady spin shows here, back-and-forth turning does not.
+
+        Returns
+        -------
+        float
+            Degrees per minute; NaN if nothing was analysed.
+        """
         return 60.0 * self.net_rotation_deg / self.analysed_s if self.analysed_s else np.nan
 
     @property
@@ -113,7 +163,13 @@ class Turns:
 
     @property
     def clockwise_ratio(self) -> float:
-        """Clockwise over counterclockwise turns: inf with no counterclockwise one, NaN with none."""
+        """Get the number of clockwise turns over counterclockwise ones.
+
+        Returns
+        -------
+        float
+            The ratio; inf with no counterclockwise turn, NaN with no turns.
+        """
         cw, ccw = self.n_clockwise, self.n_counterclockwise
         if ccw:
             return cw / ccw
@@ -162,14 +218,40 @@ def find_turns(
     bin_s: float | None = None,
     label: str = "",
 ) -> Turns:
-    """The turns in one heading trace; see the module docstring for the rules.
+    """Find the turns in one heading trace; see the module docstring for the rules.
 
-    ``time_s`` and ``heading_deg`` are per bin, as a decode saves them.
-    ``run_index`` marks its contiguous stretches; without it, a gap of more
-    than one and a half bins in ``time_s`` starts a new one. ``clockwise`` is
-    :func:`clockwise_sign` of the heading's convention. ``bin_s`` defaults to
-    the typical step of ``time_s``. The velocity window is the odd number of
-    bins closest to ``smooth_s``.
+    The velocity window is the odd number of bins closest to `smooth_s`.
+
+    Parameters
+    ----------
+    time_s, heading_deg : array-like
+        Time and heading per bin, as a decode saves them.
+    run_index : array-like, optional
+        Marks the trace's contiguous stretches; without it, a gap of more than
+        one and a half bins in `time_s` starts a new one.
+    turn_threshold : float
+        Angular velocity above which a bin is turning, in deg/s.
+    smooth_s : float, default 1.0
+        Velocity smoothing window, in seconds.
+    max_step_deg : float, default 45.0
+        Largest step between bins that is not a jump.
+    clockwise : int, default 1
+        :func:`clockwise_sign` of the heading's convention.
+    bin_s : float, optional
+        Bin width; defaults to the typical step of `time_s`.
+    label : str, default ""
+        Name of the trace.
+
+    Returns
+    -------
+    Turns
+        The turns found.
+
+    Raises
+    ------
+    ValueError
+        If the trace is empty, the inputs disagree in length, a parameter is
+        invalid, or `bin_s` cannot be inferred.
     """
     time_s = np.asarray(time_s, dtype=float)
     heading = np.asarray(heading_deg, dtype=float)
@@ -249,7 +331,29 @@ def find_turns(
 
 
 def _runs(time_s, run_index, bin_s) -> np.ndarray:
-    """Stretch index per bin: a new stretch at each change of run_index and at each time gap."""
+    """Number the contiguous stretches of a trace.
+
+    A new stretch starts at each change of `run_index` and at each time gap.
+
+    Parameters
+    ----------
+    time_s : numpy.ndarray
+        Time per bin.
+    run_index : numpy.ndarray or None
+        Run index per bin.
+    bin_s : float
+        Bin width, in seconds.
+
+    Returns
+    -------
+    numpy.ndarray
+        Stretch index per bin.
+
+    Raises
+    ------
+    ValueError
+        If `run_index` and `time_s` differ in length.
+    """
     gap = np.diff(time_s) > 1.5 * bin_s
     if run_index is not None:
         run_index = np.asarray(run_index)
@@ -262,24 +366,48 @@ def _runs(time_s, run_index, bin_s) -> np.ndarray:
 # ── plots ────────────────────────────────────────────────────────────────
 def plot_turn_summary(table: pd.DataFrame, recordings, colors: dict, units: dict | None = None,
                       types: dict | None = None, axes=None):
-    """Constant heading, turns, their direction and net drift, per recording: wake, then REM.
+    """Plot constant heading, turns, their direction and net drift, per recording.
 
-    ``table`` holds one row per trace: ``recording``, ``state`` ("wake" or
-    "REM"), ``source`` and the :meth:`Turns.as_row` measures. ``source`` is
-    "decoded" (a filled circle in the recording's color), "optitrack" (the
-    measured heading, an open square; drawn for wake only) or "reference" (the
-    baseline decoded with that recording's units, an open black diamond, as in
-    :func:`~spikeshpc.decoder.plot_transfer_summary`). Columns run in
-    ``recordings`` order, wake then REM, the REM ones shaded gray; ``units``
-    and ``types`` label them. In a wake column the decode and the measured
-    heading sit side by side, and the diamond stands apart to their left.
+    Columns run in `recordings` order, wake then REM, the REM ones shaded gray.
+    In a wake column the decode and the measured heading sit side by side, and
+    the diamond stands apart to their left.
 
     Four panels: percent of time at a constant heading; turns per minute, with
     each trace's total count beside its marker (a pair's pointing away from
     each other, so they never overprint); clockwise over counterclockwise turns
     on a log axis, where 1 is no preference, with the two counts placed the
     same way; and net drift in deg/min, clockwise up, which does not depend on
-    the threshold. Returns the four axes.
+    the threshold.
+
+    Parameters
+    ----------
+    table : pandas.DataFrame
+        One row per trace: ``recording``, ``state`` ("wake" or "REM"),
+        ``source`` and the :meth:`Turns.as_row` measures. ``source`` is
+        "decoded" (a filled circle in the recording's color), "optitrack" (the
+        measured heading, an open square; drawn for wake only) or "reference"
+        (the baseline decoded with that recording's units, an open black
+        diamond, as in :func:`~spikeshpc.decoder.plot_transfer_summary`).
+    recordings : sequence of str
+        Recordings to draw, in order.
+    colors : dict
+        Colour of each recording.
+    units : dict, optional
+        Unit label of each recording.
+    types : dict, optional
+        Type label of each recording.
+    axes : sequence of matplotlib.axes.Axes, optional
+        The four axes to draw on.
+
+    Returns
+    -------
+    sequence of matplotlib.axes.Axes
+        The four axes.
+
+    Raises
+    ------
+    ValueError
+        If no recording of the table is in `recordings`.
     """
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
@@ -414,16 +542,39 @@ def plot_turn_summary(table: pd.DataFrame, recordings, colors: dict, units: dict
 
 def plot_turn_sweep(table: pd.DataFrame, recordings, colors: dict, current: float | None = None,
                     min_turns: int = 20, axes=None):
-    """Constant heading, turn rate and turn direction against the turn threshold.
+    """Plot constant heading, turn rate and turn direction against the turn threshold.
 
-    ``table`` is :func:`plot_turn_summary`'s with one set of rows per
-    ``turn_threshold``. Rows of panels: the three measures; columns: wake, then
-    REM. One line per recording and source, in the recording's color: solid
-    decoded, dashed the measured heading (wake only; in REM the head does not
-    turn), dotted the baseline decoded with that recording's units. ``current``
-    marks the threshold in use with a gray band. A ratio from fewer than
-    ``min_turns`` turns is not drawn. Net drift has no threshold, so it is not
-    here. Returns the 3 x 2 axes.
+    Rows of panels: the three measures; columns: wake, then REM. One line per
+    recording and source, in the recording's color: solid decoded, dashed the
+    measured heading (wake only; in REM the head does not turn), dotted the
+    baseline decoded with that recording's units. Net drift has no threshold,
+    so it is not here.
+
+    Parameters
+    ----------
+    table : pandas.DataFrame
+        As for :func:`plot_turn_summary`, with one set of rows per
+        ``turn_threshold``.
+    recordings : sequence of str
+        Recordings to draw, in order.
+    colors : dict
+        Colour of each recording.
+    current : float, optional
+        Marks the threshold in use with a gray band.
+    min_turns : int, default 20
+        A ratio from fewer turns than this is not drawn.
+    axes : numpy.ndarray of matplotlib.axes.Axes, optional
+        The 3 x 2 axes to draw on.
+
+    Returns
+    -------
+    numpy.ndarray of matplotlib.axes.Axes
+        The 3 x 2 axes.
+
+    Raises
+    ------
+    ValueError
+        If no recording of the table is in `recordings`.
     """
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
@@ -509,13 +660,39 @@ def plot_turn_sweep(table: pd.DataFrame, recordings, colors: dict, current: floa
 
 def plot_turn_trace(time_s, heading_deg, turns: Turns, measured_deg=None, start_s=None,
                     length_s: float = 60.0, color="k", axes=None):
-    """A stretch of one trace, to check the turn detection by eye.
+    """Plot a stretch of one trace, to check the turn detection by eye.
 
-    Top: the heading (dots, in ``color``) and optionally the measured one (a
-    gray line), with each turn shaded -- blue clockwise, orange
-    counterclockwise -- and each jump marked by a dashed line. Bottom: the
-    angular velocity, clockwise up, against +/- ``turns.turn_threshold``.
-    ``start_s`` defaults to the trace's first time. Returns the two axes.
+    Top: the heading (dots) and optionally the measured one (a gray line), with
+    each turn shaded -- blue clockwise, orange counterclockwise -- and each
+    jump marked by a dashed line. Bottom: the angular velocity, clockwise up,
+    against +/- ``turns.turn_threshold``.
+
+    Parameters
+    ----------
+    time_s, heading_deg : array-like
+        The trace `turns` was found in.
+    turns : Turns
+        Turns found in the trace.
+    measured_deg : array-like, optional
+        Measured heading in the same bins.
+    start_s : float, optional
+        Start of the stretch; defaults to the trace's first time.
+    length_s : float, default 60.0
+        Length of the stretch, in seconds.
+    color : str, default "k"
+        Colour of the heading dots.
+    axes : sequence of matplotlib.axes.Axes, optional
+        The two axes to draw on.
+
+    Returns
+    -------
+    sequence of matplotlib.axes.Axes
+        The two axes.
+
+    Raises
+    ------
+    ValueError
+        If no bin falls in the stretch.
     """
     import matplotlib.pyplot as plt
 

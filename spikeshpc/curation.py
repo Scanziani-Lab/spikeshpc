@@ -98,7 +98,18 @@ _running = {}  # curation folder -> the GUI process launched for it
 
 # ── staleness ─────────────────────────────────────────────────────────────
 def sorting_fingerprint(analyzer) -> dict:
-    """Identifies sorting that went into an analyzer as well as the waveforms it measured."""
+    """Identify the sorting that went into an analyzer, as well as the waveforms it measured.
+
+    Parameters
+    ----------
+    analyzer : spikeinterface SortingAnalyzer
+        Analyzer to fingerprint.
+
+    Returns
+    -------
+    dict
+        Properties identifying the analyzer's sorting.
+    """
     counts = analyzer.sorting.count_num_spikes_per_unit(outputs="array")
     templates = analyzer.get_extension("templates")
     digest = None
@@ -120,7 +131,19 @@ def check_curation_dir(curation_dir, analyzer) -> None:
     The first call writes ``sorting.json``, tying the folder and whatever is
     in it already to this analyzer's sorting. Every later call compares, and
     raises on any difference rather than let a cache from the previous sort
-    load onto this one
+    load onto this one.
+
+    Parameters
+    ----------
+    curation_dir : str or pathlib.Path
+        Curation folder.
+    analyzer : spikeinterface SortingAnalyzer
+        Analyzer the folder should belong to.
+
+    Raises
+    ------
+    RuntimeError
+        If the folder was made for a different sorting.
     """
     curation_dir = Path(curation_dir)
     curation_dir.mkdir(parents=True, exist_ok=True)
@@ -174,12 +197,24 @@ def check_curation_dir(curation_dir, analyzer) -> None:
 # ── valid_unit_periods on Windows ─────────────────────────────────────────
 @contextmanager
 def detached_extensions(analyzer, *names):
-    """Hide extensions from `analyzer` for the length of a with-block
+    """Hide extensions from `analyzer` for the length of a with-block.
 
     Splits and merges carry over only the extensions the analyzer has loaded,
     so an extension popped from ``analyzer.extensions`` is simply not
     recomputed for the new units. Memory only: the saved analyzer keeps it,
     and it is put back when the block ends, however it ends.
+
+    Parameters
+    ----------
+    analyzer : spikeinterface SortingAnalyzer
+        Analyzer to modify.
+    *names : str
+        Extensions to hide.
+
+    Yields
+    ------
+    spikeinterface SortingAnalyzer
+        The analyzer, with the extensions detached.
     """
     held = {
         name: analyzer.extensions.pop(name)
@@ -194,10 +229,24 @@ def detached_extensions(analyzer, *names):
 
 # ── SLAy ──────────────────────────────────────────────────────────────────
 def save_slay(curation_dir, merges, metrics) -> dict:
-    """Keep what ``compute_slay_merges`` returned; returns it as :func:`load_slay` would.
+    """Save what ``compute_slay_merges`` returned.
 
     The merge groups are ragged, so they are stored flat: every member, and
     the index of the group it belongs to.
+
+    Parameters
+    ----------
+    curation_dir : str or pathlib.Path
+        Curation folder.
+    merges : list of list
+        Merge groups of unit ids.
+    metrics : dict
+        Pairwise score matrices, keyed by metric name.
+
+    Returns
+    -------
+    dict
+        The same data, as :func:`load_slay` would return it.
     """
     merges = [[_py(u) for u in group] for group in merges]
     np.savez(
@@ -215,7 +264,25 @@ def save_slay(curation_dir, merges, metrics) -> dict:
 
 
 def load_slay(curation_dir, n_units: int) -> dict:
-    """``{"merges": [[unit ids], ...], metric: n_units x n_units}`` from :func:`save_slay`."""
+    """Load what :func:`save_slay` wrote.
+
+    Parameters
+    ----------
+    curation_dir : str or pathlib.Path
+        Curation folder.
+    n_units : int
+        Number of units the matrices should cover.
+
+    Returns
+    -------
+    dict
+        ``{"merges": [[unit ids], ...], metric: n_units x n_units}``.
+
+    Raises
+    ------
+    ValueError
+        If the saved data does not match `n_units`.
+    """
     with np.load(Path(curation_dir) / SLAY_FILE) as f:
         members, index = f["group_members"], f["group_index"]
         n_groups = int(index.max()) + 1 if len(index) else 0
@@ -237,6 +304,18 @@ def slay_pairs(slay, unit_ids) -> list:
     when every group has two units (larger groups make it fail), and pairs let
     each one be judged on its own. Accepting two pairs that share a unit
     merges all three, so nothing is lost by splitting a group up.
+
+    Parameters
+    ----------
+    slay : dict
+        Output of :func:`load_slay`.
+    unit_ids : sequence
+        Unit ids in the analyzer's order.
+
+    Returns
+    -------
+    list of list
+        Pairs of unit ids.
     """
     position = {_py(u): i for i, u in enumerate(unit_ids)}
     score = slay["final_metric"]
@@ -251,21 +330,45 @@ def slay_pairs(slay, unit_ids) -> list:
 def automated_labels(
     unit_ids, bc_qm, bc_type_string, ur_labels, slay=None, bc_manual_file=None
 ) -> pd.DataFrame:
-    """Every tool's call for every unit, indexed by unit id in the analyzer's order.
+    """Collect every tool's call for every unit.
 
-    Columns:
-      auto_label     good / MUA / noise where bombcell and UnitRefine agree,
-                     else "" -- the GUI's starting label, so the blanks are
-                     what needs looking at
-      bc_label       bombcell's type, matched to units by phy_clusterID (its
-                     rows are not assumed to be in unit order)
-      bc_manual      your call in bombcell's GUI, if `bc_manual_file` exists;
-                     where set, it stands in for bc_label in auto_label
-      ur_label       UnitRefine's call (noise / sua / mua), and ur_prob its
-                     probability
-      slay_group     the SLAy merge group the unit is in, -1 if none, with
-                     slay_partners the other members and slay_score the best
-                     final_metric to one of them
+    Parameters
+    ----------
+    unit_ids : sequence
+        Unit ids in the analyzer's order.
+    bc_qm : pandas.DataFrame
+        Bombcell quality metrics.
+    bc_type_string : sequence of str
+        Bombcell's type for each row of `bc_qm`.
+    ur_labels : pandas.DataFrame
+        UnitRefine's labels and probabilities.
+    slay : dict, optional
+        Output of :func:`load_slay`.
+    bc_manual_file : str or pathlib.Path, optional
+        Bombcell GUI's manual classifications.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Indexed by unit id in the analyzer's order, with columns:
+
+        - ``auto_label``: good / MUA / noise where bombcell and UnitRefine
+          agree, else "" -- the GUI's starting label, so the blanks are what
+          needs looking at
+        - ``bc_label``: bombcell's type, matched to units by phy_clusterID
+          (its rows are not assumed to be in unit order)
+        - ``bc_manual``: your call in bombcell's GUI, if `bc_manual_file`
+          exists; where set, it stands in for ``bc_label`` in ``auto_label``
+        - ``ur_label``, ``ur_prob``: UnitRefine's call (noise / sua / mua)
+          and its probability
+        - ``slay_group``: the SLAy merge group the unit is in, -1 if none
+        - ``slay_partners``: the other members of the group
+        - ``slay_score``: the best final_metric to one of them
+
+    Raises
+    ------
+    ValueError
+        If the tools' outputs cannot be matched to the units.
     """
     index = pd.Index([_py(u) for u in unit_ids], name="unit_id")
     table = pd.DataFrame(index=index)
@@ -327,6 +430,16 @@ def read_automated_labels(curation_dir) -> pd.DataFrame:
     Read as text and converted column by column: left to pandas, an empty
     label becomes NaN (then the string "nan"), and a partner list that is a
     single unit id becomes a number.
+
+    Parameters
+    ----------
+    curation_dir : str or pathlib.Path
+        Curation folder.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The table, as :func:`automated_labels` returned it.
     """
     table = pd.read_csv(
         Path(curation_dir) / AUTOMATED_FILE, dtype=str, keep_default_na=False
@@ -343,17 +456,34 @@ def read_automated_labels(curation_dir) -> pd.DataFrame:
 
 
 def final_unit_labels(curation_dir, unit_ids=None) -> pd.Series:
-    """Each unit's curated type: your call in bombcell's GUI where you made one, bombcell's otherwise.
+    """Get each unit's curated type.
 
-    Read from ``manual_vs_bombcell_classifications.csv`` and matched to units by
+    That is your call in bombcell's GUI where you made one, bombcell's
+    otherwise. Read from ``manual_vs_bombcell_classifications.csv`` and matched to units by
     its ``unit_id`` column, never by row position. bombcell leaves out units it
     could not measure -- unit 161 of session9, unit 29 of session10 -- and once
     one row is missing, reading rows in order hands every later unit the label
     of the unit after it.
 
-    Returns a Series of ``config.BOMBCELL_KEYS`` names ("GOOD", "MUA", "NOISE",
-    "NON-SOMA", "NA") indexed by unit id. With ``unit_ids``, it is reindexed to
-    those, and a unit bombcell left out is "NA".
+    Parameters
+    ----------
+    curation_dir : str or pathlib.Path
+        Curation folder.
+    unit_ids : sequence, optional
+        Reindex to these units; a unit bombcell left out is "NA".
+
+    Returns
+    -------
+    pandas.Series
+        ``config.BOMBCELL_KEYS`` names ("GOOD", "MUA", "NOISE", "NON-SOMA",
+        "NA") indexed by unit id.
+
+    Raises
+    ------
+    FileNotFoundError
+        If bombcell's GUI has not been used yet.
+    ValueError
+        If a unit id appears more than once.
     """
     path = Path(curation_dir) / BOMBCELL_COMPARISON_FILE
     if not path.is_file():
@@ -384,6 +514,16 @@ def sigui_properties(table) -> dict:
     Text must be a numpy string array. The GUI's unit table drops any column
     of object dtype -- the dtype pandas gives text -- with no more than a
     warning, so every tool's column would otherwise silently not be there.
+
+    Parameters
+    ----------
+    table : pandas.DataFrame
+        Output of :func:`automated_labels`.
+
+    Returns
+    -------
+    dict
+        One 1-D array per column.
     """
     properties = {}
     for col in table.columns:
@@ -396,7 +536,18 @@ def sigui_properties(table) -> dict:
 
 
 def initial_curation(table) -> dict:
-    """A spikeinterface curation (format 2) with ``auto_label`` as the starting labels."""
+    """Build a spikeinterface curation (format 2) with ``auto_label`` as the starting labels.
+
+    Parameters
+    ----------
+    table : pandas.DataFrame
+        Output of :func:`automated_labels`.
+
+    Returns
+    -------
+    dict
+        The curation.
+    """
     return {
         "format_version": "2",
         "unit_ids": [_py(u) for u in table.index],
@@ -418,6 +569,13 @@ def save_curation(curation_data, path) -> None:
     Validated first, so a curation that would not load again is refused while
     it can still be fixed, and written through a temporary file, so a crash
     mid-write cannot leave half of one.
+
+    Parameters
+    ----------
+    curation_data : dict
+        The spikeinterface curation.
+    path : str or pathlib.Path
+        Destination file.
     """
     from spikeinterface.curation.curation_model import Curation
 
@@ -430,12 +588,27 @@ def save_curation(curation_data, path) -> None:
 
 
 def load_curation_result(curation_dir):
-    """``(curation, table)``: what you saved in the GUI, unit by unit.
+    """Load what you saved in the GUI, unit by unit.
 
-    `table` is :func:`automated_labels`'s table with your decisions added --
-    ``quality`` (your label, "" if none), ``removed``, ``merge_group`` (-1 if
-    not merged) and ``split`` -- and is also written to ``curated_units.csv``.
-    `curation` is the spikeinterface model, for ``si.apply_curation``.
+    Parameters
+    ----------
+    curation_dir : str or pathlib.Path
+        Curation folder.
+
+    Returns
+    -------
+    curation : spikeinterface Curation
+        The spikeinterface model, for ``si.apply_curation``.
+    table : pandas.DataFrame
+        :func:`automated_labels`'s table with your decisions added --
+        ``quality`` (your label, "" if none), ``removed``, ``merge_group``
+        (-1 if not merged) and ``split`` -- also written to
+        ``curated_units.csv``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no curation has been saved.
     """
     from spikeinterface.curation import curation_label_to_dataframe, load_curation
 
@@ -469,6 +642,31 @@ def open_gui(analyzer, table, slay, curation_dir, recording=None, title=None):
     spikeinterface-gui's internals (0.13.1); tests/test_curation.py fails if
     they move. Its "Calculate merges" button replaces the list with a
     spikeinterface preset's; reopen the GUI to get SLAy's back.
+
+    Parameters
+    ----------
+    analyzer : spikeinterface SortingAnalyzer
+        Analyzer to curate.
+    table : pandas.DataFrame
+        Output of :func:`automated_labels`.
+    slay : dict or None
+        Output of :func:`load_slay`.
+    curation_dir : str or pathlib.Path
+        Curation folder.
+    recording : spikeinterface BaseRecording, optional
+        Recording for the trace view.
+    title : str, optional
+        Window title.
+
+    Returns
+    -------
+    spikeinterface_gui MainWindow
+        The window.
+
+    Raises
+    ------
+    ValueError
+        If the inputs do not describe the same units.
     """
     from spikeinterface_gui import run_mainwindow
 
@@ -534,7 +732,7 @@ def open_gui(analyzer, table, slay, curation_dir, recording=None, title=None):
 
 
 def launch_gui(processed_dir, curation_dir, analyzer=None, wait_s: float = 5.0):
-    """Start the GUI in its own process; returns it (a ``subprocess.Popen``).
+    """Start the GUI in its own process.
 
     Everything it shows is read from `curation_dir`, so :func:`automated_labels`'
     table must be saved there first. Pass the notebook's `analyzer` to check
@@ -542,6 +740,29 @@ def launch_gui(processed_dir, curation_dir, analyzer=None, wait_s: float = 5.0):
     checks again, but can only say so in ``sigui.log``. Returns once the
     process has survived `wait_s` seconds, which catches failures to start;
     anything later -- the analyzer takes minutes to load -- goes to the log.
+
+    Parameters
+    ----------
+    processed_dir : str or pathlib.Path
+        Run directory holding the analyzer.
+    curation_dir : str or pathlib.Path
+        Curation folder.
+    analyzer : spikeinterface SortingAnalyzer, optional
+        Notebook's analyzer, to check the folder belongs to it.
+    wait_s : float, default 5.0
+        Seconds the process must survive before this returns.
+
+    Returns
+    -------
+    subprocess.Popen
+        The GUI process.
+
+    Raises
+    ------
+    RuntimeError
+        If the GUI fails to start or the folder belongs to another sorting.
+    FileNotFoundError
+        If the curation folder is missing its table.
     """
     processed_dir, curation_dir = Path(processed_dir), Path(curation_dir)
     if analyzer is not None:
@@ -592,7 +813,15 @@ def launch_gui(processed_dir, curation_dir, analyzer=None, wait_s: float = 5.0):
 
 
 def main(argv=None):
-    """``python -m spikeshpc.curation <processed_dir> [--curation-dir DIR]``."""
+    """Run the curation GUI from the command line.
+
+    Usage: ``python -m spikeshpc.curation <processed_dir> [--curation-dir DIR]``.
+
+    Parameters
+    ----------
+    argv : list of str, optional
+        Arguments; ``sys.argv`` if omitted.
+    """
     for key, value in QT_ENV.items():
         os.environ.setdefault(key, value)
     parser = argparse.ArgumentParser(
@@ -656,7 +885,18 @@ def main(argv=None):
 
 # ── helpers ───────────────────────────────────────────────────────────────
 def _py(unit_id):
-    """A unit id as a plain int or str, which JSON and pydantic both take."""
+    """Convert a unit id to a plain int or str, which JSON and pydantic both take.
+
+    Parameters
+    ----------
+    unit_id : int or str or numpy.generic
+        Unit id.
+
+    Returns
+    -------
+    int or str
+        Unit id as a Python scalar.
+    """
     return unit_id.item() if isinstance(unit_id, np.generic) else unit_id
 
 

@@ -15,8 +15,7 @@ _RESERVED_KILOSORT_ARGS = frozenset({
 
 
 def split_settings_overrides(overrides: dict, default_settings: dict, run_kilosort):
-    """Route `overrides` to kilosort's `settings` dict or to `run_kilosort`'s
-    own keyword arguments, by which one actually defines the key.
+    """Route overrides to kilosort's settings or to `run_kilosort`'s arguments.
 
     `run_kilosort4` used to dump every override straight into `settings`, so
     there was no way to reach flags like `do_CAR` or `save_preprocessed_copy`
@@ -26,11 +25,29 @@ def split_settings_overrides(overrides: dict, default_settings: dict, run_kiloso
     lists, so a future kilosort adding or renaming a flag is picked up for
     free rather than needing this file edited too.
 
-    Returns `(settings_updates, kwargs)`. Raises `ValueError` for a key that
-    is neither a settings key nor a `run_kilosort` parameter (almost always a
-    typo -- silently dropping it would be a worse failure than refusing it),
-    and for a key that names an argument the pipeline itself already supplies
-    (see `_RESERVED_KILOSORT_ARGS`).
+    Parameters
+    ----------
+    overrides : dict
+        User-supplied overrides.
+    default_settings : dict
+        Kilosort's ``DEFAULT_SETTINGS``.
+    run_kilosort : callable
+        Kilosort's ``run_kilosort``, whose signature is inspected.
+
+    Returns
+    -------
+    settings_updates : dict
+        Keys that belong in kilosort's ``settings``.
+    kwargs : dict
+        Keys passed directly to `run_kilosort`.
+
+    Raises
+    ------
+    ValueError
+        For a key that is neither a settings key nor a `run_kilosort`
+        parameter (almost always a typo -- silently dropping it would be a
+        worse failure than refusing it), and for a key that names an argument
+        the pipeline itself already supplies (see ``_RESERVED_KILOSORT_ARGS``).
     """
     valid_kwargs = set(inspect.signature(run_kilosort).parameters) - {"settings"}
 
@@ -72,6 +89,22 @@ def run_kilosort4(
     `nblocks`) with keyword arguments `run_kilosort` takes directly (e.g.
     `do_CAR`, `save_preprocessed_copy`, `shank_idx`); see
     :func:`split_settings_overrides` for how they are told apart.
+
+    Parameters
+    ----------
+    output_dir : pathlib.Path
+        Run directory.
+    info : dict
+        Contents of ``concat_info.json``.
+    settings_overrides : dict, optional
+        Overrides for kilosort settings and `run_kilosort` arguments.
+    bad_channels : list, optional
+        Channels to exclude from sorting.
+
+    Returns
+    -------
+    pathlib.Path
+        Kilosort results directory.
     """
     from kilosort import DEFAULT_SETTINGS, run_kilosort
     from kilosort.io import load_probe

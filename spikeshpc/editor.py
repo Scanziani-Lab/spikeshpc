@@ -48,7 +48,24 @@ HELP = (
 
 
 class StateEditor:
-    """Full-session state editor with live thresholds and manual painting."""
+    """Full-session state editor with live thresholds and manual painting.
+
+    Parameters
+    ----------
+    scoring : StateScoring
+        Pipeline scoring to edit.
+    window_s : float, default 600.0
+        Width of the visible window, in seconds.
+    log_signals : tuple of str, default ("movement (mm/s)",)
+        Signals drawn on a log axis.
+    robust : tuple of float, default (0.5, 99.5)
+        Percentiles used to set axis limits.
+
+    Raises
+    ------
+    ValueError
+        If the scoring has no per-bin signals saved.
+    """
 
     def __init__(self, scoring, window_s: float = 600.0, log_signals=("movement (mm/s)",),
                  robust=(0.5, 99.5)):
@@ -203,6 +220,11 @@ class StateEditor:
         Including the movement veto, when the scoring was produced with one:
         re-classifying without it would silently undo every reassignment the
         moment a threshold is nudged.
+
+        Returns
+        -------
+        numpy.ndarray
+            Int16 state code per bin.
         """
         get = self.signals.get
         broadband = get("broadband LFP (PC1)")
@@ -309,7 +331,18 @@ class StateEditor:
 
     # ── interaction ──────────────────────────────────────────────────────
     def _threshold_at(self, event):
-        """The threshold line under the cursor, if any."""
+        """Find the threshold line under the cursor.
+
+        Parameters
+        ----------
+        event : matplotlib.backend_bases.MouseEvent
+            Mouse event.
+
+        Returns
+        -------
+        int or None
+            Index of the threshold line, or None if none is close enough.
+        """
         for i, (ax, line) in enumerate(zip(self.axes, self.threshold_lines)):
             if line is None or event.inaxes is not ax:
                 continue
@@ -393,7 +426,13 @@ class StateEditor:
         )
 
     def paint(self, state):
-        """Assign `state` (or None to clear) to the selected span."""
+        """Assign a state to the selected span.
+
+        Parameters
+        ----------
+        state : int or None
+            State code to assign, or None to clear the manual label.
+        """
         if self._select is None:
             return
         lo, hi = sorted(self._select)
@@ -448,7 +487,7 @@ class StateEditor:
         self._draw()
 
     def reset(self):
-        """Back to the thresholds and states the pipeline produced."""
+        """Restore the thresholds and states the pipeline produced."""
         self._push()
         self.thresholds = dict(self.scoring.thresholds)
         self.manual[:] = -1
@@ -471,6 +510,21 @@ class StateEditor:
         downstream picks the edits up, but only after copying them aside once
         as ``*.orig.*`` -- automatic scoring is cheap to regenerate, an hour
         of hand curation is not.
+
+        Parameters
+        ----------
+        path : str or pathlib.Path, optional
+            Destination; the pipeline's own scoring files if omitted.
+
+        Returns
+        -------
+        pathlib.Path
+            Path of the written JSON file.
+
+        Raises
+        ------
+        ValueError
+            If there is nothing to save to.
         """
         from .states import intervals_from_states
 
@@ -534,6 +588,22 @@ def show_state_editor(scoring, window_s: float = 600.0,
 
     Manual labels are kept separately from the automatic classification, so
     moving a threshold afterwards will not discard them.
+
+    Parameters
+    ----------
+    scoring : StateScoring
+        Pipeline scoring to edit.
+    window_s : float, default 600.0
+        Width of the visible window, in seconds.
+    log_signals : tuple of str, default ("movement (mm/s)",)
+        Signals drawn on a log axis.
+    robust : tuple of float, default (0.5, 99.5)
+        Percentiles used to set axis limits.
+
+    Returns
+    -------
+    StateEditor
+        The open editor.
     """
     return StateEditor(scoring, window_s=window_s, log_signals=log_signals,
                        robust=robust)

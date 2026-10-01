@@ -109,11 +109,26 @@ BUTTON_COLORS = {  # ipywidgets button_style palette
 
 
 def load_gui_inputs(ks_dir, param: dict, save_path=None):
-    """bombcell's ``load_metrics_for_gui``, minus pc_features.
+    """Load what bombcell's ``load_metrics_for_gui`` loads, minus pc_features.
 
-    Returns ``(ephys_data, raw_waveforms, param)``. ``param`` is a copy, with
-    ``ephysKilosortPath`` filled in if it was missing so bombcell can find its
-    precomputed ``for_GUI`` data.
+    Parameters
+    ----------
+    ks_dir : str or pathlib.Path
+        Kilosort results directory.
+    param : dict
+        bombcell parameters.
+    save_path : str or pathlib.Path, optional
+        bombcell output folder.
+
+    Returns
+    -------
+    ephys_data : dict
+        Spike and template data.
+    raw_waveforms : dict
+        Raw waveforms.
+    param : dict
+        A copy of `param`, with ``ephysKilosortPath`` filled in if it was
+        missing so bombcell can find its precomputed ``for_GUI`` data.
     """
     from bombcell.loading_utils import handle_manual_curation
 
@@ -165,16 +180,45 @@ def load_gui_inputs(ks_dir, param: dict, save_path=None):
 
 
 def _gaussian_cut(x, a, x0, sigma, xcut):
-    """bombcell's cutoff Gaussian: zeroed below ``xcut``."""
+    """Evaluate bombcell's cutoff Gaussian, zeroed below `xcut`.
+
+    Parameters
+    ----------
+    x : numpy.ndarray
+        Points to evaluate at.
+    a, x0, sigma : float
+        Amplitude, centre and width.
+    xcut : float
+        Cutoff below which the result is zero.
+
+    Returns
+    -------
+    numpy.ndarray
+        Gaussian values.
+    """
     g = a * np.exp(-((x - x0) ** 2) / (2 * sigma**2))
     g[x < xcut] = 0
     return g
 
 
 def _fit_cut_gaussian(bin_centers, hist_counts, p0, bounds):
-    """bombcell's GUI amplitude fit, exactly; ``None`` where it gives up.
+    """Fit bombcell's GUI amplitude Gaussian, exactly.
 
     Module-level so a worker process can run it.
+
+    Parameters
+    ----------
+    bin_centers, hist_counts : numpy.ndarray
+        Histogram to fit.
+    p0 : sequence of float
+        Initial parameters.
+    bounds : tuple
+        Parameter bounds, as taken by ``scipy.optimize.curve_fit``.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Fitted parameters, or None where the fit gives up.
     """
     from scipy.optimize import curve_fit
 
@@ -192,6 +236,13 @@ class _Value:
 
     bombcell's navigation methods all end in ``self.unit_slider.value = i``;
     standing one of these in for the slider lets them drive Qt widgets as-is.
+
+    Parameters
+    ----------
+    get : callable
+        Returns the current value.
+    set_ : callable
+        Sets the value.
     """
 
     def __init__(self, get, set_):
@@ -209,17 +260,30 @@ class _Value:
 class FastUnitQualityGUI(InteractiveUnitQualityGUI):
     """bombcell's ``InteractiveUnitQualityGUI``, without the per-click rescans.
 
-    ``window`` is ``"qt"`` (controls and figure in one Qt window; needs
-    ``%matplotlib qt``), ``"notebook"`` (bombcell's ipywidgets controls and an
-    inline figure), or ``"auto"`` (Qt if that is the active backend).
-    ``font_scale`` scales every font -- in the figure and the Qt controls --
-    and the room the layout leaves for them; by default 1, or less on a
-    screen under 1000 pixels tall. ``dpi`` (default 100) is the
-    figure's resolution; ``notebook_dpi`` is an older name for it, for the
-    inline figure only. ``prefetch=False`` fits each unit's amplitudes when
-    it is shown rather than in a background process beforehand.
-
-    Everything else is passed to bombcell's GUI unchanged.
+    Parameters
+    ----------
+    ephys_data : dict
+        Spike and template data, as returned by :func:`load_gui_inputs`.
+    quality_metrics : dict
+        bombcell quality metrics.
+    window : {"auto", "qt", "notebook"}, default "auto"
+        ``"qt"`` puts controls and figure in one Qt window (needs
+        ``%matplotlib qt``), ``"notebook"`` uses bombcell's ipywidgets
+        controls and an inline figure, and ``"auto"`` picks Qt if that is the
+        active backend.
+    dpi : float, optional
+        Figure resolution; 100 by default.
+    font_scale : float, optional
+        Scales every font -- in the figure and the Qt controls -- and the room
+        the layout leaves for them; by default 1, or less on a screen under
+        1000 pixels tall.
+    notebook_dpi : float, optional
+        An older name for `dpi`, for the inline figure only.
+    prefetch : bool, default True
+        If False, fit each unit's amplitudes when it is shown rather than in a
+        background process beforehand.
+    **kwargs
+        Passed to bombcell's GUI unchanged.
     """
 
     def __init__(
@@ -269,11 +333,21 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
 
     @contextmanager
     def _scoped_to(self, unit_id):
-        """``self.ephys_data`` restricted to one unit's spikes
+        """Restrict ``self.ephys_data`` to one unit's spikes.
 
         bombcell's panels each find the unit's spikes with
         ``ephys_data["spike_clusters"] == unit_id``; handed only that unit's
         spikes, that mask is all-true and costs nothing.
+
+        Parameters
+        ----------
+        unit_id : int
+            Unit to scope to.
+
+        Yields
+        ------
+        None
+            Control, while the data is scoped.
         """
         if self._view[0] != unit_id:
             idx = self._spike_index(unit_id)
@@ -321,9 +395,20 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
 
     # ── amplitude fit: cached and fitted ahead of time ───────────
     def _amplitude_fit_inputs(self, unit_data):
-        """The amplitudes that bombcell's panel fits, and ``(bin_centers, counts, p0, bounds, bin_width)``.
+        """Prepare the amplitudes that bombcell's panel fits.
 
-        The second output is ``None`` when there are too few spikes to fit.
+        Parameters
+        ----------
+        unit_data : dict
+            The unit's data.
+
+        Returns
+        -------
+        amplitudes : numpy.ndarray
+            The unit's amplitudes.
+        inputs : tuple or None
+            ``(bin_centers, counts, p0, bounds, bin_width)``, or None when
+            there are too few spikes to fit.
         """
         spike_times = unit_data["spike_times"]
         metrics = unit_data["metrics"]
@@ -358,7 +443,20 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         )
 
     def _cut_gaussian_fit(self, unit_id, inputs):
-        """Fit for ``unit_id``: from the cache, the background worker, or here."""
+        """Get the fit for a unit: from the cache, the background worker, or here.
+
+        Parameters
+        ----------
+        unit_id : int
+            Unit to fit.
+        inputs : tuple or None
+            Output of :meth:`_amplitude_fit_inputs`.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Fitted parameters, or None if the fit failed.
+        """
         entry = self._fits.get(unit_id)
         if isinstance(entry, Future):
             # finished, or already running (so its answer comes soonest); a
@@ -375,7 +473,13 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         return self._fits[unit_id]
 
     def _prefetch(self, idx):
-        """Start fitting unit ``idx``'s amplitudes in a worker process."""
+        """Start fitting a unit's amplitudes in a worker process.
+
+        Parameters
+        ----------
+        idx : int
+            Index of the unit.
+        """
         if not self._prefetch_on or idx >= self.n_units:
             return
         unit_id = self.unique_units[idx]
@@ -400,7 +504,15 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
             self._pool = None
 
     def plot_amplitude_fit(self, ax, unit_data):
-        """bombcell's scaling-factor distribution panel, with the fit from :meth:`_cut_gaussian_fit`."""
+        """Draw bombcell's scaling-factor distribution panel, with the fit from :meth:`_cut_gaussian_fit`.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Axes to draw on.
+        unit_data : dict
+            The unit's data.
+        """
         from scipy.stats import norm
 
         font = dict(fontsize=13, fontfamily="DejaVu Sans")
@@ -464,7 +576,13 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
 
     # ── the units-by-depth panel, from numbers computed once ─────────────
     def _location_data(self):
-        """Depth, log firing rate and color of every unit, as bombcell computes them."""
+        """Compute depth, log firing rate and color of every unit, as bombcell does.
+
+        Returns
+        -------
+        tuple
+            The values, cached after the first call.
+        """
         if self._locations is not None:
             return self._locations
 
@@ -513,7 +631,15 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         return self._locations
 
     def plot_unit_location(self, ax, unit_data):
-        """drawn from :meth:`_location_data`: single scatter plot."""
+        """Draw the units-by-depth panel as a single scatter plot from :meth:`_location_data`.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+            Axes to draw on.
+        unit_data : dict
+            The unit's data.
+        """
         loc = self._location_data()
         ax.set_title(
             "Units by depth", fontsize=15, fontweight="bold", fontfamily="DejaVu Sans"
@@ -566,7 +692,13 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
             self._click_canvas = ax.figure.canvas
 
     def _on_location_click(self, event):
-        """Jump to the unit nearest a click on the units-by-depth panel."""
+        """Jump to the unit nearest a click on the units-by-depth panel.
+
+        Parameters
+        ----------
+        event : matplotlib.backend_bases.MouseEvent
+            Mouse event.
+        """
         ax, loc = self._location_ax, self._locations
         if event.inaxes is not ax or event.xdata is None or not len(loc["unit_idx"]):
             return
@@ -611,10 +743,17 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
             plt.show()
 
     def _draw_landscape(self, fig, unit_data):
-        """bombcell's panels for one unit, into ``fig``, in :meth:`_layout`'s grid.
+        """Draw bombcell's panels for one unit into a figure, in :meth:`_layout`'s grid.
 
         In the Qt window the figure outlives the unit, and the histogram panel is
         drawn once; later units clear and redraw only their own panels and move the markers.
+
+        Parameters
+        ----------
+        fig : matplotlib.figure.Figure
+            Figure to draw into.
+        unit_data : dict
+            The unit's data.
         """
         import matplotlib.pyplot as plt
 
@@ -693,6 +832,18 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         as the figure allows, against the right edge. Per-unit panels get the rest:
         four across the top, amplitude and bin metrics below three of them, scaling-factor
         distribution below the fourth.
+
+        Parameters
+        ----------
+        fig : matplotlib.figure.Figure
+            Figure to lay out.
+        n_hist : int, optional
+            Number of histogram panels.
+
+        Returns
+        -------
+        dict
+            The grid specs.
         """
         k = self._font_scale
         if n_hist is None:
@@ -770,13 +921,27 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         return self._grids
 
     def _relayout(self, event=None):
-        """Qt: the window was resized; refit the grid to it."""
+        """Refit the grid after the Qt window was resized.
+
+        Parameters
+        ----------
+        event : matplotlib.backend_bases.Event, optional
+            Resize event.
+        """
         if self._grids is not None and self.fig is not None:
             self._layout(self.fig)
             self.fig.canvas.draw_idle()
 
     def _adopt_histograms(self, fig, axes):
-        """Put bombcell's histograms in the square grid, add key, make markers movable."""
+        """Put bombcell's histograms in the square grid, add the key, and make markers movable.
+
+        Parameters
+        ----------
+        fig : matplotlib.figure.Figure
+            Figure holding the histograms.
+        axes : sequence of matplotlib.axes.Axes
+            bombcell's axes.
+        """
         import matplotlib.pyplot as plt
 
         k = self._font_scale
@@ -860,7 +1025,7 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         self._move_histogram_markers()
 
     def _move_histogram_markers(self):
-        """Put each histogram's marker over the current unit"""
+        """Put each histogram's marker over the current unit."""
         idx = self.current_unit_idx
         for metric, edges, heights, marker in self._hist["markers"]:
             values = np.asarray(self.quality_metrics[metric], dtype=float)
@@ -882,13 +1047,22 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
         label_pt=None,
         tick_pt=None,
     ):
-        """bombcell's font and tick pass
+        """Apply bombcell's font and tick pass.
 
-        ``bare`` are the positions in ``axes`` that bombcell strips of ticks and
-        labels. The other axes get ticks at their limits only. Text that
-        bombcell writes inside the axes (metric boxes, channel numbers,
-        classification labels) is scaled by ``text_scale``. ``label_pt`` and
-        ``tick_pt`` override the axis label and tick sizes.
+        Parameters
+        ----------
+        axes : sequence of matplotlib.axes.Axes
+            Axes to format.
+        bare : sequence of int, default ()
+            Positions in `axes` that bombcell strips of ticks and labels. The
+            other axes get ticks at their limits only.
+        text_scale : float, default 0.55
+            Scale of text that bombcell writes inside the axes (metric boxes,
+            channel numbers, classification labels).
+        min_text_pt : float, default 7.0
+            Smallest text size, in points.
+        label_pt, tick_pt : float, optional
+            Override the axis label and tick sizes.
         """
         k = self._font_scale
         label_pt = (label_pt or FONT["label"]) * k
@@ -932,7 +1106,13 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
 
     # ── navigation ───────────────────────────────────────────────────────
     def goto_unit_number(self, b=None):
-        """no second redraw of the same unit."""
+        """Go to the unit number typed in, without a second redraw of the same unit.
+
+        Parameters
+        ----------
+        b : object, optional
+            Unused widget argument.
+        """
         requested = int(self.unit_input.value)
         ids = self.unique_units
         if requested in ids:
@@ -964,7 +1144,13 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
             print(message)
 
     def _go_to(self, idx):
-        """Qt: show unit ``idx`` and bring the controls into line with it."""
+        """Show a unit and bring the Qt controls into line with it.
+
+        Parameters
+        ----------
+        idx : int
+            Index of the unit.
+        """
         idx = int(min(max(int(idx), 0), self.n_units - 1))
         self.current_unit_idx = idx
         for widget, value in (
@@ -1150,10 +1336,17 @@ class FastUnitQualityGUI(InteractiveUnitQualityGUI):
 
 
 def _scatter_to_markers(ax, min_points: int = 5000):
-    """Redraw big one-color scatters as marker-only lines
+    """Redraw big one-color scatters as marker-only lines.
 
-    Scatter plot draws every point as its own path. This saves
-    time on the amplitude-over-time panel.
+    A scatter plot draws every point as its own path. This saves time on the
+    amplitude-over-time panel.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes whose scatters are replaced.
+    min_points : int, default 5000
+        Smallest scatter that is replaced.
     """
     from matplotlib.collections import PathCollection
 
@@ -1178,7 +1371,17 @@ def _scatter_to_markers(ax, min_points: int = 5000):
 
 
 def _compact_legend(ax, **kwargs):
-    """Redraw ``ax``'s legend with ``kwargs`` (bombcell's are sized for its 30-inch figure)."""
+    """Redraw an axes' legend with new arguments.
+
+    bombcell's legends are sized for its 30-inch figure.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes whose legend is redrawn.
+    **kwargs
+        Passed to ``ax.legend``.
+    """
     legend = ax.get_legend()
     if legend is None:
         return
@@ -1187,12 +1390,35 @@ def _compact_legend(ax, **kwargs):
 
 
 def _qshortcut(QtGui, QtWidgets):
-    """QShortcut moved from QtWidgets (Qt5) to QtGui (Qt6)."""
+    """Find ``QShortcut``, which moved from QtWidgets (Qt5) to QtGui (Qt6).
+
+    Parameters
+    ----------
+    QtGui, QtWidgets : module
+        The Qt modules.
+
+    Returns
+    -------
+    type
+        The ``QShortcut`` class.
+    """
     return getattr(QtGui, "QShortcut", None) or QtWidgets.QShortcut
 
 
 def _default_font_scale(qt: bool) -> float:
-    """1, except in a Qt window on a short screen, where the layout would not fit."""
+    """Choose the default font scale.
+
+    Parameters
+    ----------
+    qt : bool
+        Whether the Qt window is in use.
+
+    Returns
+    -------
+    float
+        1, except in a Qt window on a short screen, where the layout would not
+        fit.
+    """
     if not qt:
         return 1.0
     from matplotlib.backends.qt_compat import QtWidgets
@@ -1206,7 +1432,23 @@ def _default_font_scale(qt: bool) -> float:
 
 
 def _resolve_window(window: str) -> bool:
-    """True for the Qt window, False for the notebook one."""
+    """Decide which window to use.
+
+    Parameters
+    ----------
+    window : {"auto", "qt", "notebook"}
+        Requested window.
+
+    Returns
+    -------
+    bool
+        True for the Qt window, False for the notebook one.
+
+    Raises
+    ------
+    ValueError
+        If `window` is not recognised.
+    """
     import matplotlib
 
     on_qt = "qt" in matplotlib.get_backend().lower()
@@ -1237,13 +1479,47 @@ def unit_quality_gui(
     font_scale: float | None = None,
     prefetch: bool = True,
 ) -> FastUnitQualityGUI:
-    """Drop-in for ``bombcell.unit_quality_gui(ks_dir=..., ...)``; see :class:`FastUnitQualityGUI`.
+    """Open the quality GUI; a drop-in for ``bombcell.unit_quality_gui``.
 
     Run ``%matplotlib qt`` in a cell before this to get the whole GUI in
     one Qt window; under the inline backend it keeps bombcell's notebook
-    controls. ``font_scale`` makes all the text bigger or smaller. Manual
-    classifications are read from and saved to ``save_path`` as bombcell's
-    GUI does.
+    controls. See :class:`FastUnitQualityGUI`.
+
+    Parameters
+    ----------
+    ks_dir : str or pathlib.Path
+        Kilosort results directory.
+    quality_metrics : dict
+        bombcell quality metrics.
+    unit_types : array-like, optional
+        bombcell's classification of each unit.
+    param : dict, optional
+        bombcell parameters.
+    save_path : str or pathlib.Path, optional
+        Where manual classifications are read from and saved to, as
+        bombcell's GUI does.
+    ephys_properties : dict, optional
+        Extra ephys properties for the GUI.
+    auto_advance : bool, default True
+        Move to the next unit after a classification.
+    window : {"auto", "qt", "notebook"}, default "auto"
+        Window to use.
+    dpi : float, optional
+        Figure resolution.
+    font_scale : float, optional
+        Makes all the text bigger or smaller.
+    prefetch : bool, default True
+        Fit amplitudes in a background process.
+
+    Returns
+    -------
+    FastUnitQualityGUI
+        The GUI.
+
+    Raises
+    ------
+    ValueError
+        If `window` is not recognised.
     """
     if param is None:
         raise ValueError(

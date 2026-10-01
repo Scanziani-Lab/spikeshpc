@@ -37,6 +37,20 @@ def break_at(x, y, breaks, wrap_threshold: float = 180.0):
     and a full-height plunge on a linear axis, so a plain line reports a
     violent turn where the animal turned a degree. And a splice between two
     non-adjacent stretches of the recording is not a movement at all.
+
+    Parameters
+    ----------
+    x, y : array-like
+        Line coordinates.
+    breaks : array-like
+        Indices after which the line is cut outright.
+    wrap_threshold : float, default 180.0
+        A step in `y` larger than this is treated as a wrap-around and cut.
+
+    Returns
+    -------
+    x, y : numpy.ndarray
+        Copies with NaN inserted at the cuts.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -53,14 +67,30 @@ def break_at(x, y, breaks, wrap_threshold: float = 180.0):
 
 
 def wrap_through(x, y, breaks=(), top: float = 360.0):
-    """A heading line that crosses north the short way, out of one edge of the axis and in at the other.
+    """Draw a heading line that crosses north the short way.
+
+    The line leaves one edge of the axis and comes back in at the other.
 
     Where two neighbouring points are more than half the ring apart on the
     axis, the short way between them crosses 0/360: the line runs to the top
     (or bottom) edge at the time it would reach it, breaks, and comes back in
     from the opposite edge -- as the heading itself does. :func:`break_at`
     cuts there instead, which leaves a gap wherever the heading crosses north.
-    ``breaks`` are cut outright (a splice, say), as in :func:`break_at`.
+    `breaks` are cut outright (a splice, say), as in :func:`break_at`.
+
+    Parameters
+    ----------
+    x, y : array-like
+        Line coordinates; `y` is a heading.
+    breaks : array-like, default ()
+        Indices after which the line is cut outright.
+    top : float, default 360.0
+        Top of the heading axis.
+
+    Returns
+    -------
+    x, y : numpy.ndarray
+        Copies with points inserted where the line crosses an edge.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -92,19 +122,43 @@ class DecodedWidget:
     window. ``home`` / ``end`` jump to the first and last decoded bin, and the
     slider at the bottom goes anywhere in between.
 
-    ``mark`` is an optional boolean per decoded bin, shaded gray behind the
-    traces and named ``mark_label`` in the legend -- the bins where the animal
-    was still, say, so a failure can be seen against what the animal was doing
-    rather than inferred from the heading trace going flat.
-
-    ``raster`` (a :class:`~spikeshpc.raster.UnitRaster`, from
-    :func:`~spikeshpc.raster.unit_raster`) adds the decoder's units' spikes
-    above the heading: a row per unit, sorted by preferred direction and
-    colored by it through ``raster_color``. A window holding more than
-    ``max_raster_spikes`` spikes shows a note instead of the ticks.
-
     Requires an interactive matplotlib backend (``%matplotlib widget`` or
     ``%matplotlib qt``) and the figure to have keyboard focus: click it once.
+
+    Parameters
+    ----------
+    decoded : Decoded
+        The decode to show.
+    window_s : float, default 60.0
+        Initial window length, in seconds.
+    show_posterior : bool, default True
+        Draw the posterior behind the heading.
+    cmap : str, default "Blues"
+        Colormap of the posterior.
+    min_window_s : float, default 1.0
+        Shortest window.
+    max_window_s : float, optional
+        Longest window.
+    mark : array-like of bool, optional
+        One value per decoded bin, shaded gray behind the traces -- the bins
+        where the animal was still, say, so a failure can be seen against what
+        the animal was doing rather than inferred from the heading trace going
+        flat.
+    mark_label : str, default "still"
+        Legend name of `mark`.
+    raster : spikeshpc.raster.UnitRaster, optional
+        Spikes of the decoder's units, from
+        :func:`~spikeshpc.raster.unit_raster`, drawn above the heading: a row
+        per unit, sorted by preferred direction and colored by it.
+    raster_color : str or Colormap, default "hsv"
+        Colormap for the raster.
+    max_raster_spikes : int, default 150000
+        A window holding more spikes shows a note instead of the ticks.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two bins were decoded.
     """
 
     def __init__(
@@ -227,7 +281,7 @@ class DecodedWidget:
         self.t0 = float(np.clip(self.t0, 0.0, max(self.total_s - self.window_s, 0.0)))
 
     def _sync_slider(self):
-        """Keep the slider with the view without it firing back at us."""
+        """Move the slider with the view without it firing back."""
         self._syncing = True
         try:
             self.slider.valmax = max(self.total_s - self.window_s, 1e-9)
@@ -382,10 +436,24 @@ def show_decoded(decoded, window_s: float = 60.0, **kwargs) -> DecodedWidget:
     ``left``/``right`` pan by half a window, ``up``/``down`` change how much
     time is shown, ``home``/``end`` jump to either end, and the slider goes
     anywhere. Dashed red lines mark splices between non-adjacent stretches of
-    the recording, where the decoder restarted from a uniform prior. Pass
-    ``mark`` (a boolean per decoded bin) to shade bins gray, e.g. stillness,
-    and ``raster`` (from :func:`~spikeshpc.raster.unit_raster`) for the
-    decoder's units' spikes above the heading, colored by preferred direction
-    through ``raster_color`` (default ``"hsv"``).
+    the recording, where the decoder restarted from a uniform prior.
+
+    Parameters
+    ----------
+    decoded : Decoded
+        The decode to show.
+    window_s : float, default 60.0
+        Initial window length, in seconds.
+    **kwargs
+        Passed to :class:`DecodedWidget`: for example ``mark`` (a boolean per
+        decoded bin, to shade bins gray, e.g. stillness) and ``raster`` (from
+        :func:`~spikeshpc.raster.unit_raster`) for the decoder's units' spikes
+        above the heading, colored by preferred direction through
+        ``raster_color``.
+
+    Returns
+    -------
+    DecodedWidget
+        The open widget.
     """
     return DecodedWidget(decoded, window_s=window_s, **kwargs)

@@ -77,12 +77,36 @@ __all__ = [
 
 # ── angles ───────────────────────────────────────────────────────────────
 def circular_difference(a_deg, b_deg) -> np.ndarray:
-    """Signed a - b, wrapped into (-180, 180]."""
+    """Compute the signed difference a - b, wrapped into (-180, 180].
+
+    Parameters
+    ----------
+    a_deg, b_deg : array-like
+        Angles in degrees.
+
+    Returns
+    -------
+    numpy.ndarray
+        Difference in degrees.
+    """
     return (np.asarray(a_deg, float) - np.asarray(b_deg, float) + 180.0) % 360.0 - 180.0
 
 
 def circular_mean(angles_deg, axis=None) -> np.ndarray:
-    """Mean direction in [0, 360), from the resultant vector."""
+    """Compute the mean direction from the resultant vector.
+
+    Parameters
+    ----------
+    angles_deg : array-like
+        Angles in degrees.
+    axis : int, optional
+        Axis to average over; all by default.
+
+    Returns
+    -------
+    numpy.ndarray
+        Mean direction in [0, 360), in degrees.
+    """
     radians = np.deg2rad(np.asarray(angles_deg, dtype=float))
     resultant = np.exp(1j * radians).mean(axis=axis)
     return np.rad2deg(np.angle(resultant)) % 360.0
@@ -96,6 +120,16 @@ def circular_correlation(a_deg, b_deg) -> float:
     Pearson's r on raw angles instead would be wrecked by the 0/360 wrap --
     a decoder that is perfect except for tracking across north would score
     near zero.
+
+    Parameters
+    ----------
+    a_deg, b_deg : array-like
+        Angles in degrees, of equal length.
+
+    Returns
+    -------
+    float
+        Coefficient in [-1, 1]; NaN if undefined.
     """
     a = np.deg2rad(np.asarray(a_deg, dtype=float))
     b = np.deg2rad(np.asarray(b_deg, dtype=float))
@@ -125,6 +159,23 @@ class DecoderData:
     ``heading_deg`` is the circular mean of the headings of the frames inside
     the bin (identical to the tuning-curve convention of heading-at-interval-
     start when ``bin_frames == 1``).
+
+    Attributes
+    ----------
+    counts : numpy.ndarray
+        Spike counts, shape (n_bins, n_units).
+    heading_deg : numpy.ndarray
+        Heading per bin, in degrees.
+    duration_s : numpy.ndarray
+        Measured duration of each bin, in seconds.
+    time_s : numpy.ndarray
+        Start time of each bin, in seconds.
+    edges : numpy.ndarray
+        Bin edges, in seconds.
+    unit_ids : numpy.ndarray
+        Units, in the order of the columns of `counts`.
+    bin_frames : int
+        Camera frames per bin.
     """
 
     counts: np.ndarray  # (n_bins, n_units), integer spike counts
@@ -145,7 +196,13 @@ class DecoderData:
 
     @property
     def bin_s(self) -> float:
-        """Nominal bin width -- the median, since frame intervals wobble."""
+        """Get the nominal bin width -- the median, since frame intervals wobble.
+
+        Returns
+        -------
+        float
+            Bin width, in seconds.
+        """
         return float(np.median(self.duration_s))
 
     def __repr__(self) -> str:
@@ -156,12 +213,41 @@ class DecoderData:
 
 
 def _as_sorting(obj):
-    """Accept either a sorting or a sorting analyzer."""
+    """Accept either a sorting or a sorting analyzer.
+
+    Parameters
+    ----------
+    obj : BaseSorting or SortingAnalyzer
+        Object to unwrap.
+
+    Returns
+    -------
+    BaseSorting
+        The sorting.
+    """
     return obj.sorting if hasattr(obj, "sorting") else obj
 
 
 def _unit_positions(have, want) -> np.ndarray:
-    """Where each of `want` sits in `have`, refusing any that are not there."""
+    """Find where each wanted unit sits in a list of available ones.
+
+    Parameters
+    ----------
+    have : sequence
+        Available unit ids.
+    want : sequence
+        Unit ids to locate.
+
+    Returns
+    -------
+    numpy.ndarray of int
+        Position of each of `want` in `have`.
+
+    Raises
+    ------
+    ValueError
+        If any unit is not in `have`.
+    """
     position = {u: i for i, u in enumerate(np.asarray(have).tolist())}
     missing = [u for u in want if u not in position]
     if missing:
@@ -172,7 +258,7 @@ def _unit_positions(have, want) -> np.ndarray:
 
 
 def _frames_per_bin(bin_s: float, frame_s: float, tolerance: float = 0.01) -> int:
-    """How many camera frames fit in ``bin_s``, forgiving a near-miss.
+    """Count how many camera frames fit in a bin, forgiving a near-miss.
 
     Truncating the ratio is the obvious thing and it is wrong exactly where it
     is most often used. Asking for a bin of a whole number of frames -- 1/60 s
@@ -185,6 +271,20 @@ def _frames_per_bin(bin_s: float, frame_s: float, tolerance: float = 0.01) -> in
     number, and anything else still rounds down. Asking for 1.5 frames still
     gets one; asking for what you thought was two gets two; asking for less
     than a frame gets one, since a bin has to hold something.
+
+    Parameters
+    ----------
+    bin_s : float
+        Target bin width, in seconds.
+    frame_s : float
+        Camera frame interval, in seconds.
+    tolerance : float, default 0.01
+        How close to a whole number the ratio may be.
+
+    Returns
+    -------
+    int
+        Frames per bin, at least 1.
     """
     ratio = bin_s / frame_s
     nearest = round(ratio)
@@ -208,9 +308,30 @@ def prepare_decoder_data(
     -- the head-direction-tuned ones -- and their order is preserved
     throughout.
 
-    ``bin_s`` is a *target*: the grid is the largest whole number of camera
-    frames not exceeding it, so bin edges stay on measured timestamps. At 120
-    fps the 50 ms default is 6 frames.
+    Parameters
+    ----------
+    sorting : spikeinterface BaseSorting or SortingAnalyzer
+        Source of the spike trains.
+    unit_ids : sequence
+        Units to decode from -- the head-direction-tuned ones. Their order is
+        preserved throughout.
+    heading_deg, frame_times : array-like
+        The shutter-aligned arrays from ``1_calculate_HD_tuning.ipynb``: same
+        length, one entry per shutter-closure event, on the recording's clock.
+    bin_s : float, default 0.05
+        A *target*: the grid is the largest whole number of camera frames not
+        exceeding it, so bin edges stay on measured timestamps. At 120 fps the
+        50 ms default is 6 frames.
+
+    Returns
+    -------
+    DecoderData
+        Counts and heading on the decoder's grid.
+
+    Raises
+    ------
+    ValueError
+        If there are no units or the inputs are inconsistent.
     """
     sorting = _as_sorting(sorting)
     heading_deg = np.asarray(heading_deg, dtype=float)
@@ -260,26 +381,56 @@ def prepare_decoder_data(
 
 
 def state_interval_mask(data: DecoderData, intervals, states=("WAKE",)) -> np.ndarray:
-    """Which decoder bins lie wholly inside `states`.
+    """Find which decoder bins lie wholly inside the given states.
 
     A bin survives only if both of its edges do, which is the same rule
     :func:`spikeshpc.states.intervals_between_frames` applies to inter-frame
     intervals: a bin straddling a state boundary belongs to neither state.
+
+    Parameters
+    ----------
+    data : DecoderData
+        Binned data.
+    intervals : dict
+        ``{state: [[start, stop], ...]}``.
+    states : tuple of str, default ("WAKE",)
+        States to keep.
+
+    Returns
+    -------
+    numpy.ndarray of bool
+        One value per bin.
     """
     _, keep = frames_in_states(data.edges, intervals, states)
     return keep
 
 
 def bins_in_interval_mask(data: DecoderData, interval_mask) -> np.ndarray:
-    """Which decoder bins have every one of their frame intervals in `interval_mask`.
+    """Find which decoder bins have every one of their frame intervals in a mask.
 
-    ``interval_mask`` is over the inter-frame intervals of the ``frame_times``
-    the data was prepared from -- the mask the tuning functions take, e.g.
-    from :func:`spikeshpc.states.behavior_interval_mask`. A bin spans
-    ``bin_frames`` of those intervals and survives only if all of them do.
-    :func:`state_interval_mask` can only test a bin's two edges, which is
-    enough for state epochs that last minutes but lets through a frame excluded
-    from the middle of a bin.
+    A bin spans ``bin_frames`` of the inter-frame intervals and survives only
+    if all of them do. :func:`state_interval_mask` can only test a bin's two
+    edges, which is enough for state epochs that last minutes but lets through
+    a frame excluded from the middle of a bin.
+
+    Parameters
+    ----------
+    data : DecoderData
+        Binned data.
+    interval_mask : array-like of bool
+        Mask over the inter-frame intervals of the ``frame_times`` the data
+        was prepared from -- the mask the tuning functions take, e.g. from
+        :func:`spikeshpc.states.behavior_interval_mask`.
+
+    Returns
+    -------
+    numpy.ndarray of bool
+        One value per bin.
+
+    Raises
+    ------
+    ValueError
+        If the mask does not match the data.
     """
     interval_mask = np.asarray(interval_mask, dtype=bool)
     n_used = data.n_bins * data.bin_frames
@@ -298,7 +449,20 @@ def bins_in_interval_mask(data: DecoderData, interval_mask) -> np.ndarray:
 
 
 def restrict_data(data: DecoderData, unit_ids) -> DecoderData:
-    """The same bins, holding only `unit_ids`' counts, in that order."""
+    """Restrict the data to some units, keeping the same bins.
+
+    Parameters
+    ----------
+    data : DecoderData
+        Binned data.
+    unit_ids : sequence
+        Units to keep, in the order wanted.
+
+    Returns
+    -------
+    DecoderData
+        Data holding only those units' counts, in that order.
+    """
     unit_ids = list(unit_ids)
     index = _unit_positions(data.unit_ids, unit_ids)
     return replace(
@@ -334,8 +498,31 @@ def split_train_test(
     choice when you care about applying the decoder to a later block (REM after
     a wake session, say). Expect it to score worse.
 
-    Returns two boolean arrays over all bins; both are subsets of ``mask`` and
-    they do not overlap.
+    Parameters
+    ----------
+    data : DecoderData
+        Binned data.
+    mask : numpy.ndarray of bool
+        Bins to divide.
+    test_fraction : float, default 0.3
+        Fraction of the masked time held out, in (0, 1).
+    mode : {"blocks", "contiguous"}, default "blocks"
+        How to carve the held-out part.
+    block_s : float, default 60.0
+        Block length for ``mode="blocks"``, in seconds.
+    seed : int, default 0
+        Seed for assigning blocks.
+
+    Returns
+    -------
+    train, test : numpy.ndarray of bool
+        Arrays over all bins; both are subsets of `mask` and they do not
+        overlap.
+
+    Raises
+    ------
+    ValueError
+        If `test_fraction` or `mode` is invalid, or `mask` keeps no bins.
     """
     mask = np.asarray(mask, dtype=bool)
     if mask.shape != (data.n_bins,):
@@ -392,6 +579,21 @@ class EncodingModel:
     :func:`spikeshpc.optitrack.tuning.compute_hd_tuning_curve` builds and that
     the units were selected on -- so what the decoder believes about a unit is
     exactly the curve you looked at.
+
+    Attributes
+    ----------
+    bin_centers_deg : numpy.ndarray
+        Centres of the heading bins.
+    rate_hz : numpy.ndarray
+        Firing rate, shape (n_units, n_angle_bins).
+    unit_ids : numpy.ndarray
+        Units, in row order.
+    occupancy_s : numpy.ndarray
+        Training time spent in each heading bin, in seconds.
+    train_time_s : float
+        Total training time, in seconds.
+    min_rate_hz : float
+        Floor applied to the curves.
     """
 
     bin_centers_deg: np.ndarray
@@ -438,7 +640,7 @@ def fit_encoding_model(
     min_rate_hz: float = 0.1,
     min_occupancy_s: float = 1.0,
 ) -> EncodingModel:
-    """Tuning curves for every unit, from the bins under `mask` only.
+    """Fit tuning curves for every unit, from the bins under `mask` only.
 
     ``min_rate_hz`` floors the curves. Without it an angle a unit happened
     never to fire at has rate zero, its log-likelihood is -inf, and a single
@@ -449,6 +651,31 @@ def fit_encoding_model(
     Angle bins the animal barely visited during training are reported in
     ``occupancy_s``; a warning names them, because a curve there is an estimate
     from almost nothing and the decoder has no way to know that.
+
+    Parameters
+    ----------
+    data : DecoderData
+        Binned data.
+    mask : numpy.ndarray of bool
+        Training bins.
+    n_angle_bins : int, default 180
+        Number of heading bins.
+    smooth_sigma_deg : float, default 10.0
+        Width of the circular smoothing, in degrees.
+    min_rate_hz : float, default 0.1
+        Floor under the curves.
+    min_occupancy_s : float, default 1.0
+        Heading bins visited for less than this are reported in a warning.
+
+    Returns
+    -------
+    EncodingModel
+        The fitted model.
+
+    Raises
+    ------
+    ValueError
+        If `mask` keeps no bins or the inputs are inconsistent.
     """
     mask = np.asarray(mask, dtype=bool)
     if mask.shape != (data.n_bins,):
@@ -497,11 +724,23 @@ def fit_encoding_model(
 
 
 def restrict_model(model: EncodingModel, unit_ids) -> EncodingModel:
-    """The same encoding model with only `unit_ids`, in that order.
+    """Restrict an encoding model to some units.
 
     Each unit's curve is fitted from its own spikes alone, so this is exactly
     the model that fitting those units by themselves would have produced --
     which is what lets one baseline fit serve every subset of it.
+
+    Parameters
+    ----------
+    model : EncodingModel
+        Model to restrict.
+    unit_ids : sequence
+        Units to keep, in the order wanted.
+
+    Returns
+    -------
+    EncodingModel
+        The model with only those units.
     """
     unit_ids = list(unit_ids)
     index = _unit_positions(model.unit_ids, unit_ids)
@@ -516,12 +755,29 @@ def movement_variance(
     mask: np.ndarray | None = None,
     per_100hz: float = 2.0,
 ) -> float:
-    """Random-walk variance in deg^2 per decoder bin.
+    """Compute the random-walk variance in deg^2 per decoder bin.
 
-    With ``mask`` given, it is measured: the variance of the frame-to-frame
-    change in heading, scaled to the bin width. With ``mask`` None it is the
-    ``per_100hz`` convention carried over from ``run_decoder.py`` -- deg^2 per
-    10 ms bin, scaled linearly with bin duration as diffusion requires.
+    Parameters
+    ----------
+    data : DecoderData
+        Binned data.
+    mask : numpy.ndarray of bool, optional
+        If given, the variance is measured: the variance of the frame-to-frame
+        change in heading, scaled to the bin width. If None it is the
+        `per_100hz` convention carried over from ``run_decoder.py``.
+    per_100hz : float, default 2.0
+        deg^2 per 10 ms bin, scaled linearly with bin duration as diffusion
+        requires.
+
+    Returns
+    -------
+    float
+        Variance in deg^2 per bin.
+
+    Raises
+    ------
+    ValueError
+        If there are not enough adjacent bins under `mask` to measure it.
     """
     if mask is None:
         return float(per_100hz) * data.bin_s * 100.0
@@ -538,7 +794,7 @@ def movement_variance(
 def ring_transition(
     n_angle_bins: int, movement_var_deg2: float, leak: float = 1e-12
 ) -> np.ndarray:
-    """p(angle now | angle one bin ago) as a wrapped Gaussian random walk.
+    """Build p(angle now | angle one bin ago) as a wrapped Gaussian random walk.
 
     Row-stochastic and symmetric, since the ring is uniform: row ``i`` is the
     kernel centred on bin ``i``, wrapped at 0/360 so that north has neighbours
@@ -557,6 +813,26 @@ def ring_transition(
     control worth running when a decoded trajectory looks suspiciously smooth:
     a strong random-walk prior can manufacture smoothness out of noise, and if
     the uniform decode still tracks the animal then the smoothness was real.
+
+    Parameters
+    ----------
+    n_angle_bins : int
+        Number of heading bins, at least 2.
+    movement_var_deg2 : float
+        Variance of the random walk, in deg^2 per bin; ``inf`` gives a uniform
+        transition.
+    leak : float, default 1e-12
+        Weight of the uniform component.
+
+    Returns
+    -------
+    numpy.ndarray
+        Row-stochastic matrix, shape (n_angle_bins, n_angle_bins).
+
+    Raises
+    ------
+    ValueError
+        If there are fewer than 2 angle bins.
     """
     if n_angle_bins < 2:
         raise ValueError("need at least 2 angle bins")
@@ -589,13 +865,27 @@ def ring_transition(
 def poisson_log_likelihood(
     counts: np.ndarray, duration_s: np.ndarray, rate_hz: np.ndarray
 ) -> np.ndarray:
-    """log p(spikes in bin | head direction), up to a constant, per (bin, angle).
+    """Compute log p(spikes in bin | head direction), up to a constant, per (bin, angle).
 
     Units are taken to be conditionally independent given head direction and
     Poisson within a bin, so the population log-likelihood is the sum over
     units of ``n log(lambda dt) - lambda dt``. Terms that do not depend on the
     angle -- ``log(dt)`` and ``log(n!)`` -- are dropped: they shift every
     column of a row by the same amount and vanish in the normalization.
+
+    Parameters
+    ----------
+    counts : numpy.ndarray
+        Spike counts, shape (n_bins, n_units).
+    duration_s : numpy.ndarray
+        Duration of each bin, in seconds.
+    rate_hz : numpy.ndarray
+        Tuning curves, shape (n_units, n_angle_bins).
+
+    Returns
+    -------
+    numpy.ndarray
+        Log-likelihood, shape (n_bins, n_angle_bins).
     """
     counts = np.asarray(counts, dtype=float)
     rate_hz = np.asarray(rate_hz, dtype=float)
@@ -604,12 +894,28 @@ def poisson_log_likelihood(
 
 
 def _runs(mask: np.ndarray, duration_s: np.ndarray, max_gap_s: float, min_run_s: float):
-    """Contiguous stretches of `mask`, as (start, stop) slices into all bins.
+    """Find the contiguous stretches of a mask.
 
     Belief propagates along a run and is reset at each new one: the prior says
     the head has not moved far since the previous bin, which is a claim about
     an adjacent bin and nothing else. Carrying it across the hour between two
     wake epochs would assert the animal ended where it began.
+
+    Parameters
+    ----------
+    mask : numpy.ndarray of bool
+        Bins to decode.
+    duration_s : numpy.ndarray
+        Duration of each bin, in seconds.
+    max_gap_s : float
+        Largest gap, in seconds, that still joins two bins into one run.
+    min_run_s : float
+        Shortest run kept.
+
+    Returns
+    -------
+    list of tuple of slice or int
+        ``(start, stop)`` into all bins, one per stretch.
     """
     mask = np.asarray(mask, dtype=bool).copy()
     mask &= duration_s <= max_gap_s  # a stretched bin is a hole in the tracking
@@ -636,6 +942,11 @@ class _RingStep:
 
     Rows are independent: a row of a batch comes out exactly as it would on
     its own, which is what lets shuffles be decoded in batches.
+
+    Parameters
+    ----------
+    transition : numpy.ndarray
+        Circulant transition matrix from :func:`ring_transition`.
     """
 
     def __init__(self, transition):
@@ -679,7 +990,20 @@ class _RingStep:
 
 
 def _normalize_rows(p, uniform):
-    """Each row divided by its total; a row with nothing in it becomes uniform."""
+    """Normalise each row; a row with nothing in it becomes uniform.
+
+    Parameters
+    ----------
+    p : numpy.ndarray
+        Non-negative rows.
+    uniform : numpy.ndarray
+        Row substituted for an empty one.
+
+    Returns
+    -------
+    numpy.ndarray
+        Rows summing to 1.
+    """
     total = p.sum(axis=1, keepdims=True)
     if (total > 0).all():
         return p / total
@@ -690,7 +1014,7 @@ def _normalize_rows(p, uniform):
 
 
 def _forward_backward(log_likelihood, transition, acausal=True):
-    """Causal and acausal posteriors over one run, by the HMM forward-backward.
+    """Compute causal and acausal posteriors over one run, by the HMM forward-backward.
 
     The causal posterior at bin t uses spikes up to t only, so it is what a
     decoder running live would report. The acausal one also uses everything
@@ -699,6 +1023,22 @@ def _forward_backward(log_likelihood, transition, acausal=True):
 
     ``transition`` is a matrix or a :class:`_RingStep`. Each step works on a
     one-row batch, exactly as :func:`_shuffle_null` steps its batches.
+
+    Parameters
+    ----------
+    log_likelihood : numpy.ndarray
+        Shape (n_bins, n_angle_bins), from :func:`poisson_log_likelihood`.
+    transition : numpy.ndarray or _RingStep
+        Transition model.
+    acausal : bool, default True
+        Also compute the smoothed posterior.
+
+    Returns
+    -------
+    causal : numpy.ndarray
+        Posterior using spikes up to each bin only.
+    smoothed : numpy.ndarray or None
+        Posterior using all spikes; None if not `acausal`.
     """
     step = transition if isinstance(transition, _RingStep) else _RingStep(transition)
     n_t, n_x = log_likelihood.shape
@@ -736,6 +1076,35 @@ class Decoded:
     ``actual_deg`` is the measured heading. During REM it is whatever the
     OptiTrack rigid body was pointing at while the animal slept, so it is not
     ground truth for anything and ``metrics`` is left empty.
+
+    Attributes
+    ----------
+    label : str
+        Name of the decode.
+    time_s, duration_s : numpy.ndarray
+        Start time and duration of each decoded bin, in seconds.
+    decoded_deg : numpy.ndarray
+        MAP heading per bin, in degrees.
+    actual_deg : numpy.ndarray
+        Measured heading per bin, in degrees.
+    error_deg : numpy.ndarray
+        Signed circular error per bin, in degrees.
+    posterior_max : numpy.ndarray
+        Peak of the posterior per bin: how sure the decoder was.
+    entropy_bits : numpy.ndarray
+        Entropy of the posterior per bin, in bits.
+    n_spikes : numpy.ndarray
+        Spikes per bin.
+    run_index : numpy.ndarray
+        Which contiguous stretch each bin belongs to.
+    bin_index : numpy.ndarray
+        Index of each bin in the full grid.
+    bin_centers_deg : numpy.ndarray
+        Centres of the heading bins.
+    posterior : numpy.ndarray or None
+        Full posterior, if kept.
+    metrics : dict
+        Output of :func:`decoding_metrics`.
     """
 
     label: str
@@ -767,7 +1136,7 @@ class Decoded:
 
 
 def decoding_metrics(decoded_deg, actual_deg, tolerance_deg: float = 30.0) -> dict:
-    """How close the decode came, by four measures that fail differently.
+    """Score how close the decode came, by four measures that fail differently.
 
     The median absolute error is the headline because it is what a reader
     pictures and because it survives the occasional bin where the population
@@ -783,6 +1152,20 @@ def decoding_metrics(decoded_deg, actual_deg, tolerance_deg: float = 30.0) -> di
     recordings is read by a decoder fitted on the first at a constant offset,
     which the raw error scores as failure and the corrected error does not. On
     a model's own held-out data the offset is near zero and the two agree.
+
+    Parameters
+    ----------
+    decoded_deg, actual_deg : array-like
+        Decoded and measured heading, in degrees.
+    tolerance_deg : float, default 30.0
+        Error counted as within tolerance.
+
+    Returns
+    -------
+    dict
+        Median, mean and RMS absolute error, ``frac_within_deg``, the circular
+        correlation, ``offset_deg`` and the ``*_corrected_deg`` pair; empty if
+        there is nothing finite to score.
     """
     error = circular_difference(decoded_deg, actual_deg)
     error = error[np.isfinite(error)]
@@ -823,6 +1206,43 @@ def decode(
     ``movement_var_deg2`` defaults to the ``run_decoder.py`` convention for
     this bin width (see :func:`movement_variance`); pass ``np.inf`` to drop the
     dynamics prior and decode each bin from its own spikes alone.
+
+    Parameters
+    ----------
+    data : DecoderData
+        Binned data.
+    model : EncodingModel
+        Fitted model.
+    mask : numpy.ndarray of bool
+        Bins to decode.
+    movement_var_deg2 : float, optional
+        Random-walk variance, in deg^2 per bin. Defaults to the
+        ``run_decoder.py`` convention for this bin width (see
+        :func:`movement_variance`); ``np.inf`` drops the dynamics prior.
+    acausal : bool, default True
+        Use spikes after each bin as well as before.
+    max_gap_s : float, default 1.0
+        Largest gap that still joins two bins into one stretch.
+    min_run_s : float, default 1.0
+        Shortest stretch decoded.
+    keep_posterior : bool, default True
+        Keep the full posterior in the result.
+    with_metrics : bool, default True
+        Score the decode against the measured heading.
+    tolerance_deg : float, default 30.0
+        Tolerance for ``frac_within_deg``.
+    label : str, default "decode"
+        Name of the decode.
+
+    Returns
+    -------
+    Decoded
+        The decoded stretch.
+
+    Raises
+    ------
+    ValueError
+        If the inputs are inconsistent or no bin can be decoded.
     """
     mask = np.asarray(mask, dtype=bool)
     if mask.shape != (data.n_bins,):
@@ -897,7 +1317,18 @@ def decode(
 
 
 def _entropy_bits(posterior: np.ndarray) -> np.ndarray:
-    """Entropy of each posterior along its last axis, in bits."""
+    """Compute the entropy of each posterior.
+
+    Parameters
+    ----------
+    posterior : numpy.ndarray
+        Probabilities along the last axis.
+
+    Returns
+    -------
+    numpy.ndarray
+        Entropy in bits.
+    """
     with np.errstate(divide="ignore", invalid="ignore"):
         terms = np.where(posterior > 0, posterior * np.log2(posterior), 0.0)
     return -terms.sum(axis=-1)
@@ -906,7 +1337,24 @@ def _entropy_bits(posterior: np.ndarray) -> np.ndarray:
 def _decode_metrics(
     decoded_deg, actual_deg, posterior_max, entropy_bits, with_metrics, tolerance_deg
 ) -> dict:
-    """A decode's ``metrics``: shared by :func:`decode` and the shuffle workers."""
+    """Compute a decode's ``metrics``, shared by :func:`decode` and the shuffle workers.
+
+    Parameters
+    ----------
+    decoded_deg, actual_deg : numpy.ndarray
+        Decoded and measured heading, in degrees.
+    posterior_max, entropy_bits : numpy.ndarray
+        Per-bin confidence measures.
+    with_metrics : bool
+        Score against the measured heading.
+    tolerance_deg : float
+        Tolerance for ``frac_within_deg``.
+
+    Returns
+    -------
+    dict
+        The metrics.
+    """
     metrics = (
         decoding_metrics(decoded_deg, actual_deg, tolerance_deg) if with_metrics else {}
     )
@@ -923,28 +1371,47 @@ def metrics_by_group(
     extra: dict | None = None,
     tolerance_deg: float | None = None,
 ) -> dict:
-    """The decode's metrics separately for each group of its bins.
+    """Score the decode separately for each group of its bins.
 
-    ``labels`` has one entry per decoded bin: "moving"/"still", say, or a
-    binned :func:`spikeshpc.states.seconds_since`. The question is *where* a
-    decode fails rather than how often, and which explanation the pattern
-    fits. A group that is wrong but confident is a population reporting some
-    other heading; one that is wrong and unsure had too little to go on, and
-    ``population_rate_hz`` says whether that is because the units went quiet.
+    The question is *where* a decode fails rather than how often, and which
+    explanation the pattern fits. A group that is wrong but confident is a
+    population reporting some other heading; one that is wrong and unsure had
+    too little to go on, and ``population_rate_hz`` says whether that is
+    because the units went quiet.
 
-    Returns ``{label: metrics}`` in ``order`` (default: the sorted labels;
-    labels with no bins are left out). Each ``metrics`` is
-    :func:`decoding_metrics` on that group's bins plus
+    Parameters
+    ----------
+    decoded : Decoded
+        The decode.
+    labels : array-like
+        One entry per decoded bin: "moving"/"still", say, or a binned
+        :func:`spikeshpc.states.seconds_since`.
+    order : sequence, optional
+        Order of the groups; defaults to the sorted labels.
+    extra : dict, optional
+        Per-bin arrays whose group means are added to the metrics.
+    tolerance_deg : float, optional
+        Defaults to the one `decoded` was scored with, so the groups'
+        ``frac_within_deg``, weighted by ``n_bins``, average back to the whole
+        decode's.
 
-      time_s                  how much decoded time the group holds
-      q25/q75_abs_error_deg   the spread around the median, for error bars
-      mean_posterior_max      how sure the decoder was
-      population_rate_hz      summed spikes over time: the evidence it had
-      <name>                  the group mean of each per-bin array in ``extra``
+    Returns
+    -------
+    dict
+        ``{label: metrics}`` in `order`; labels with no bins are left out.
+        Each ``metrics`` is :func:`decoding_metrics` on that group's bins plus:
 
-    ``tolerance_deg`` defaults to the one ``decoded`` was scored with, so the
-    groups' ``frac_within_deg``, weighted by ``n_bins``, average back to the
-    whole decode's.
+        - ``time_s``: how much decoded time the group holds
+        - ``q25_abs_error_deg``, ``q75_abs_error_deg``: the spread around the
+          median, for error bars
+        - ``mean_posterior_max``: how sure the decoder was
+        - ``population_rate_hz``: summed spikes over time, the evidence it had
+        - ``<name>``: the group mean of each per-bin array in `extra`
+
+    Raises
+    ------
+    ValueError
+        If `labels` or `extra` do not match the decoded bins.
     """
     labels = np.asarray(labels)
     if labels.shape != (decoded.n_decoded,):
@@ -994,7 +1461,23 @@ def metrics_by_group(
 # ── the control ──────────────────────────────────────────────────────────
 @dataclass
 class ShuffleTest:
-    """An observed statistic against the null distribution it is judged by."""
+    """An observed statistic against the null distribution it is judged by.
+
+    Attributes
+    ----------
+    metric : str
+        Name of the statistic.
+    observed : float
+        Its observed value.
+    null : numpy.ndarray
+        Its value under each shuffle.
+    p_value : float
+        Fraction of the null at least as good as the observed value.
+    better : {"lower", "higher"}
+        Which direction counts as better.
+    kind : str
+        Kind of shuffle: "shift" or "units".
+    """
 
     metric: str
     observed: float
@@ -1038,44 +1521,77 @@ def shuffle_test(
     with_metrics: bool = True,
     tolerance_deg: float = 30.0,
 ) -> ShuffleTest:
-    """Re-decode `n_shuffles` times with the coding destroyed, for comparison.
+    """Re-decode many times with the coding destroyed, for comparison.
 
-    ``kind="shift"`` circularly shifts the spike data against the heading by at
-    least ``min_shift_s``. Every unit moves together, so firing rates, burst
-    structure, population synchrony and the animal's occupancy all survive
-    intact and only their alignment in time is broken. That is the null for
-    "does this decoder track the animal": use it wherever there is a measured
-    heading to be wrong about, i.e. on the wake test set.
+    Each shuffle is decoded exactly as :func:`decode` would decode it. Two
+    things make that fast.
 
-    ``kind="units"`` instead permutes which tuning curve belongs to which unit.
-    Rates and synchrony again survive; what breaks is the population code
-    itself. This is the null to use on REM, where there is no heading to
-    misalign against and the question is whether the posterior is sharper and
-    more coherent than a scrambled population would make it -- so pair it with
-    a metric like ``mean_posterior_max``.
+    First, `n_jobs` worker processes split the shuffles between them. Every
+    shift or permutation is drawn up front, in the order the one-at-a-time loop
+    drew them, so the null does not depend on `n_jobs`.
 
-    ``metric`` may also be a sequence of names, to judge several statistics on
-    the same shuffled decodes -- the raw and the offset-corrected error, say --
-    without paying for the decodes twice. The result is then a dict
-    ``{metric: ShuffleTest}`` in that order.
-
-    The remaining keywords are :func:`decode`'s, and each shuffle is decoded
-    exactly as :func:`decode` would decode it. Two things make that fast:
-
-    ``n_jobs`` worker processes split the shuffles between them (default
-    None: one per CPU core, capped by the number of shuffles; 1 runs them
-    here). Every shift or permutation is drawn up front, in the order the
-    one-at-a-time loop drew them, so the null does not depend on ``n_jobs``.
-
-    Within a worker, shuffles are decoded in batches, stepping every one of
-    them through the forward-backward together: neither kind of shuffle
+    Second, within a worker, shuffles are decoded in batches, stepping every
+    one of them through the forward-backward together: neither kind of shuffle
     changes which bins are decoded, so one step is a single (batch x angle) @
     (angle x angle) product rather than a vector product per shuffle. A batch
     holds each shuffle's causal posterior over a run, ``8 x run bins x angle
-    bins`` bytes, and ``max_batch_bytes`` caps that per worker, so the batches
+    bins`` bytes, and `max_batch_bytes` caps that per worker, so the batches
     are smaller over long runs. Batching changes the order of floating-point
     sums, so a null can differ from a one-at-a-time decode's in the last
     digits, and where two headings tie, in the MAP bin.
+
+    Parameters
+    ----------
+    data : DecoderData
+        Binned data.
+    model : EncodingModel
+        Fitted model.
+    mask : numpy.ndarray of bool
+        Bins decoded for the observed statistic.
+    kind : {"shift", "units"}, default "shift"
+        ``"shift"`` circularly shifts the spike data against the heading by at
+        least `min_shift_s`. Every unit moves together, so firing rates, burst
+        structure, population synchrony and the animal's occupancy all survive
+        intact and only their alignment in time is broken. That is the null
+        for "does this decoder track the animal": use it wherever there is a
+        measured heading to be wrong about, i.e. on the wake test set.
+        ``"units"`` instead permutes which tuning curve belongs to which unit.
+        Rates and synchrony again survive; what breaks is the population code
+        itself. This is the null to use on REM, where there is no heading to
+        misalign against and the question is whether the posterior is sharper
+        and more coherent than a scrambled population would make it -- so pair
+        it with a metric like ``mean_posterior_max``.
+    metric : str or sequence of str, default "median_abs_error_deg"
+        Statistic to judge. A sequence judges several statistics on the same
+        shuffled decodes -- the raw and the offset-corrected error, say --
+        without paying for the decodes twice.
+    n_shuffles : int, default 100
+        Number of shuffles.
+    min_shift_s : float, default 30.0
+        Smallest shift, in seconds.
+    seed : int, default 0
+        Random seed.
+    progress : bool, default False
+        Show a progress bar.
+    n_jobs : int, optional
+        Worker processes. Default is one per CPU core, capped by the number of
+        shuffles; 1 runs them here.
+    max_batch_bytes : int, default 2**30
+        Memory cap per worker for one batch.
+    movement_var_deg2, acausal, max_gap_s, min_run_s, with_metrics, tolerance_deg
+        As for :func:`decode`.
+
+    Returns
+    -------
+    ShuffleTest or dict of str to ShuffleTest
+        One test, or ``{metric: ShuffleTest}`` in order when `metric` is a
+        sequence.
+
+    Raises
+    ------
+    ValueError
+        If `kind` is unknown, no metric is given, or the inputs are
+        inconsistent.
     """
     if kind not in ("shift", "units"):
         raise ValueError(f"kind must be 'shift' or 'units', got {kind!r}")
@@ -1170,7 +1686,13 @@ def shuffle_test(
 
 
 def _default_jobs() -> int:
-    """One worker per CPU core this process may use."""
+    """Count the CPU cores this process may use.
+
+    Returns
+    -------
+    int
+        Worker count, at least 1.
+    """
     try:
         return max(1, len(os.sched_getaffinity(0)))
     except AttributeError:  # Windows, macOS
@@ -1196,6 +1718,11 @@ def _single_threaded_children():
     small product over every core just has the workers fight over them. A
     child reads these when it imports numpy, so they are set only while the
     pool starts its workers, and this process's own BLAS is untouched.
+
+    Yields
+    ------
+    None
+        Control, while the environment variables are set.
     """
     saved = {name: os.environ.get(name) for name in _THREAD_VARIABLES}
     os.environ.update({name: "1" for name in _THREAD_VARIABLES})
@@ -1225,12 +1752,48 @@ def _shuffle_null(
     shifts,
     orders,
 ) -> np.ndarray:
-    """``metrics`` of each shuffle's decode, as a (metric, shuffle) array.
+    """Score each shuffle's decode.
 
     Shuffle ``k`` decodes ``np.roll(counts, shifts[k])`` with the tuning
     curves reordered by ``orders[k]``, over the same runs as the observed
     decode, and is scored as :func:`decode` scores it. Module level, so worker
     processes can import it.
+
+    Parameters
+    ----------
+    counts : numpy.ndarray
+        Spike counts, shape (n_bins, n_units).
+    duration_s : numpy.ndarray
+        Duration of each bin, in seconds.
+    actual_deg : numpy.ndarray
+        Measured heading per bin, in degrees.
+    runs : list
+        Stretches decoded, from :func:`_runs`.
+    rate_hz : numpy.ndarray
+        Tuning curves, shape (n_units, n_angle_bins).
+    bin_centers_deg : numpy.ndarray
+        Centres of the heading bins.
+    transition : numpy.ndarray or _RingStep
+        Transition model.
+    acausal : bool
+        Use the acausal posterior.
+    metrics : sequence of str
+        Names of the statistics to compute.
+    with_metrics : bool
+        Score against the measured heading.
+    tolerance_deg : float
+        Tolerance for ``frac_within_deg``.
+    max_batch_bytes : int
+        Memory cap for one batch.
+    shifts : sequence of int
+        Roll applied to `counts` in each shuffle.
+    orders : sequence of numpy.ndarray
+        Unit permutation applied to the curves in each shuffle.
+
+    Returns
+    -------
+    numpy.ndarray
+        Statistic of each shuffle, shape (n_metrics, n_shuffles).
     """
     n_shuffles = len(shifts)
     n_bins = len(duration_s)
@@ -1245,7 +1808,20 @@ def _shuffle_null(
     uniform = step.uniform
 
     def likelihood(ks, a, b):
-        """exp(log-likelihood - row max) of bins a:b, for shuffles `ks`."""
+        """Compute exp(log-likelihood - row max) of bins a:b, for shuffles `ks`.
+
+        Parameters
+        ----------
+        ks : sequence of int
+            Shuffles to compute.
+        a, b : int
+            Range of bins.
+
+        Returns
+        -------
+        numpy.ndarray
+            Scaled likelihoods.
+        """
         out = np.empty((len(ks), b - a, n_angles))
         for j, k in enumerate(ks):
             rows = (np.arange(a, b) - shifts[k]) % n_bins  # np.roll(counts, shift)[a:b]
@@ -1319,7 +1895,24 @@ def _shuffle_null(
 
 
 def _judge(metric: str, observed: float, null: np.ndarray, kind: str) -> ShuffleTest:
-    """One observed statistic against its null, the right way up."""
+    """Judge one observed statistic against its null, the right way up.
+
+    Parameters
+    ----------
+    metric : str
+        Name of the statistic.
+    observed : float
+        Observed value.
+    null : numpy.ndarray
+        Value under each shuffle.
+    kind : str
+        Kind of shuffle.
+
+    Returns
+    -------
+    ShuffleTest
+        The test.
+    """
     # error-like metrics are better when small; confidence-like ones when large
     better = "lower" if "error" in metric or "rmse" in metric else "higher"
     hits = (
@@ -1340,7 +1933,29 @@ def _judge(metric: str, observed: float, null: np.ndarray, kind: str) -> Shuffle
 # ── the whole thing ──────────────────────────────────────────────────────
 @dataclass
 class DecoderRun:
-    """Everything one call to :func:`run_decoder` produced."""
+    """Everything one call to :func:`run_decoder` produced.
+
+    Attributes
+    ----------
+    data : DecoderData
+        Binned data.
+    model : EncodingModel
+        The fitted model.
+    train_mask, test_mask : numpy.ndarray of bool
+        Training and held-out bins.
+    test : Decoded
+        Decode of the held-out wake.
+    test_shuffle : ShuffleTest or None
+        Time-shift null for `test`.
+    rem : Decoded or None
+        Decode of REM.
+    rem_shuffle : ShuffleTest or None
+        Unit-permutation null for `rem`.
+    rem_mask : numpy.ndarray of bool or None
+        REM bins decoded.
+    movement_var_deg2 : float
+        Random-walk variance used, in deg^2 per bin.
+    """
 
     data: DecoderData
     model: EncodingModel
@@ -1413,45 +2028,86 @@ def run_decoder(
     interval_mask=None,
     n_jobs: int | None = None,
 ) -> DecoderRun:
-    """Train on wake, test on held-out wake against a shuffle, then decode REM.
-    ``sorting``: may be a sorting or a sorting analyzer
-    ``unit_ids``: the head-direction-tuned units you selected
-    ``heading_deg`` and ``frame_times`` are the shutter-aligned pair
-    ``intervals``: ``scoring.intervals`` from :func:`spikeshpc.load_states`
-    ``within``: optional list of [start, stop] spans on the recording clock,
-    e.g. ``[[0, 7200]]`` for the first two hours. Only WAKE bins lying wholly
-    inside one are trained and tested on, so both sides of the split come from
-    those periods. REM is decoded as before. Default None (all of wake)
-    ``interval_mask``: optional boolean mask over the inter-frame intervals of
-    ``frame_times`` (length ``len(frame_times) - 1``) -- the one the tuning
-    functions take, e.g. from :func:`spikeshpc.behavior_interval_mask`. Only
-    WAKE bins whose every frame interval it keeps are trained and tested on,
-    and it is applied before the train/test split, so both sides come from the
-    kept time. REM is decoded as before. Default None (all of wake)
-    ``bin_s``: bin size in seconds. To set to camera frame rate, use (1/frame rate). Default 1/60
-    ``n_angle_bins``: number of bins to devide heading space into. Default 180
-    ``smooth_sigma_deg``: how much to smooth tuning curves. Default 10 degrees
-    ``min_rate_hz``: applies this floor to tuning curves to avoid overweighting random spikes. Default 0.1 hz
-    ``test_fraction``: test/train split. Default 0.3
-    ``split_mode``: how to split the wake data into train/test chunks. Can be 'blocks' or 'contiguous'. Default 'blocks'
-    ``block_s``: if 'blocks' mode is used, how long in seconds the blocks should be. Default 60
-    ``movement_var_deg2``: maximum degrees/bin to allow for heading changes/bin.
-      ``None`` = (2 deg^2 per 10 ms bin, scaled to ``bin_s``) per convention. Default
-      ``'estimate'`` = estimate from the actual heading
-      ``np.inf`` = remove limit completely
-      ``number`` = fix at this value
-    ``acausal``: whether to use causal or acausal decoder. Default True (acausal)
-    ``tolerance_deg``: for evaluating model. Acceptable variance from true heading. Default 10 degrees
-    ``n_shuffles``: number of shuffles for control analysis. Default 100
-    ``min_shift_s``: amount to shift spike trains vs heading for shuffle analysis. Default 30 s
-    ``decode_rem``: whether or not to run decoder on REM data. Default True. Set False for fine-tuning model
-    ``keep_posterior``: whether to save posteriors for REM analysis. Default True
-    ``seed``: seed for generating the random train/test split. Default 0
-    ``verbose``: print progress on model generation. Default True
-    ``n_jobs``: worker processes for the shuffles. Default None (one per CPU core); 1 runs them in this process
+    """
+    Train on wake, test on held-out wake against a shuffle, then decode REM.
 
-    Tuning guide
-    ------------
+    Parameters
+    ----------
+    sorting : spikeinterface BaseSorting or SortingAnalyzer
+        Source of the spike trains.
+    unit_ids : sequence
+        The head-direction-tuned units you selected.
+    heading_deg, frame_times : array-like
+        The shutter-aligned pair.
+    intervals : dict
+        ``scoring.intervals`` from :func:`spikeshpc.load_states`.
+    bin_s : float, default 1/60
+        Bin size in seconds. To set to camera frame rate, use
+        ``1 / frame_rate``.
+    n_angle_bins : int, default 180
+        Number of bins to divide heading space into.
+    smooth_sigma_deg : float, default 10.0
+        How much to smooth tuning curves, in degrees.
+    min_rate_hz : float, default 0.1
+        Floor applied to tuning curves to avoid overweighting random spikes.
+    test_fraction : float, default 0.3
+        Test/train split.
+    split_mode : {"blocks", "contiguous"}, default "blocks"
+        How to split the wake data into train/test chunks.
+    block_s : float, default 60.0
+        If "blocks" mode is used, how long in seconds the blocks should be.
+    movement_var_deg2 : float or "estimate" or None, default None
+        Variance of the random walk on heading, in deg^2 per bin. ``None``
+        uses the convention of 2 deg^2 per 10 ms bin, scaled to `bin_s`;
+        ``"estimate"`` estimates it from the actual heading; ``np.inf`` removes
+        the limit completely; a number fixes it at that value.
+    acausal : bool, default True
+        Use the acausal decoder rather than the causal one.
+    tolerance_deg : float, default 10.0
+        For evaluating the model: acceptable deviation from the true heading.
+    n_shuffles : int, default 100
+        Number of shuffles for the control analysis.
+    min_shift_s : float, default 30.0
+        Amount to shift spike trains against heading in the shuffle analysis.
+    decode_rem : bool, default True
+        Whether to run the decoder on REM data. Set False for fine-tuning the
+        model.
+    keep_posterior : bool, default True
+        Whether to save posteriors for REM analysis.
+    seed : int, default 0
+        Seed for generating the random train/test split.
+    verbose : bool, default True
+        Print progress on model generation.
+    within : list of list of float, optional
+        ``[start, stop]`` spans on the recording clock, e.g. ``[[0, 7200]]``
+        for the first two hours. Only WAKE bins lying wholly inside one are
+        trained and tested on, so both sides of the split come from those
+        periods. REM is decoded as before. Default is all of wake.
+    interval_mask : array-like of bool, optional
+        Mask over the inter-frame intervals of `frame_times` (length
+        ``len(frame_times) - 1``) -- the one the tuning functions take, e.g.
+        from :func:`spikeshpc.behavior_interval_mask`. Only WAKE bins whose
+        every frame interval it keeps are trained and tested on, and it is
+        applied before the train/test split, so both sides come from the kept
+        time. REM is decoded as before. Default is all of wake.
+    n_jobs : int, optional
+        Worker processes for the shuffles. Default is one per CPU core; 1 runs
+        them in this process.
+
+    Returns
+    -------
+    DecoderRun
+        The model, the train/test masks, and the decoded test and REM
+        stretches with their shuffle tests.
+
+    Raises
+    ------
+    ValueError
+        If no WAKE bin remains inside the requested intervals.
+
+    Notes
+    -----
+    **Tuning guide.**
     The factor that matters most is not in this list: which units you pass in.
     A decoder is a weighted vote of tuning curves, so adding a unit with a
     weak or unstable curve costs more than any parameter here will win back.
@@ -1705,6 +2361,24 @@ class TransferRun:
     reference. ``wake_shuffles`` maps each of :data:`WAKE_SHUFFLE_METRICS` to
     its :class:`ShuffleTest` against the time-shift null; ``rem_shuffle`` is the
     unit-permutation null of the REM posterior's confidence.
+
+    Attributes
+    ----------
+    label : str
+        Name of the run.
+    unit_ids, partner_ids : numpy.ndarray
+        The model's units, and the units whose spikes stood in for them.
+    data : DecoderData
+        Binned data.
+    wake, rem : Decoded
+        Decodes of wake and REM (`rem` may be None).
+    wake_mask, rem_mask : numpy.ndarray of bool
+        Bins decoded.
+    wake_shuffles : dict
+        Each of :data:`WAKE_SHUFFLE_METRICS` mapped to its
+        :class:`ShuffleTest`.
+    rem_shuffle : ShuffleTest or None
+        Unit-permutation null of the REM posterior's confidence.
     """
 
     label: str
@@ -1720,11 +2394,23 @@ class TransferRun:
 
     @property
     def offset_deg(self) -> float:
-        """The wake decode's mean error: how far the population reads turned."""
+        """Get the wake decode's mean error: how far the population reads turned.
+
+        Returns
+        -------
+        float
+            Offset in degrees; NaN if unavailable.
+        """
         return float(self.wake.metrics.get("offset_deg", np.nan))
 
     def as_row(self) -> dict:
-        """The headline numbers as one flat row, for a table across recordings."""
+        """Collect the headline numbers as one flat row, for a table across recordings.
+
+        Returns
+        -------
+        dict
+            The row.
+        """
         wake = self.wake.metrics
         row = {
             "label": self.label,
@@ -1821,8 +2507,60 @@ def apply_decoder(
     time-shift null. REM is decoded and judged against the unit-permutation
     null exactly as :func:`run_decoder` does. ``movement_var_deg2`` should be
     the baseline run's, so the prior is the one the model was scored with, and
-    the remaining settings should match that run's too. ``n_jobs`` is
-    :func:`shuffle_test`'s.
+    the remaining settings should match that run's too.
+
+    Parameters
+    ----------
+    model : EncodingModel
+        Model fitted on the baseline.
+    sorting : spikeinterface BaseSorting or SortingAnalyzer
+        This recording's sorting.
+    unit_map : dict
+        ``{model unit: this recording's unit}``, from matching the two
+        recordings. The model is restricted to those units and each column is
+        filled with its partner's spikes here.
+    heading_deg, frame_times : array-like
+        This recording's shutter-aligned pair.
+    intervals : dict
+        This recording's state intervals.
+    interval_mask : array-like of bool, optional
+        The mask this recording's own tuning was computed on.
+    movement_var_deg2 : float, optional
+        Should be the baseline run's, so the prior is the one the model was
+        scored with.
+    bin_s : float, default 1/60
+        Bin size in seconds.
+    acausal : bool, default True
+        Use the acausal decoder.
+    tolerance_deg : float, default 10.0
+        Tolerance for ``frac_within_deg``.
+    n_shuffles : int, default 100
+        Number of shuffles.
+    min_shift_s : float, default 30.0
+        Smallest shift, in seconds.
+    seed : int, default 0
+        Random seed.
+    decode_rem : bool, default True
+        Also decode REM.
+    keep_posterior : bool, default False
+        Keep the full posterior.
+    label : str, default "transfer"
+        Name of the run.
+    verbose : bool, default True
+        Print progress.
+    n_jobs : int, optional
+        As for :func:`shuffle_test`.
+
+    Returns
+    -------
+    TransferRun
+        The read-out.
+
+    Raises
+    ------
+    ValueError
+        If `unit_map` is empty or not one-to-one, or no bin falls inside the
+        requested states.
     """
     model_units = list(unit_map)
     if not model_units:
@@ -1888,12 +2626,42 @@ def reference_decode(
     verbose: bool = True,
     n_jobs: int | None = None,
 ) -> TransferRun:
-    """The fitting recording's own held-out wake and REM, decoded with only `unit_ids`.
+    """Decode the fitting recording's own held-out wake and REM with only some units.
 
     What :func:`apply_decoder` on another recording should be compared with:
     the same units and the same curves, on data the model never saw. Without
     it, a recording where fewer units were found looks worse for having fewer
     units rather than for coding worse.
+
+    Parameters
+    ----------
+    run : DecoderRun
+        The baseline run.
+    unit_ids : sequence
+        Units to decode with.
+    acausal : bool, default True
+        Use the acausal decoder.
+    tolerance_deg : float, default 10.0
+        Tolerance for ``frac_within_deg``.
+    n_shuffles : int, default 100
+        Number of shuffles.
+    min_shift_s : float, default 30.0
+        Smallest shift, in seconds.
+    seed : int, default 0
+        Random seed.
+    keep_posterior : bool, default False
+        Keep the full posterior.
+    label : str, default "baseline"
+        Name of the run.
+    verbose : bool, default True
+        Print progress.
+    n_jobs : int, optional
+        As for :func:`shuffle_test`.
+
+    Returns
+    -------
+    TransferRun
+        The read-out.
     """
     unit_ids = list(unit_ids)
     model = restrict_model(run.model, unit_ids)
@@ -1934,7 +2702,34 @@ def _read_out(
     verbose,
     n_jobs=None,
 ) -> TransferRun:
-    """Decode wake and REM with `model` and judge both against their nulls."""
+    """Decode wake and REM with a model and judge both against their nulls.
+
+    Parameters
+    ----------
+    data : DecoderData
+        Binned data, already holding the partner units' counts.
+    model : EncodingModel
+        Model restricted to the matched units.
+    partner_ids : sequence
+        Units whose spikes stand in for the model's.
+    wake_mask, rem_mask : numpy.ndarray of bool
+        Bins to decode.
+    movement_var_deg2, acausal, tolerance_deg, n_shuffles, min_shift_s, seed
+        As for :func:`apply_decoder`.
+    keep_posterior : bool
+        Keep the full posterior.
+    label : str
+        Name of the run.
+    verbose : bool
+        Print progress.
+    n_jobs : int, optional
+        As for :func:`shuffle_test`.
+
+    Returns
+    -------
+    TransferRun
+        The read-out.
+    """
     shared = {
         "movement_var_deg2": movement_var_deg2,
         "acausal": acausal,
@@ -2018,11 +2813,25 @@ def _read_out(
 
 # ── looking at it ────────────────────────────────────────────────────────
 def plot_encoding_model(model: EncodingModel, sort_by_preferred: bool = True, ax=None):
-    """The tuning curves the decoder is using, as a units x heading heatmap.
+    """Plot the tuning curves the decoder is using, as a units x heading heatmap.
 
     Each unit's curve is scaled to its own peak, so the picture is about where
     a unit fires rather than how hard. Sorted by preferred direction, a healthy
     head-direction population is a clean diagonal band.
+
+    Parameters
+    ----------
+    model : EncodingModel
+        Model to draw.
+    sort_by_preferred : bool, default True
+        Sort units by preferred direction.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw on.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+        The axes.
     """
     import matplotlib.pyplot as plt
 
@@ -2064,7 +2873,7 @@ def plot_decoded(
     show_posterior: bool = True,
     ax=None,
 ):
-    """Decoded vs. actual heading over a window, on top of the posterior.
+    """Plot decoded vs. actual heading over a window, on top of the posterior.
 
     The static version of :func:`spikeshpc.decoder_widget.show_decoded`, for
     saving a figure. Note it plots against the *recording* clock, so a blocked
@@ -2087,6 +2896,29 @@ def plot_decoded(
     trace differing by an angle bin or so. Pass ``t0`` explicitly, or compare
     ``run.test.metrics``, rather than reading two such figures as evidence that
     nothing changed.
+
+    Parameters
+    ----------
+    decoded : Decoded
+        The decode.
+    t0 : float, optional
+        Start of the window, in seconds; defaults to the first decoded bin.
+    window_s : float, default 60.0
+        Window length, in seconds.
+    show_posterior : bool, default True
+        Shade the posterior behind the lines.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw on.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+        The axes.
+
+    Raises
+    ------
+    ValueError
+        If no decoded bins fall in the window.
     """
     import matplotlib.pyplot as plt
 
@@ -2165,13 +2997,25 @@ def plot_decoded(
 
 
 def plot_error(decoded: Decoded, axes=None):
-    """Error histogram and an actual-vs-decoded confusion map.
+    """Plot an error histogram and an actual-vs-decoded confusion map.
 
     The confusion map is the one that shows *how* a decoder fails. A bright
     diagonal is success; a bright anti-diagonal or a constant offset from the
     diagonal is a systematic mapping error rather than noise, and a bright
     horizontal band is the decoder falling back on one favourite heading
     whenever the evidence is thin.
+
+    Parameters
+    ----------
+    decoded : Decoded
+        The decode.
+    axes : sequence of matplotlib.axes.Axes, optional
+        The two axes to draw on.
+
+    Returns
+    -------
+    sequence of matplotlib.axes.Axes
+        The two axes.
     """
     import matplotlib.pyplot as plt
 
@@ -2215,7 +3059,20 @@ def plot_error(decoded: Decoded, axes=None):
 
 
 def plot_shuffle(shuffle: ShuffleTest, ax=None):
-    """The null distribution with the observed value marked on it."""
+    """Plot the null distribution with the observed value marked on it.
+
+    Parameters
+    ----------
+    shuffle : ShuffleTest
+        Test to draw.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw on.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+        The axes.
+    """
     import matplotlib.pyplot as plt
 
     if ax is None:
@@ -2245,14 +3102,32 @@ def plot_metrics_by_group(
     metrics=("median_abs_error_deg", "mean_posterior_max", "population_rate_hz"),
     axes=None,
 ):
-    """:func:`metrics_by_group` as bars, one panel per metric.
+    """Plot :func:`metrics_by_group` as bars, one panel per metric.
 
-    ``tables`` is one table, or ``{series: table}`` to compare several decodes
-    over the same groups -- two encoding models, say -- as grouped bars.
     Groups run in the order the tables list them. Each tick says how much time
     its group holds, because a striking bar over twenty seconds of data is not
     the finding one over an hour would be. The error panel has interquartile
     whiskers and the 90 degree line that chance would give.
+
+    Parameters
+    ----------
+    tables : dict
+        One table, or ``{series: table}`` to compare several decodes over the
+        same groups -- two encoding models, say -- as grouped bars.
+    metrics : tuple of str
+        Metrics to draw, one panel each.
+    axes : sequence of matplotlib.axes.Axes, optional
+        One axes per metric.
+
+    Returns
+    -------
+    sequence of matplotlib.axes.Axes
+        The axes.
+
+    Raises
+    ------
+    ValueError
+        If every table is empty, or `axes` does not match `metrics`.
     """
     import matplotlib.pyplot as plt
 
@@ -2324,24 +3199,40 @@ def plot_metrics_by_group(
 def plot_transfer_summary(
     runs: dict, colors: dict | None = None, references: dict | None = None, axes=None
 ):
-    """How one decoder did on each recording, each against its own nulls.
-
-    ``runs`` is ``{recording: TransferRun}`` in the order to draw them, the
-    baseline's own :func:`reference_decode` included if it should have a
-    column. ``colors`` gives each recording's color (default: the property
-    cycle). ``references`` optionally gives, per recording, the baseline's
-    held-out data decoded with that recording's units, drawn as an open black
-    diamond in its column -- the number that recording has to be compared with.
+    """Plot how one decoder did on each recording, each against its own nulls.
 
     Three panels, one column per recording, each tick saying how many units it
     was decoded with:
-      wake median |error|   filled: raw, open: with the constant offset
-                            removed; gray bar: 5-95% of the time-shift null;
-                            dashed: the 90 deg of chance
-      wake offset           how far the population reads turned
-      REM posterior max     against 5-95% of its unit-permutation null
 
-    Returns the three axes.
+    - wake median |error|: filled is raw, open is with the constant offset
+      removed; gray bar is 5-95% of the time-shift null; dashed is the 90 deg
+      of chance
+    - wake offset: how far the population reads turned
+    - REM posterior max: against 5-95% of its unit-permutation null
+
+    Parameters
+    ----------
+    runs : dict
+        ``{recording: TransferRun}`` in the order to draw them, the baseline's
+        own :func:`reference_decode` included if it should have a column.
+    colors : dict, optional
+        Each recording's color (default: the property cycle).
+    references : dict, optional
+        Per recording, the baseline's held-out data decoded with that
+        recording's units, drawn as an open black diamond in its column -- the
+        number that recording has to be compared with.
+    axes : sequence of matplotlib.axes.Axes, optional
+        The three axes to draw on.
+
+    Returns
+    -------
+    sequence of matplotlib.axes.Axes
+        The three axes.
+
+    Raises
+    ------
+    ValueError
+        If there are no runs to plot.
     """
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D

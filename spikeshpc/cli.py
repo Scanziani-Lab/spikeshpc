@@ -146,6 +146,21 @@ def load_pipeline_config(path):
 
     json.load's own error names neither the file nor the offending text, which
     is a poor way to lose a queued job.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        JSON file of pipeline config overrides.
+
+    Returns
+    -------
+    dict
+        The overrides.
+
+    Raises
+    ------
+    SystemExit
+        If the file is missing, malformed, or not a JSON object.
     """
     path = Path(path)
     text = path.read_text()

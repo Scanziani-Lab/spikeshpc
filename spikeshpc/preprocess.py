@@ -40,6 +40,17 @@ class _InterleavedSegment(BaseRecordingSegment):
     This does the same per-source batching -- one get_traces call per
     parent, not one per channel, so it costs nothing extra -- but scatters
     each source's columns back into the positions actually requested.
+
+    Parameters
+    ----------
+    segments : list of BaseRecordingSegment
+        The parent segments, one per source recording.
+    source : array-like of int
+        For each output channel, which parent it comes from.
+    source_index : array-like of int
+        For each output channel, its column within that parent.
+    times_kwargs : dict
+        Time-info arguments for ``BaseRecordingSegment``.
     """
 
     def __init__(self, segments, source, source_index, times_kwargs):
@@ -74,11 +85,7 @@ class _InterleavedSegment(BaseRecordingSegment):
 
 
 def _interleave_channels(processed, raw, channel_order):
-    """`processed` and `raw`'s channels, recombined in `channel_order`.
-
-    `channel_order` is a permutation of `processed.channel_ids +
-    raw.channel_ids` combined (every id from both, each exactly once) -- the
-    original, pre-split channel order, normally.
+    """Recombine the channels of `processed` and `raw` in `channel_order`.
 
     Metadata (probe geometry, gains, `is_filtered`, ...) is taken from
     `si.aggregate_channels`, which gets that part right -- it is only the
@@ -86,6 +93,20 @@ def _interleave_channels(processed, raw, channel_order):
     `_InterleavedSegment`). `copy_metadata` maps every property across by id,
     so it does not matter that the aggregate's own channel order differs
     from `channel_order`.
+
+    Parameters
+    ----------
+    processed, raw : spikeinterface BaseRecording
+        Recordings holding the two groups of channels.
+    channel_order : sequence
+        Permutation of ``processed.channel_ids + raw.channel_ids`` combined
+        (every id from both, each exactly once) -- the original, pre-split
+        channel order, normally.
+
+    Returns
+    -------
+    spikeinterface BaseRecording
+        Recording with the channels in `channel_order`.
     """
     combined = si.aggregate_channels([processed, raw])
     result = BaseRecording(
@@ -116,7 +137,7 @@ def _interleave_channels(processed, raw, channel_order):
 
 
 def _apply_preprocessing(rec, preprocessing: dict, bad_ids: list):
-    """Run `preprocessing` on `rec`, without letting `bad_ids` take part in it.
+    """Run preprocessing on a recording, without letting bad channels take part in it.
 
     Filters that pool information across channels are only as robust as the
     minority of contamination they can tolerate: a global median (common
@@ -141,6 +162,21 @@ def _apply_preprocessing(rec, preprocessing: dict, bad_ids: list):
     the channel count/order/chanMap the rest of this function relies on are
     unaffected -- only the SAMPLES on those specific rows differ from what an
     unguarded `si.apply_preprocessing_pipeline` would have produced.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        Recording to process.
+    preprocessing : dict
+        Preprocessing steps, as taken by ``si.apply_preprocessing_pipeline``.
+    bad_ids : list
+        Channel ids excluded from processing.
+
+    Returns
+    -------
+    spikeinterface BaseRecording
+        Processed recording, with bad channels raw and in their original
+        position.
     """
     if not bad_ids:
         return si.apply_preprocessing_pipeline(rec, preprocessing)
@@ -175,14 +211,43 @@ def preprocess(
 ) -> dict:
     """Load, sync-strip, align, concatenate and write the binary + metadata.
 
-    `bad_channels` are excluded from `preprocessing` itself (see
-    :func:`_apply_preprocessing`) -- they are resolved against this
-    recording's own channel ids, which is the same set `concat_info.json`
-    ends up recording, so entries may be given exactly as they will be passed
-    to the sorting stage.
+    Parameters
+    ----------
+    phys_paths : list of Path
+        Recordings to concatenate.
+    output_dir : Path
+        Where the binary and metadata are written.
+    phys_type : str, optional
+        Acquisition system; auto-detected if None.
+    stream_name : str, optional
+        Raw stream to load; inferred if None.
+    preprocessing : dict, optional
+        Preprocessing steps to apply.
+    dtype : numpy dtype, optional
+        Output dtype.
+    align_tolerance_um : float, default 1.0
+        Tolerance for matching channels by probe position.
+    sampling_frequency_max_diff : float, default 0.0
+        Largest sampling-rate difference allowed between recordings.
+    reuse_source : bool, default True
+        Reuse an existing binary where possible.
+    bad_channels : list, optional
+        Channels excluded from `preprocessing` itself (see
+        :func:`_apply_preprocessing`). They are resolved against this
+        recording's own channel ids, which is the same set
+        ``concat_info.json`` ends up recording, so entries may be given
+        exactly as they will be passed to the sorting stage.
 
-    Returns the concat_info dict, which is also written to concat_info.json
-    and is everything the sorting/post-processing stages need.
+    Returns
+    -------
+    dict
+        The concat_info dict, which is also written to ``concat_info.json``
+        and is everything the sorting/post-processing stages need.
+
+    Raises
+    ------
+    ValueError
+        If the recordings cannot be concatenated.
     """
     import probeinterface
 

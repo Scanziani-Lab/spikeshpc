@@ -12,7 +12,18 @@ from .io import channel_positions
 
 
 def _is_sync_label(label) -> bool:
-    """True for SpikeGLX sync channel labels: 'SY0', 'SY0;768:768', 'imec0.ap#SY0'."""
+    """Check whether a label names a SpikeGLX sync channel.
+
+    Parameters
+    ----------
+    label : object
+        Channel label, e.g. ``'SY0'``, ``'SY0;768:768'`` or ``'imec0.ap#SY0'``.
+
+    Returns
+    -------
+    bool
+        True if any part of the label is a sync channel name.
+    """
     return any(
         re.fullmatch(r"sy\d*", part.strip(), flags=re.IGNORECASE)
         for part in re.split(r"[;#]", str(label))
@@ -22,7 +33,17 @@ def _is_sync_label(label) -> bool:
 def drop_sync_channels(rec):
     """Remove the SpikeGLX sync channel (SY0) so it is not concatenated/sorted.
 
-    Returns (recording, removed_labels).
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        Recording that may contain a sync channel.
+
+    Returns
+    -------
+    rec : spikeinterface BaseRecording
+        Recording without sync channels (the input if none were found).
+    removed : list of str
+        Labels of the removed channels.
     """
     names = rec.get_property("channel_names")
     labels = (
@@ -53,7 +74,26 @@ def align_channels_by_location(recs, tolerance_um: float = 1.0):
     are dropped from all of them; the surviving channels keep the first
     recording's order and ids.
 
-    Returns (aligned_recs, report).
+    Parameters
+    ----------
+    recs : list of spikeinterface BaseRecording
+        Recordings to align; the first is the reference.
+    tolerance_um : float, default 1.0
+        Maximum distance, in micrometres, between matched contacts.
+
+    Returns
+    -------
+    aligned : list of spikeinterface BaseRecording
+        Recordings with identical channel ids and order.
+    report : list of dict
+        One entry per recording with ``num_channels_in``, ``num_matched``,
+        ``num_dropped``, ``max_residual_um`` and ``reordered``.
+
+    Raises
+    ------
+    ValueError
+        If no site is common to all recordings, or `tolerance_um` maps two
+        sites onto one channel.
     """
     ref = recs[0]
     ref_loc = channel_positions(ref)
@@ -130,7 +170,18 @@ def align_channels_by_location(recs, tolerance_um: float = 1.0):
 
 
 def check_gain_consistency(recs):
-    """Warn if recordings disagree on gain/offset -- µV scaling would be mixed."""
+    """Warn if recordings disagree on gain/offset, which would mix µV scaling.
+
+    Parameters
+    ----------
+    recs : list of spikeinterface BaseRecording
+        Recordings to compare.
+
+    Returns
+    -------
+    bool
+        True if gain and offset agree across all recordings.
+    """
     gains = [rec.get_property("gain_to_uV") for rec in recs]
     offsets = [rec.get_property("offset_to_uV") for rec in recs]
     consistent = True
@@ -155,7 +206,21 @@ def detect_bad_channels_auto(rec, output_dir: Path, config: dict, manual=None):
     be reviewed -- and so a later post-processing-only re-run can reuse the
     set that was sorted.
 
-    Returns the detected channel ids as strings.
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        Recording to analyse.
+    output_dir : pathlib.Path
+        Directory where ``bad_channels.json`` is written.
+    config : dict
+        Detection settings passed to ``si.detect_bad_channels``.
+    manual : list, optional
+        Manually listed bad channels, merged with the detected ones.
+
+    Returns
+    -------
+    list of str
+        Detected channel ids.
     """
     kwargs = {k: v for k, v in config.items() if k != "enabled"}
     # JSON has no set literal, so accept a list for channel_filters.
@@ -200,7 +265,24 @@ def resolve_bad_channels(bad_channels, info: dict):
     stable across re-runs and readable) or plain ints, which are taken as
     0-based row indices into concatenated.bin.
 
-    Returns (indices, ids) for the resolved channels, both in row order.
+    Parameters
+    ----------
+    bad_channels : list of (str or int)
+        Channel ids or 0-based row indices.
+    info : dict
+        Contents of ``concat_info.json``.
+
+    Returns
+    -------
+    indices : list of int
+        Row indices of the resolved channels, in row order.
+    ids : list of str
+        Matching channel ids.
+
+    Raises
+    ------
+    ValueError
+        If an entry cannot be resolved to a channel.
     """
     if not bad_channels:
         return [], []

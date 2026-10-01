@@ -58,6 +58,27 @@ class HDTuning:
     ``interval_mask`` is the mask over inter-frame intervals the curves were
     computed on, for ``run_decoder(interval_mask=...)`` -- None if it was not
     saved.
+
+    Attributes
+    ----------
+    session : str
+        Session name.
+    heading_deg : numpy.ndarray
+        Heading, one per shutter-closure event.
+    bin_centers_deg : numpy.ndarray
+        Centres of the heading bins.
+    unit_ids : numpy.ndarray
+        Unit ids, in the order of every per-unit array.
+    curves : numpy.ndarray
+        Tuning curves, shape (n_units, n_bins), rate in Hz.
+    depths : numpy.ndarray
+        Probe depth of each unit.
+    stats : dict
+        ``unit_id -> HDTuningStats``.
+    parameters : dict
+        Parameters the tuning was computed with.
+    interval_mask : numpy.ndarray or None
+        One value per inter-frame interval.
     """
 
     session: str
@@ -72,19 +93,47 @@ class HDTuning:
 
     @property
     def tuned_ids(self) -> np.ndarray:
-        """The significantly tuned units, in `unit_ids` order."""
+        """Get the significantly tuned units.
+
+        Returns
+        -------
+        numpy.ndarray
+            Unit ids, in `unit_ids` order.
+        """
         return np.array(
             [u for u in self.unit_ids if self.stats[u].significant],
             dtype=self.unit_ids.dtype,
         )
 
     def curve(self, unit_id) -> tuple[np.ndarray, np.ndarray]:
-        """``(bin_centers_deg, rate_hz)`` for one unit, as the widgets want it."""
+        """Get one unit's tuning curve, as the widgets want it.
+
+        Parameters
+        ----------
+        unit_id : int or str
+            Unit to look up.
+
+        Returns
+        -------
+        bin_centers_deg, rate_hz : numpy.ndarray
+            Heading bin centres and the unit's rate in each.
+        """
         index = int(np.flatnonzero(self.unit_ids == unit_id)[0])
         return self.bin_centers_deg, self.curves[index]
 
     def curve_dict(self, unit_ids=None) -> dict:
-        """``{unit_id: (bin_centers, rate)}``, for the tuning-curve widget."""
+        """Get tuning curves, for the tuning-curve widget.
+
+        Parameters
+        ----------
+        unit_ids : sequence, optional
+            Units to include; all by default.
+
+        Returns
+        -------
+        dict
+            ``{unit_id: (bin_centers, rate)}``.
+        """
         wanted = self.unit_ids if unit_ids is None else unit_ids
         return {u: self.curve(u) for u in wanted}
 
@@ -120,6 +169,35 @@ def save_hd_tuning(
     ``interval_mask`` is the one the curves were computed with, if any. Saving
     it lets the decoder be trained and tested on exactly the intervals the
     units were selected on, without recomputing whatever built it.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Destination, without extension.
+    session : str
+        Session name.
+    heading_deg : array-like
+        Heading, one per shutter-closure event.
+    tuning_curves, stats, unit_depths : dict
+        The dicts the tuning functions return, keyed by unit id. Units missing
+        from any of them are dropped rather than padded, so what comes back is
+        exactly the set that has a curve, a statistic and a depth.
+    parameters : dict, optional
+        Parameters the tuning was computed with.
+    interval_mask : array-like, optional
+        The mask the curves were computed with, if any. Saving it lets the
+        decoder be trained and tested on exactly the intervals the units were
+        selected on.
+
+    Returns
+    -------
+    pathlib.Path
+        Path of the saved files, without extension.
+
+    Raises
+    ------
+    ValueError
+        If the inputs are inconsistent.
     """
     path = Path(path).with_suffix(".npz")
 
@@ -204,7 +282,18 @@ def save_hd_tuning(
 
 
 def _plain(value):
-    """numpy scalars are not JSON-serializable; their Python twins are."""
+    """Convert numpy scalars, which are not JSON-serializable, to Python ones.
+
+    Parameters
+    ----------
+    value : object
+        Value to convert.
+
+    Returns
+    -------
+    object
+        The Python equivalent; non-finite floats become None.
+    """
     if isinstance(value, (np.bool_, bool)):
         return bool(value)
     if isinstance(value, (np.integer, int)):
@@ -215,7 +304,23 @@ def _plain(value):
 
 
 def load_hd_tuning(path) -> HDTuning:
-    """Read back what :func:`save_hd_tuning` wrote."""
+    """Read back what :func:`save_hd_tuning` wrote.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Path given to :func:`save_hd_tuning`.
+
+    Returns
+    -------
+    HDTuning
+        The saved tuning.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the files do not exist.
+    """
     path = Path(path).with_suffix(".npz")
     if not path.exists():
         raise FileNotFoundError(path)

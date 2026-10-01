@@ -217,7 +217,20 @@ BOMBCELL_KEYS = {
 }
 
 def deep_merge(base: dict, overrides: dict) -> dict:
-    """Recursively merge `overrides` onto a copy of `base`."""
+    """Recursively merge `overrides` onto a copy of `base`.
+
+    Parameters
+    ----------
+    base : dict
+        Defaults; not modified.
+    overrides : dict
+        Values that take precedence; nested dicts are merged key by key.
+
+    Returns
+    -------
+    dict
+        The merged copy.
+    """
     merged = copy.deepcopy(base)
     for key, value in overrides.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):

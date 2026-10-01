@@ -1,4 +1,4 @@
-"""The four-stage runner."""
+"""Four-stage runner. To use on cluster, call in a docker/apptainer container"""
 
 import json
 import multiprocessing
@@ -27,21 +27,29 @@ from .states import merge_to_concatenated_time, score_session
 def _run_in_fresh_process(func, *args):
     """Return `func(*args)`, computed in a newly started interpreter.
 
-    Stage 3 goes through this so that kilosort4 inherits nothing the earlier
-    stages did to this process. Run in the same process straight after
-    write_binary_recording's forked workers, kilosort4 has hung -- silently,
-    for hours, at "Re-computing universal templates from data." -- twice,
-    while a fresh process sorting the same binary got straight past it. What
-    it trips over is still unknown (the OpenBLAS deadlock-after-fork that
-    looked likeliest was ruled out: numpy and scipy in the container both
-    pass a fork test), so rather than undo one suspected piece of state,
-    kilosort gets none of it. "spawn" starts a clean interpreter; it does not
-    fork this one.
+    Ensures that kilosort4 starts in a fresh process and avoids issues wiht
+    silently hanging at "Re-computing universal templates from data."
 
-    A failure raises here with the child's own traceback in the message
-    rather than leaving only an exit code, and an interrupt here -- a
-    notebook's reaches only this process -- stops the child too, so a sort is
-    never left running unseen on the GPU.
+    A failure raises with the child's traceback in the message rather than
+    just leaving an exit code, and an interrupt here stops the child too,
+    so a sort is never left running unseen on the GPU.
+
+    Parameters
+    ----------
+    func : callable
+        Picklable function to run.
+    *args
+        Arguments for `func`.
+
+    Returns
+    -------
+    object
+        Whatever `func` returns.
+
+    Raises
+    ------
+    RuntimeError
+        If the child fails or dies without a result.
     """
     ctx = multiprocessing.get_context("spawn")
     receiver, sender = ctx.Pipe(duplex=False)
@@ -74,7 +82,17 @@ def _run_in_fresh_process(func, *args):
 
 
 def _report_back(sender, func, args):
-    """The child's side of _run_in_fresh_process."""
+    """Run `func` in the child process and send back the outcome.
+
+    Parameters
+    ----------
+    sender : multiprocessing.connection.Connection
+        Pipe end the result or traceback is sent through.
+    func : callable
+        Function to run.
+    args : tuple
+        Arguments for `func`.
+    """
     # `python -u` does not carry over to a spawned interpreter, and without it
     # a stdout redirected to a file (slurm's .out) holds prints back until exit.
     if hasattr(sys.stdout, "reconfigure"):
@@ -110,8 +128,8 @@ def run_pipeline(
         'spikeglx' or 'openephysbinary'. Auto-detected from the sidecar files
         (.meta vs structure.oebin/settings.xml) when None.
     stream_name : str, optional
-        Name of the raw phys stream saved by SpikeGLX/OpenEphys -- e.g.
-        'imec0.ap' or 'Record Node 101#Neuropix-PXI-100.ProbeA'. Inferred
+        Name of the raw phys stream saved by SpikeGLX/OpenEphys (e.g.
+        'imec0.ap' or 'Record Node 101#Neuropix-PXI-100.ProbeA'). Inferred
         from the filename/available streams when None.
     output_dir : Path, optional
         Where the concatenated binary, chanMap.mat, states, kilosort4 output
@@ -119,8 +137,8 @@ def run_pipeline(
     skip_statescoring : bool
         Skip brain-state scoring and reuse whatever is in output_dir/states.
     skip_preprocessing : bool
-        Skip loading/concatenating/writing the binary and reuse the one
-        already in output_dir.
+        Skip pre-processing stepas and loading/concatenating/writing the binary.
+        Instead reuse the one already in output_dir (or in phys_path)
     skip_sorting : bool
         Skip kilosort4 and reuse the existing output_dir/kilosort4 results.
     skip_postprocessing : bool
@@ -131,6 +149,11 @@ def run_pipeline(
     **pipeline_kwargs
         Overrides deep-merged onto DEFAULT_PIPELINE, e.g.
         run_pipeline(..., sorting={"nblocks": 5}).
+
+    Returns
+    -------
+    spikeinterface SortingAnalyzer or None
+        The analyzer, or None if post-processing was skipped.
     """
     pipeline = deep_merge(DEFAULT_PIPELINE, pipeline_kwargs)
     si.set_global_job_kwargs(**pipeline["job_kwargs"])
@@ -145,7 +168,7 @@ def run_pipeline(
 
     # ── Keep every intermediate write off the home partition ─────────────
     # kilosort4's intermediates are ~the size of the raw recording (hundreds
-    # of GB), and home partition quotas are too small.
+    # of GB), and cluster home partition quotas are too small.
     # Three separate things have to be redirected:
     #   1. spikeinterface's cache (defaults to tempfile.gettempdir())
     #   2. TMPDIR/TMP/TEMP, which numpy memmap, torch and kilosort4 consult
@@ -235,7 +258,7 @@ def run_pipeline(
                 rec, output_dir, detect_cfg, manual=bad_channels
             )
 
-    # Resolve up front so a bad entry fails now rather than after sorting.
+    # Resolve up front so a bad entry fails before trying to sort.
     _, bad_channel_ids = resolve_bad_channels(bad_channels, info)
 
     # ── 3/4 Spike sorting ────────────────────────────────────────────────

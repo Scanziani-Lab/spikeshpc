@@ -22,6 +22,11 @@ def warn_if_noninteractive_backend() -> None:
     "succeeds", but no event ever fires, so the widget looks like it drew once
     and stopped responding. Run ``%matplotlib widget`` (or ``%matplotlib qt``)
     in its own cell before creating either widget.
+
+    Warns
+    -----
+    UserWarning
+        If the active backend is not interactive.
     """
     backend = matplotlib.get_backend().lower()
     if "inline" in backend or backend in _NON_INTERACTIVE_BACKENDS:

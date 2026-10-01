@@ -25,6 +25,18 @@ class HDTuningCurveWidget:
     Requires an interactive matplotlib backend (``%matplotlib widget`` or
     ``%matplotlib qt`` in Jupyter) and the figure to have keyboard focus
     (click on it once) before arrow keys will do anything.
+
+    Parameters
+    ----------
+    tuning_curves : dict
+        Output of :func:`optitrack.tuning.compute_all_units_tuning_curves`.
+    unit_depths : dict, optional
+        ``{unit_id: depth}`` from :func:`optitrack.tuning.get_unit_depths`;
+        shown alongside the unit's ID in the title.
+    stats : dict, optional
+        Output of :func:`optitrack.tuning.compute_hd_tuning_significance`.
+    show_null : bool, default True
+        Draw the shuffled band when `stats` carries one.
     """
 
     def __init__(
@@ -56,7 +68,18 @@ class HDTuningCurveWidget:
         self._draw()
 
     def _draw_null(self, unit_id) -> float:
-        """Shade the shuffled distribution. Returns its highest value, or 0."""
+        """Shade the shuffled distribution.
+
+        Parameters
+        ----------
+        unit_id : int or str
+            Unit being drawn.
+
+        Returns
+        -------
+        float
+            The band's highest value, or 0 if there is none.
+        """
         for artist in self._null_artists:
             artist.remove()
         self._null_artists = []
@@ -159,6 +182,22 @@ def show_hd_tuning_widget(
     binning, which is coarser than the plotted curve's by default -- both are
     smoothed in degrees, so they are comparable, but the band will look
     blockier.
+
+    Parameters
+    ----------
+    tuning_curves : dict
+        Output of :func:`optitrack.tuning.compute_all_units_tuning_curves`.
+    unit_depths : dict, optional
+        ``{unit_id: depth}`` from :func:`optitrack.tuning.get_unit_depths`.
+    stats : dict, optional
+        Output of :func:`optitrack.tuning.compute_hd_tuning_significance`.
+    show_null : bool, default True
+        Draw the shuffled band when `stats` carries one.
+
+    Returns
+    -------
+    HDTuningCurveWidget
+        The open widget.
     """
     return HDTuningCurveWidget(
         tuning_curves, unit_depths=unit_depths, stats=stats, show_null=show_null

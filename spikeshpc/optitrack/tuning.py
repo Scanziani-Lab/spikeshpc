@@ -18,24 +18,69 @@ from scipy.ndimage import gaussian_filter1d
 
 
 def _frame_spike_counts(sorting, unit_id, frame_times: np.ndarray) -> np.ndarray:
-    """Spike count in each inter-frame interval of ``frame_times``."""
+    """Count spikes in each inter-frame interval.
+
+    Parameters
+    ----------
+    sorting : spikeinterface BaseSorting
+        Sorting holding the unit.
+    unit_id : int or str
+        Unit to count.
+    frame_times : numpy.ndarray
+        Frame times in seconds.
+
+    Returns
+    -------
+    numpy.ndarray
+        Count per interval, length ``len(frame_times) - 1``.
+    """
     spike_times = sorting.get_unit_spike_train(unit_id, return_times=True)
     counts, _ = np.histogram(spike_times, bins=frame_times)
     return counts.astype(float)
 
 
 def compute_frame_firing_rates(sorting, unit_id, frame_times: np.ndarray) -> np.ndarray:
-    """Firing rate (Hz) in each inter-frame interval of ``frame_times``.
+    """Compute the firing rate in each inter-frame interval.
 
-    ``frame_times`` must be on the same clock as the sorting's spike times --
-    i.e. the (aligned) shutter-closure timestamps, not the OptiTrack take's
-    own clock. Returns an array of length ``len(frame_times) - 1``.
+    Parameters
+    ----------
+    sorting : spikeinterface BaseSorting
+        Sorting holding the unit.
+    unit_id : int or str
+        Unit to measure.
+    frame_times : numpy.ndarray
+        Frame times in seconds. Must be on the same clock as the sorting's
+        spike times -- i.e. the (aligned) shutter-closure timestamps, not the
+        OptiTrack take's own clock.
+
+    Returns
+    -------
+    numpy.ndarray
+        Rate in Hz per interval, length ``len(frame_times) - 1``.
     """
     return _frame_spike_counts(sorting, unit_id, frame_times) / np.diff(frame_times)
 
 
 def _check_interval_mask(interval_mask, n_intervals: int):
-    """Validate an interval mask, or None. Returns a boolean array or None."""
+    """Validate an interval mask.
+
+    Parameters
+    ----------
+    interval_mask : array-like or None
+        Mask over inter-frame intervals.
+    n_intervals : int
+        Expected length.
+
+    Returns
+    -------
+    numpy.ndarray of bool or None
+        The mask, or None if `interval_mask` is None.
+
+    Raises
+    ------
+    ValueError
+        If the length is wrong or the mask keeps no intervals.
+    """
     if interval_mask is None:
         return None
     keep = np.asarray(interval_mask, dtype=bool)
@@ -53,7 +98,22 @@ def _check_interval_mask(interval_mask, n_intervals: int):
 def _bin_headings(
     heading_deg: np.ndarray, n_bins: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Bin centers (deg) and the bin index of each entry of ``heading_deg``."""
+    """Bin headings around the circle.
+
+    Parameters
+    ----------
+    heading_deg : numpy.ndarray
+        Headings in degrees.
+    n_bins : int
+        Number of bins.
+
+    Returns
+    -------
+    bin_centers : numpy.ndarray
+        Bin centres, in degrees.
+    bin_idx : numpy.ndarray
+        Bin index of each entry of `heading_deg`.
+    """
     bin_edges = np.linspace(0.0, 360.0, n_bins + 1)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
     bin_idx = np.clip(np.digitize(heading_deg, bin_edges) - 1, 0, n_bins - 1)
@@ -67,11 +127,28 @@ def _occupancy_normalized_rate(
     n_bins: int,
     smooth_sigma_deg: float,
 ) -> np.ndarray:
-    """Smoothed rate (Hz) per heading bin, given pre-binned headings.
+    """Compute the smoothed rate per heading bin, given pre-binned headings.
 
-    ``summed_occupancy`` is the time spent in each bin, i.e. the denominator
-    that :func:`compute_hd_tuning_curve` builds; it is fixed across the shuffles
-    of :func:`compute_hd_tuning_significance`, so it is computed once by the caller.
+    Parameters
+    ----------
+    bin_idx : numpy.ndarray
+        Bin index of each interval.
+    spike_counts : numpy.ndarray
+        Spike count of each interval.
+    summed_occupancy : numpy.ndarray
+        Time spent in each bin, i.e. the denominator that
+        :func:`compute_hd_tuning_curve` builds. It is fixed across the
+        shuffles of :func:`compute_hd_tuning_significance`, so it is computed
+        once by the caller.
+    n_bins : int
+        Number of bins.
+    smooth_sigma_deg : float
+        Width of the circular Gaussian smoothing, in degrees.
+
+    Returns
+    -------
+    numpy.ndarray
+        Rate in Hz per bin.
     """
     summed_spikes = np.bincount(bin_idx, weights=spike_counts, minlength=n_bins)
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -88,14 +165,33 @@ def compute_hd_tuning_curve(
     n_bins: int = 360,
     smooth_sigma_deg: float = 5.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Circular, occupancy-normalized tuning curve: rate (Hz) vs. heading bin.
+    """Compute a circular, occupancy-normalized tuning curve: rate vs. heading bin.
 
-    ``heading_deg`` and ``firing_rate`` are one value per interval (same
-    length). Occupancy-weighting (spike count summed per bin / time summed
-    per bin, rather than a plain mean of per-interval rates) matters when the
-    animal spends unequal time at different headings; pass ``occupancy_time``
-    (interval durations) for that -- otherwise every interval is weighted
-    equally. Smoothing wraps at 0/360 degrees.
+    Occupancy-weighting (spike count summed per bin / time summed per bin,
+    rather than a plain mean of per-interval rates) matters when the animal
+    spends unequal time at different headings. Smoothing wraps at 0/360
+    degrees.
+
+    Parameters
+    ----------
+    heading_deg : numpy.ndarray
+        Heading per interval, in degrees.
+    firing_rate : numpy.ndarray
+        Firing rate per interval, in Hz; same length as `heading_deg`.
+    occupancy_time : numpy.ndarray, optional
+        Interval durations, in seconds. Otherwise every interval is weighted
+        equally.
+    n_bins : int, default 360
+        Number of heading bins.
+    smooth_sigma_deg : float, default 5.0
+        Width of the circular Gaussian smoothing, in degrees.
+
+    Returns
+    -------
+    bin_centers : numpy.ndarray
+        Bin centres, in degrees.
+    smoothed : numpy.ndarray
+        Rate in Hz per bin.
     """
     if occupancy_time is None:
         occupancy_time = np.ones_like(firing_rate)
@@ -115,14 +211,25 @@ def compute_hd_tuning_curve(
 def compute_mean_vector_length(
     bin_centers_deg: np.ndarray, rate: np.ndarray
 ) -> tuple[float, float]:
-    """Directionality of a tuning curve: (mean vector length, preferred direction).
+    """Measure the directionality of a tuning curve.
 
     The mean vector length (a.k.a. the Rayleigh vector length) is the rate-
     weighted circular mean of the heading bins, normalized by the summed rate:
-    0 for a flat curve, 1 for all firing in a single bin. The preferred
-    direction is that vector's angle, in [0, 360) degrees.
+    0 for a flat curve, 1 for all firing in a single bin.
 
-    Returns ``(nan, nan)`` for a silent unit (no firing in any bin).
+    Parameters
+    ----------
+    bin_centers_deg : numpy.ndarray
+        Heading bin centres, in degrees.
+    rate : numpy.ndarray
+        Rate in each bin.
+
+    Returns
+    -------
+    mvl : float
+        Mean vector length; NaN for a silent unit (no firing in any bin).
+    preferred_deg : float
+        The vector's angle, in [0, 360) degrees; NaN for a silent unit.
     """
     total = rate.sum()
     if not total > 0:
@@ -146,6 +253,39 @@ class HDTuningStats:
     floor but fell below the population MVL cut, ``mvl_cutoff`` (NaN when no
     cut was applied); see :func:`apply_mvl_cutoff`. Such a unit is not
     ``significant``.
+
+    Attributes
+    ----------
+    mean_vector_length : float
+        Mean vector length of the unit's curve.
+    preferred_direction_deg : float
+        Angle of the mean vector, in degrees.
+    peak_rate_hz, mean_rate_hz : float
+        Peak and mean of the curve, in Hz.
+    n_spikes : int
+        Spikes the curve rests on.
+    p_value : float
+        Fraction of shuffles whose mean vector length reached the observed
+        one (see :func:`compute_hd_tuning_significance`), so it is bounded
+        below by ``1 / (n_shuffles + 1)``.
+    mvl_threshold : float
+        Critical value: the ``100 * (1 - alpha)``th percentile of this unit's
+        own null distribution.
+    significant : bool
+        Whether the unit counts as tuned.
+    too_quiet : bool, default False
+        Peak rate below the floor.
+    weakly_tuned : bool, default False
+        Passed the shuffle test but fell below the population MVL cut.
+    mvl_cutoff : float, default NaN
+        The MVL cut applied, NaN if none.
+    null_band : numpy.ndarray or None
+        Per-bin envelope of the shuffled curves, shape (n_percentiles,
+        n_bins), in Hz.
+    null_bin_centers_deg : numpy.ndarray or None
+        Bin centres of `null_band`.
+    null_percentiles : tuple
+        Percentiles of `null_band`.
     """
 
     mean_vector_length: float
@@ -176,7 +316,7 @@ class HDTuningStats:
 
 
 def find_bimodal_threshold(values) -> float:
-    """The cut that best splits ``values`` into a low group and a high group.
+    """Find the cut that best splits values into a low group and a high group.
 
     Otsu's method, done exactly: every split between consecutive sorted values
     is tried and the one maximizing the between-group variance wins, which is
@@ -186,6 +326,21 @@ def find_bimodal_threshold(values) -> float:
 
     It always returns a split, bimodal or not -- look at the distribution
     before trusting it on a new dataset.
+
+    Parameters
+    ----------
+    values : array-like
+        Values to split; non-finite ones are ignored.
+
+    Returns
+    -------
+    float
+        The threshold.
+
+    Raises
+    ------
+    ValueError
+        If there are fewer than two distinct finite values.
     """
     v = np.sort(np.asarray(values, dtype=float))
     v = v[np.isfinite(v)]
@@ -204,13 +359,10 @@ def find_bimodal_threshold(values) -> float:
 
 
 def apply_mvl_cutoff(stats: dict, min_mvl) -> float:
-    """Drop significant units whose mean vector length is below a cut. In place.
+    """Drop significant units whose mean vector length is below a cut, in place.
 
-    ``min_mvl`` is None (no cut), a float (the cut itself), or ``"bimodal"``
-    (the cut :func:`find_bimodal_threshold` picks from the MVLs of the units
-    that passed the shuffle test and the rate floor). Units below the cut are
-    flagged ``weakly_tuned`` and lose ``significant``; everything else is left
-    as it was. Returns the cut used, NaN for none.
+    Units below the cut are flagged ``weakly_tuned`` and lose ``significant``;
+    everything else is left as it was.
 
     The shuffle test only asks whether a curve beats chance, and with enough
     spikes a barely-directional curve does. Among tuned units the MVLs tend to
@@ -222,6 +374,25 @@ def apply_mvl_cutoff(stats: dict, min_mvl) -> float:
     ``HDTuning.stats``) to try a different ``min_mvl`` without redoing the
     shuffles: the candidates are the units that were significant *before* any
     earlier cut, and ``None`` restores them.
+
+    Parameters
+    ----------
+    stats : dict
+        ``{unit_id: HDTuningStats}``; modified in place.
+    min_mvl : None or float or "bimodal"
+        None for no cut, a float for the cut itself, or ``"bimodal"`` for the
+        cut :func:`find_bimodal_threshold` picks from the MVLs of the units
+        that passed the shuffle test and the rate floor.
+
+    Returns
+    -------
+    float
+        The cut used, NaN for none.
+
+    Raises
+    ------
+    ValueError
+        If `min_mvl` is not one of the accepted forms.
     """
     candidates = [s for s in stats.values() if s.significant or s.weakly_tuned]
 
@@ -268,9 +439,9 @@ def compute_hd_tuning_significance(
 ) -> dict:
     """Test each unit's tuning curve against a shifted-spike-train null.
 
-    Returns ``{unit_id: HDTuningStats}``. Arguments shared with
-    :func:`compute_all_units_tuning_curves` mean the same thing there, and
-    should be given the same values so the tested curves are the plotted ones.
+    Arguments shared with :func:`compute_all_units_tuning_curves` mean the same
+    thing there, and should be given the same values so the tested curves are
+    the plotted ones.
 
     The statistic is the tuning curve's mean vector length
     (:func:`compute_mean_vector_length`). The null distribution comes from
@@ -287,34 +458,84 @@ def compute_hd_tuning_significance(
     threshold: across many units, correct for multiple comparisons (or read
     ``p_value`` yourself) rather than trusting the flag on its own.
 
-    ``min_peak_rate_hz`` additionally requires the curve to reach that rate
-    somewhere before the unit counts as tuned, and flags the rest as
-    ``too_quiet``. The shuffle test asks whether a unit's firing is more
-    concentrated in heading than chance, which a unit firing a handful of
-    spikes can satisfy on sparsity alone -- the shifted null is just as sparse,
-    so a couple of spikes that happen to land together beat it. Such a curve is
-    not wrong, it is simply an estimate from almost nothing, and it carries
-    nearly no information into a decoder's likelihood. Default 0.0 keeps every
-    unit the test passes; 1 Hz is a reasonable floor for decoding.
+    The shuffle test asks whether a unit's firing is more concentrated in
+    heading than chance, which a unit firing a handful of spikes can satisfy on
+    sparsity alone -- the shifted null is just as sparse, so a couple of spikes
+    that happen to land together beat it. Such a curve is not wrong, it is
+    simply an estimate from almost nothing, and it carries nearly no
+    information into a decoder's likelihood; see `min_peak_rate_hz`.
 
-    ``min_mvl`` then cuts, among the units still significant, the ones whose
-    mean vector length is low: None (default) for no cut, a float to use as
-    the cut, or ``"bimodal"`` to pick it from the tuned units' MVL
-    distribution. They are flagged ``weakly_tuned``; the cut used is on every
-    unit's ``mvl_cutoff``. See :func:`apply_mvl_cutoff`, which can also re-cut
-    saved stats without recomputing them.
-
-    ``null_percentiles`` keeps the shuffled *curves* as well as their summary
-    statistic, as a per-bin envelope on ``HDTuningStats.null_band`` -- what a
-    chance curve looks like for this unit's own spike count and the animal's
-    own occupancy. Drawing it under the real curve
-    (:func:`optitrack.widgets.show_hd_tuning_widget`) turns "p = 0.002" back
-    into something that can be looked at, which matters most for the sparse
-    units where a p-value is least intuitive. Pass ``()`` to skip it.
-
-    Read that band as pointwise, not simultaneous: across 36 bins, a real
+    Read the null band as pointwise, not simultaneous: across 36 bins, a real
     curve poking above the 97.5th percentile in one of them is unremarkable.
     The MVL p-value is still the test; the band is for seeing what it tested.
+
+    Parameters
+    ----------
+    analyzer : spikeinterface SortingAnalyzer
+        Analyzer holding the sorting.
+    heading_deg : numpy.ndarray
+        Heading per frame, in degrees.
+    frame_times : numpy.ndarray
+        Frame times in seconds, matched 1:1 with `heading_deg`.
+    unit_ids : sequence, optional
+        Units to test; all by default.
+    n_bins : int, default 36
+        Number of heading bins.
+    smooth_sigma_deg : float, default 10.0
+        Width of the circular Gaussian smoothing, in degrees.
+    n_shuffles : int, default 500
+        Number of shifted spike trains. The statistic is the tuning curve's
+        mean vector length (:func:`compute_mean_vector_length`); the null
+        comes from circularly shifting the unit's per-interval spike counts
+        against the heading and recomputing the curve. Shifting rather than
+        permuting keeps the spike train's own temporal structure (bursting,
+        slow rate drift) and the animal's occupancy intact, and only destroys
+        their alignment -- an analytic Rayleigh test would instead assume
+        independent samples and uniform sampling of heading, and would call
+        almost every unit tuned.
+    min_shift_s : float, default 20.0
+        Smallest random shift, in seconds.
+    alpha : float, default 0.01
+        ``p_value`` is ``(1 + #{shuffled MVL >= observed}) / (n_shuffles +
+        1)``, and ``significant`` is ``p_value <= alpha``. Note this is a
+        per-unit threshold: across many units, correct for multiple
+        comparisons (or read ``p_value`` yourself) rather than trusting the
+        flag on its own.
+    seed : int, default 0
+        Random seed.
+    interval_mask : array-like, optional
+        Restrict to a subset of inter-frame intervals; see
+        :func:`compute_all_units_tuning_curves`.
+    min_peak_rate_hz : float, default 0.0
+        The curve must reach this rate somewhere before the unit counts as
+        tuned; the rest are flagged ``too_quiet``. The default keeps every
+        unit the test passes; 1 Hz is a reasonable floor for decoding.
+    null_percentiles : tuple of float, default (2.5, 50.0, 97.5)
+        Keep the shuffled *curves* as well as their summary statistic, as a
+        per-bin envelope on ``HDTuningStats.null_band`` -- what a chance
+        curve looks like for this unit's own spike count and the animal's own
+        occupancy. Drawing it under the real curve
+        (:func:`optitrack.widgets.show_hd_tuning_widget`) turns "p = 0.002"
+        back into something that can be looked at, which matters most for the
+        sparse units where a p-value is least intuitive. Pass ``()`` to skip
+        it.
+    min_mvl : None or float or "bimodal", default None
+        Cut, among the units still significant, the ones whose mean vector
+        length is low: None for no cut, a float to use as the cut, or
+        ``"bimodal"`` to pick it from the tuned units' MVL distribution. They
+        are flagged ``weakly_tuned``; the cut used is on every unit's
+        ``mvl_cutoff``. See :func:`apply_mvl_cutoff`, which can also re-cut
+        saved stats without recomputing them.
+
+    Returns
+    -------
+    dict
+        ``{unit_id: HDTuningStats}``.
+
+    Raises
+    ------
+    ValueError
+        If the inputs are inconsistent or `min_mvl` is invalid.
     """
     if len(heading_deg) != len(frame_times):
         raise ValueError(
@@ -414,11 +635,23 @@ def compute_hd_tuning_significance(
 
 
 def get_unit_depths(analyzer, unit_ids=None) -> dict:
-    """Probe depth (the unit_locations y-coordinate, in the probe's native units) per unit.
+    """Get the probe depth of each unit.
 
+    Depth is the unit_locations y-coordinate, in the probe's native units.
     Requires the analyzer to have a computed ``"unit_locations"`` extension.
-    Pass ``unit_ids`` to restrict/order the result (e.g. the same ids used for
-    :func:`compute_all_units_tuning_curves`); default is every unit.
+
+    Parameters
+    ----------
+    analyzer : spikeinterface SortingAnalyzer
+        Analyzer with unit locations.
+    unit_ids : sequence, optional
+        Restrict and order the result (e.g. the same ids used for
+        :func:`compute_all_units_tuning_curves`); default is every unit.
+
+    Returns
+    -------
+    dict
+        ``{unit_id: depth}``.
     """
     locations = analyzer.get_extension("unit_locations").get_data()
     depth_by_unit = dict(zip(analyzer.sorting.unit_ids, locations[:, 1]))
@@ -428,7 +661,7 @@ def get_unit_depths(analyzer, unit_ids=None) -> dict:
 
 
 def get_kilosort_unit_locations(ks_path, unit_ids=None) -> dict:
-    """``{unit_id: (x, y)}`` in probe coordinates, from kilosort's own spike positions.
+    """Get unit locations from kilosort's own spike positions.
 
     kilosort4 estimates an (x, y) for every spike (``spike_positions.npy``)
     but saves no per-cluster location, so a unit's is taken here as the median
@@ -439,6 +672,25 @@ def get_kilosort_unit_locations(ks_path, unit_ids=None) -> dict:
     Clusters come from ``spike_clusters.npy``, i.e. after any curation merges,
     matching the unit ids ``si.read_kilosort`` gives. ``unit_ids`` restricts
     and orders the result (default: every cluster with spikes).
+
+    Parameters
+    ----------
+    ks_path : str or pathlib.Path
+        Kilosort results directory.
+    unit_ids : sequence, optional
+        Restrict and order the result.
+
+    Returns
+    -------
+    dict
+        ``{unit_id: (x, y)}`` in probe coordinates.
+
+    Raises
+    ------
+    ValueError
+        If the kilosort outputs are inconsistent.
+    KeyError
+        If a requested unit has no spikes.
     """
     from pathlib import Path
 
@@ -473,23 +725,39 @@ def compute_all_units_tuning_curves(
     smooth_sigma_deg: float = 10.0,
     interval_mask=None,
 ) -> dict:
-    """Tuning curve for each unit in ``unit_ids`` (default: every unit in ``analyzer.sorting``).
+    """Compute a tuning curve for each unit.
 
-    Pass ``unit_ids`` (e.g. the ones labeled "good") to skip the rest rather
-    than computing and discarding their tuning curves.
+    Parameters
+    ----------
+    analyzer : spikeinterface SortingAnalyzer
+        Analyzer holding the sorting.
+    heading_deg : numpy.ndarray
+        Heading per frame, in degrees. Must be the same length as
+        `frame_times` -- i.e. already indexed down to the frames returned by
+        :func:`optitrack.sync.align_frames_to_shutter_events`, matched 1:1 with
+        the (aligned) shutter-closure timestamps. The last entry of each has
+        no following interval and is dropped internally.
+    frame_times : numpy.ndarray
+        Frame times in seconds.
+    unit_ids : sequence, optional
+        Units to compute (e.g. the ones labeled "good"), skipping the rest
+        rather than computing and discarding their curves; default is every
+        unit in ``analyzer.sorting``.
+    n_bins : int, default 360
+        Number of heading bins.
+    smooth_sigma_deg : float, default 10.0
+        Width of the circular Gaussian smoothing, in degrees.
+    interval_mask : array-like, optional
+        Length ``len(frame_times) - 1``; restricts the curve to a subset of
+        inter-frame intervals -- the wake epochs, say. Pass the *full* arrays
+        alongside it rather than pre-filtering them: a filtered `frame_times`
+        splices the removed span into one enormous interval that absorbs every
+        spike fired during it. See :func:`spikeshpc.states.frames_in_states`.
 
-    ``heading_deg`` and ``frame_times`` must be the same length -- i.e.
-    ``heading_deg`` already indexed down to the frames returned by
-    :func:`optitrack.sync.align_frames_to_shutter_events`, matched 1:1 with
-    the (aligned) ``frame_times`` (the shutter-closure timestamps). The last
-    entry of each has no following interval and is dropped internally.
-
-    ``interval_mask`` (length ``len(frame_times) - 1``) restricts the curve to
-    a subset of inter-frame intervals -- the wake epochs, say. Pass the *full*
-    arrays alongside it rather than pre-filtering them: a filtered
-    ``frame_times`` splices the removed span into one enormous interval that
-    absorbs every spike fired during it. See
-    :func:`spikeshpc.states.frames_in_states`.
+    Returns
+    -------
+    dict
+        ``{unit_id: (bin_centers_deg, rate_hz)}``.
     """
     sorting = analyzer.sorting
     if unit_ids is None:
@@ -524,10 +792,7 @@ def plot_hd_tuning_population(
     n_hist_bins: int = 36,
     figsize=(10.0, 4.5),
 ):
-    """Where the population's tuning peaks: a histogram and every curve overlaid.
-
-    ``hd_tuning`` is an :class:`optitrack.store.HDTuning` (from
-    ``load_hd_tuning``). ``significant_only`` restricts to its ``tuned_ids``.
+    """Plot where the population's tuning peaks: a histogram and every curve overlaid.
 
     Left: how many units peak in each of ``n_hist_bins`` heading bins, where a
     unit's peak is the argmax of its saved curve -- the direction of maximal
@@ -546,7 +811,33 @@ def plot_hd_tuning_population(
     ``"hsv"`` is cyclic, like heading. Units that never fire have no peak and
     are left out.
 
-    Returns ``(fig, (ax_hist, ax_polar))``.
+    Parameters
+    ----------
+    hd_tuning : optitrack.store.HDTuning
+        Tuning, from ``load_hd_tuning``.
+    significant_only : bool, default True
+        Restrict to its ``tuned_ids``.
+    normalized : bool, default True
+        Divide each curve by its own peak.
+    cmap : str, default "hsv"
+        Anything ``matplotlib.colormaps`` takes; the default is cyclic, like
+        heading.
+    n_hist_bins : int, default 36
+        Number of heading bins in the histogram.
+    figsize : tuple of float, default (10.0, 4.5)
+        Figure size, in inches.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure.
+    axes : tuple of matplotlib.axes.Axes
+        ``(ax_hist, ax_polar)``.
+
+    Raises
+    ------
+    ValueError
+        If no unit has a peak to draw.
     """
     import matplotlib
     import matplotlib.pyplot as plt
@@ -626,20 +917,41 @@ def plot_tuning_comparison(
     colors=None,
     panel_size=(2.4, 1.9),
 ):
-    """Each unit's tuning curve under several conditions, one panel per unit.
+    """Plot each unit's tuning curve under several conditions, one panel per unit.
 
-    ``curve_sets`` is ``{condition: curves}``, each ``curves`` the dict
-    :func:`compute_all_units_tuning_curves` returns -- the same units during
-    moving and still wake, say, or the first and second half of a session. A
-    unit whose curve keeps its peak and shape across conditions codes heading
-    the same way in both; one whose curve flattens or moves does not.
+    A unit whose curve keeps its peak and shape across conditions codes heading
+    the same way in both; one whose curve flattens or moves does not. Curves
+    are in Hz, each panel scaled to its own unit, and each title gives the
+    conditions' mean vector lengths in legend order.
 
-    Curves are in Hz, each panel scaled to its own unit, and each title gives
-    the conditions' mean vector lengths in legend order. Only units with a
-    curve in every condition are drawn; ``unit_ids`` picks and orders them
-    (default: the first condition's order).
+    Parameters
+    ----------
+    curve_sets : dict
+        ``{condition: curves}``, each `curves` the dict
+        :func:`compute_all_units_tuning_curves` returns -- the same units
+        during moving and still wake, say, or the first and second half of a
+        session.
+    unit_ids : sequence, optional
+        Units to draw and their order (default: the first condition's order).
+        Only units with a curve in every condition are drawn.
+    ncols : int, default 6
+        Panels per row.
+    colors : sequence, optional
+        One colour per condition.
+    panel_size : tuple of float, default (2.4, 1.9)
+        Width and height of one panel, in inches.
 
-    Returns ``(fig, axes)``.
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure.
+    axes : numpy.ndarray of matplotlib.axes.Axes
+        The panels.
+
+    Raises
+    ------
+    ValueError
+        If there are no conditions, or no unit has a curve in every one.
     """
     import matplotlib.pyplot as plt
 
@@ -686,7 +998,17 @@ def plot_tuning_comparison(
 
 
 def _draw_direction_wheel(ax, cmap, n: int = 360):
-    """A ring colored by ``cmap`` around the heading circle, as the color key."""
+    """Draw a ring colored by `cmap` around the heading circle, as the color key.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Polar axes to draw on.
+    cmap : matplotlib.colors.Colormap
+        Colormap mapping heading to color.
+    n : int, default 360
+        Number of segments in the ring.
+    """
     theta = np.linspace(0.0, 2 * np.pi, n + 1)
     ax.pcolormesh(
         theta, [0.6, 1.0], (theta[:-1] / (2 * np.pi))[None, :],
@@ -714,31 +1036,59 @@ def plot_hd_tuning_on_probe(
     legend_mvls=(0.4, 0.6, 0.8),
     figsize=(8.0, 10.0),
 ):
-    """Where the head-direction units sit on the probe: one bubble per unit.
+    """Plot where the head-direction units sit on the probe: one bubble per unit.
 
-    Each bubble is drawn at the unit's ``unit_locations`` (``{unit_id: (x, y)}``
-    in probe coordinates, e.g. :func:`get_kilosort_unit_locations`), over the
-    probe outline and contacts as :func:`probeinterface.plotting.plot_probe`
-    draws them. Its *area* is proportional to the unit's mean vector length
-    (``size_per_mvl`` points^2 per unit MVL, a fixed scale so sessions can be
-    compared) and its color is the MVL's preferred direction on the cyclic
-    ``cmap``, keyed by the color wheel.
+    Each bubble is drawn over the probe outline and contacts as
+    :func:`probeinterface.plotting.plot_probe` draws them. Its *area* is
+    proportional to the unit's mean vector length (a fixed scale so sessions
+    can be compared) and its color is the MVL's preferred direction on the
+    cyclic `cmap`, keyed by the color wheel.
 
-    ``hd_tuning`` is an :class:`optitrack.store.HDTuning`. ``significant_only``
-    bubbles just its ``tuned_ids``; with ``show_untuned`` every other unit in
-    it is marked as a small grey dot, so the tuned ones can be read against
-    where units were recorded at all. ``probe`` is a probeinterface ``Probe``
-    or a path to a probeinterface JSON (the pipeline's ``probe.json``; its
-    first probe is used).
+    Left: the whole probe. Right: the inset depth range enlarged, its span
+    boxed on the left panel. Depth is the probe's y, measured up from the tip.
+    The whole-probe bubbles are drawn at a third of the inset's size, since
+    that panel is compressed several-fold; the MVL legend is at the inset's
+    scale.
 
-    Left: the whole probe. Right: ``inset_depth_um`` (``(low, high)`` in the
-    probe's y coordinates, or None for no inset) enlarged, its span boxed on
-    the left panel. Depth is the probe's y, measured up from the tip. The
-    whole-probe bubbles are drawn at a third of the inset's size, since that
-    panel is compressed several-fold; the MVL legend is at the inset's scale.
+    Parameters
+    ----------
+    hd_tuning : optitrack.store.HDTuning
+        Tuning to draw.
+    unit_locations : dict
+        ``{unit_id: (x, y)}`` in probe coordinates, e.g. from
+        :func:`get_kilosort_unit_locations`.
+    probe : probeinterface.Probe or str or pathlib.Path
+        A ``Probe`` or a path to a probeinterface JSON (the pipeline's
+        ``probe.json``; its first probe is used).
+    significant_only : bool, default True
+        Bubble just the ``tuned_ids``.
+    show_untuned : bool, default True
+        Mark every other unit as a small grey dot, so the tuned ones can be
+        read against where units were recorded at all.
+    inset_depth_um : tuple of float or None, default (1800.0, 2400.0)
+        ``(low, high)`` in the probe's y coordinates, or None for no inset.
+    cmap : str, default "hsv"
+        Cyclic colormap for preferred direction.
+    size_per_mvl : float, default 600.0
+        Bubble area, in points^2, per unit MVL.
+    legend_mvls : tuple of float, default (0.4, 0.6, 0.8)
+        MVLs shown in the size legend.
+    figsize : tuple of float, default (8.0, 10.0)
+        Figure size, in inches.
 
-    Returns ``(fig, axes)``, ``axes`` a dict with ``"probe"``, ``"inset"``
-    (absent without one) and ``"wheel"``.
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The figure.
+    axes : dict
+        ``"probe"``, ``"inset"`` (absent without one) and ``"wheel"``.
+
+    Raises
+    ------
+    ValueError
+        If there is nothing to draw.
+    KeyError
+        If a unit has no location.
     """
     import matplotlib
     import matplotlib.pyplot as plt

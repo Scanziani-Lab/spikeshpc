@@ -25,7 +25,18 @@ def _parent(path: str) -> str:
 
 
 def _template_root(template: str) -> str | None:
-    """Directory part of a '{session}' path template, above the placeholder."""
+    """Find the directory part of a ``{session}`` path template.
+
+    Parameters
+    ----------
+    template : str
+        Path template.
+
+    Returns
+    -------
+    str or None
+        Directory above the placeholder, or None if there is none.
+    """
     brace = template.find("{")
     if brace == -1:
         return _parent(template)
@@ -43,6 +54,16 @@ def bind_paths(pipeline: dict) -> list[str]:
 
     Explicit run.bind_paths wins; otherwise the recordings, the output and
     scratch directories, and the roots of the OptiTrack templates are used.
+
+    Parameters
+    ----------
+    pipeline : dict
+        Pipeline configuration.
+
+    Returns
+    -------
+    list of str
+        Directories to bind into the container.
     """
     run = pipeline.get("run") or {}
     if run.get("bind_paths"):

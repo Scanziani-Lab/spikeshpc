@@ -37,31 +37,59 @@ class TurnWidget:
     to either end, and the slider goes anywhere in between -- the keys of
     :class:`~spikeshpc.decoder_widget.DecodedWidget`.
 
-    ``time_s``, ``heading_deg`` and ``run_index`` are the trace ``turns`` was
-    found in; ``measured_deg`` optionally the measured heading in the same bins.
-    The window grows to ``max_window_s``, by default the whole trace or 15
-    minutes, whichever is shorter.
+    The decoded heading is drawn as dots or as a line. The line is cut only
+    where joining two bins would draw a movement that did not happen: at a
+    splice, and at a jump (a step over ``max_step_deg`` -- none with
+    ``np.inf``). Where the heading crosses 0/360 it goes the short way, out
+    through one edge of the axis and back in at the other, as the measured line
+    does.
 
-    ``decoded_marker`` draws the decoded heading as ``"dots"``, one per decoded
-    bin, or as a ``"line"``. The line is cut only where joining two bins would
-    draw a movement that did not happen: at a splice, and at a jump (a step over
-    ``max_step_deg`` -- none with ``np.inf``). Where the heading crosses 0/360
-    it goes the short way, out through one edge of the axis and back in at the
-    other, as the measured line does.
-
-    ``raster`` (a :class:`~spikeshpc.raster.UnitRaster`) adds the spikes of the
-    units the decoder read, on top: a row per unit, sorted by preferred
-    direction and colored by it through ``raster_color``. A window holding more
-    than ``max_raster_spikes`` spikes shows a note instead of the ticks.
-
-    ``apply_offset=True`` subtracts ``offset_deg`` -- notebook 3's
-    ``wake_offset_deg`` for the decode, the constant rotation between what the
-    decoder reads and the measured heading -- from the decoded heading before
-    it is drawn. Only the drawing moves: turns, velocity and drift do not
-    depend on a constant, and the raster stays in the decoder's frame.
+    Only the drawing moves with `apply_offset`: turns, velocity and drift do
+    not depend on a constant, and the raster stays in the decoder's frame.
 
     Requires an interactive matplotlib backend (``%matplotlib qt`` or
     ``%matplotlib widget``) and the figure to have keyboard focus: click it once.
+
+    Parameters
+    ----------
+    time_s, heading_deg : array-like
+        The trace `turns` was found in.
+    turns : Turns
+        Turns found in the trace.
+    run_index : array-like, optional
+        Run index of each bin, in the same trace.
+    measured_deg : array-like, optional
+        Measured heading in the same bins.
+    window_s : float, default 60.0
+        Initial window length, in seconds.
+    color : str, default "k"
+        Line colour.
+    min_window_s : float, default 5.0
+        Shortest window.
+    max_window_s : float, optional
+        Longest window; by default the whole trace or 15 minutes, whichever
+        is shorter.
+    raster : spikeshpc.raster.UnitRaster, optional
+        Spikes of the units the decoder read, drawn on top: a row per unit,
+        sorted by preferred direction and colored by it.
+    raster_color : str or Colormap, default "hsv"
+        Colormap for the raster.
+    max_raster_spikes : int, default 150000
+        A window holding more spikes shows a note instead of the ticks.
+    apply_offset : bool, default False
+        Subtract `offset_deg` from the decoded heading before drawing it.
+    offset_deg : float, optional
+        Constant rotation between what the decoder reads and the measured
+        heading (notebook 3's ``wake_offset_deg`` for the decode).
+    decoded_marker : {"dots", "line"}, default "dots"
+        How the decoded heading is drawn: one dot per decoded bin, or a line.
+
+    Notes
+    -----
+    ``left`` / ``right`` move by half a window, so consecutive views overlap.
+    ``up`` / ``down`` lengthen and shorten the window, ``home`` / ``end`` jump
+    to either end, and the slider goes anywhere in between -- the keys of
+    :class:`~spikeshpc.decoder_widget.DecodedWidget`.
     """
 
     def __init__(
@@ -223,7 +251,7 @@ class TurnWidget:
         self.t0 = float(np.clip(self.t0, 0.0, max(self.total_s - self.window_s, 0.0)))
 
     def _sync_slider(self):
-        """Keep the slider with the view without it firing back at us."""
+        """Move the slider with the view without it firing back."""
         self._syncing = True
         try:
             self.slider.valmax = max(self.total_s - self.window_s, 1e-9)
@@ -349,12 +377,24 @@ def show_turns(time_s, heading_deg, turns: Turns, window_s: float = 60.0, **kwar
 
     ``left``/``right`` pan by half a window, ``up``/``down`` change how much
     time is shown, ``home``/``end`` jump to either end, and the slider goes
-    anywhere. Pass the trace ``turns`` was found in; ``run_index``,
-    ``measured_deg`` and ``color`` go to :class:`TurnWidget`, as do ``raster``
-    and ``raster_color`` (the decoder's units' spikes on top, colored by
-    preferred direction, default ``"hsv"``), ``apply_offset`` with
-    ``offset_deg`` (notebook 3's wake offset, subtracted from the decoded
-    heading before it is drawn) and ``decoded_marker`` (``"dots"``, the
-    default, or ``"line"``).
+    anywhere.
+
+    Parameters
+    ----------
+    time_s, heading_deg : array-like
+        The trace `turns` was found in.
+    turns : Turns
+        Turns found in the trace.
+    window_s : float, default 60.0
+        Initial window length, in seconds.
+    **kwargs
+        Passed to :class:`TurnWidget`: ``run_index``, ``measured_deg``,
+        ``color``, ``raster``, ``raster_color``, ``apply_offset``,
+        ``offset_deg`` and ``decoded_marker``.
+
+    Returns
+    -------
+    TurnWidget
+        The open widget.
     """
     return TurnWidget(time_s, heading_deg, turns, window_s=window_s, **kwargs)

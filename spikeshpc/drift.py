@@ -26,7 +26,18 @@ DEFAULT_MAX_CHANNEL_DISTANCE = 32.0
 
 
 def probe_row_pitch(channel_locations):
-    """Smallest non-zero spacing between contact rows, in micrometres."""
+    """Smallest non-zero spacing between contact rows.
+
+    Parameters
+    ----------
+    channel_locations : numpy.ndarray
+        Contact positions, shape (n_channels, 2), in micrometres.
+
+    Returns
+    -------
+    float or None
+        Row pitch in micrometres, or None if it cannot be determined.
+    """
     y = np.unique(np.round(np.asarray(channel_locations, dtype=float)[:, 1], 3))
     if y.size < 2:
         return None
@@ -34,7 +45,24 @@ def probe_row_pitch(channel_locations):
 
 
 def _verdict(step_um, sig_interp, pitch):
-    """How much to trust a correction of this size."""
+    """Judge how much to trust a drift correction of this size.
+
+    Parameters
+    ----------
+    step_um : float
+        Drift step across the junction, in micrometres.
+    sig_interp : float
+        Kriging interpolation sigma, in micrometres.
+    pitch : float or None
+        Probe row pitch, in micrometres.
+
+    Returns
+    -------
+    level : str
+        Verdict label.
+    advice : str
+        Human-readable recommendation.
+    """
     if pitch is not None and step_um < pitch:
         return "negligible", "Below one row pitch. Concatenation is fine."
     if step_um <= sig_interp:
@@ -60,9 +88,27 @@ def _verdict(step_um, sig_interp, pitch):
 def drift_at_junction(output_dir, window_batches: int = 3, verbose: bool = True):
     """Summarise the drift step at every junction in a concatenated run.
 
-    `window_batches` batches either side of each junction are averaged. Returns
-    a dict with one entry per junction, or None when there is nothing to report
-    (a single session, or drift correction disabled with nblocks=0).
+    Parameters
+    ----------
+    output_dir : str or pathlib.Path
+        Run directory containing ``concat_info.json`` and the sorter output.
+    window_batches : int, default 3
+        Batches averaged on either side of each junction.
+    verbose : bool, default True
+        Print a report.
+
+    Returns
+    -------
+    dict or None
+        ``batch_size``, ``sampling_frequency``, ``sig_interp``,
+        ``max_channel_distance``, ``row_pitch_um`` and ``junctions`` (one
+        dict per junction). None when there is nothing to report (a single
+        session, or drift correction disabled with nblocks=0).
+
+    Raises
+    ------
+    FileNotFoundError
+        If pre-processing or sorting outputs are missing.
     """
     output_dir = Path(output_dir)
     info_path = output_dir / CONCAT_INFO_NAME
@@ -180,7 +226,22 @@ def drift_at_junction(output_dir, window_batches: int = 3, verbose: bool = True)
 
 
 def plot_drift(output_dir, ax=None, save: bool = True):
-    """Plot the per-batch drift with the session junctions marked."""
+    """Plot the per-batch drift with the session junctions marked.
+
+    Parameters
+    ----------
+    output_dir : str or pathlib.Path
+        Run directory.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw on; a new figure is created if omitted.
+    save : bool, default True
+        Save the figure to ``drift_at_junction.png`` in the sorter folder.
+
+    Returns
+    -------
+    matplotlib.axes.Axes or pathlib.Path
+        The saved figure path if `save`, otherwise the axes.
+    """
     import matplotlib
 
     if save and ax is None:

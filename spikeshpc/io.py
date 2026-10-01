@@ -14,10 +14,23 @@ from .config import CHANMAP_NAME, CONCAT_INFO_NAME, PROBE_NAME, SYNC_TIMES_NAME
 
 
 def detect_phys_type(phys_path: Path) -> str:
-    """Return 'spikeglx' or 'openephysbinary' by sniffing acquisition sidecars.
+    """Detect the acquisition system by sniffing sidecar files.
 
-    `phys_path` may be a session/run directory or a single binary file --
-    in the latter case its parent directory is searched.
+    Parameters
+    ----------
+    phys_path : pathlib.Path
+        Session/run directory, or a single binary file -- in the latter case
+        its parent directory is searched.
+
+    Returns
+    -------
+    {"spikeglx", "openephysbinary"}
+        The acquisition system.
+
+    Raises
+    ------
+    ValueError
+        If neither is recognised.
     """
     folder = phys_path.parent if phys_path.is_file() else phys_path
     # SpikeGLX writes a .meta ini file alongside every .bin.
@@ -35,7 +48,22 @@ def detect_phys_type(phys_path: Path) -> str:
 
 
 def _stream_candidates(stream_names, phys_type: str, band: str):
-    """Streams matching the requested band, per acquisition system."""
+    """Select the streams matching the requested band, per acquisition system.
+
+    Parameters
+    ----------
+    stream_names : sequence of str
+        All streams in the recording.
+    phys_type : str
+        Acquisition system.
+    band : str
+        "ap", "lf" or "adc".
+
+    Returns
+    -------
+    list of str
+        Matching stream names.
+    """
     if phys_type == "spikeglx":
         # 'imec0.ap' alongside 'imec0.lf', 'imec0.ap-SYNC' and 'nidq'. Analog
         # inputs land on the NI card rather than the probe.
@@ -66,10 +94,31 @@ def _stream_candidates(stream_names, phys_type: str, band: str):
 def infer_stream_name(
     phys_path: Path, folder: Path, phys_type: str, band: str = "ap"
 ) -> str | None:
-    """Pick the raw phys stream to load. Returns None if the band is absent.
+    """Pick the raw phys stream to load.
 
-    `band` is 'ap' (wideband/spikes) or 'lf' (LFP). Only the AP band is
-    guaranteed to exist -- Neuropixels 2.0 has no separate LF stream.
+    Only the AP band is guaranteed to exist -- Neuropixels 2.0 has no separate
+    LF stream.
+
+    Parameters
+    ----------
+    phys_path : pathlib.Path
+        Recording file or folder as given by the user.
+    folder : pathlib.Path
+        Recording folder.
+    phys_type : str
+        Acquisition system.
+    band : {"ap", "lf", "adc"}, default "ap"
+        "ap" is wideband/spikes, "lf" is LFP.
+
+    Returns
+    -------
+    str or None
+        Stream name, or None if the band is absent.
+
+    Raises
+    ------
+    ValueError
+        If the stream is ambiguous or cannot be determined.
     """
     # A SpikeGLX binary names its own stream: <run>_g0_t0.imec0.ap.bin
     if phys_path.is_file() and phys_type == "spikeglx" and band == "ap":
@@ -99,7 +148,7 @@ def infer_stream_name(
 
 
 def sync_clock_problem(rec, sample: int = 100_000) -> str | None:
-    """Why this recording's time vector cannot be trusted, or None if it can.
+    """Explain why a recording's time vector cannot be trusted.
 
     Open Ephys writes ``timestamps.npy`` per stream, but a stream that was
     never synchronized to the software clock gets a file of ``-1.0`` rather
@@ -112,6 +161,18 @@ def sync_clock_problem(rec, sample: int = 100_000) -> str | None:
     The endpoints and a stride through the middle are enough -- a time vector
     can be tens of gigabytes, and a partial monotonicity check that costs
     nothing is worth more than a total one nobody runs.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        Recording to check.
+    sample : int, default 100000
+        Number of timestamps sampled from the middle.
+
+    Returns
+    -------
+    str or None
+        The problem, or None if the clock looks usable.
     """
     for segment in range(rec.get_num_segments()):
         times = rec.get_times(segment_index=segment)
@@ -144,6 +205,16 @@ def _attach_sync_times(rec) -> bool:
     Relies on the extractor's ``_stream_folders``; returns False, attaching
     nothing, when that or any segment's sidecar is missing, so the caller can
     fall back to spikeinterface's own loading.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        Open Ephys recording to attach times to.
+
+    Returns
+    -------
+    bool
+        True if times were attached.
     """
     folders = getattr(rec, "_stream_folders", None)
     if not folders or len(folders) != rec.get_num_segments():
@@ -180,6 +251,16 @@ def _hide_streams_without_data(keep: str):
     name and a subclass cannot override it. A recording opened this way cannot
     be rebuilt from its folder afterwards, which is how spikeinterface clones
     one or sends it to a worker process: jobs on it need n_jobs=1.
+
+    Parameters
+    ----------
+    keep : str
+        Name of the stream being read, which is never hidden.
+
+    Yields
+    ------
+    None
+        Control, while the parser is swapped.
     """
     from neo.rawio.openephysbinaryrawio import OpenEphysBinaryRawIO as RawIO
 
@@ -219,6 +300,20 @@ def _read_openephys(folder, stream_name, **kwargs):
     otherwise make the ADC beside it unreadable too. Only a missing
     continuous.dat is retried, and the stream asked for is never the one
     hidden, so its own missing data is still an error.
+
+    Parameters
+    ----------
+    folder : str or pathlib.Path
+        Recording folder.
+    stream_name : str
+        Stream to read.
+    **kwargs
+        Passed to ``si.read_openephys``.
+
+    Returns
+    -------
+    spikeinterface BaseRecording
+        The recording.
     """
     try:
         return si.read_openephys(folder_path=folder, stream_name=stream_name, **kwargs)
@@ -251,6 +346,25 @@ def read_openephys_synced(folder, stream_name, require_sync: bool = False):
     :func:`_attach_sync_times`) -- at 30 kHz they are 11 GB for 12.75 hours.
     Other streams in the recording need not still have their continuous.dat
     (see :func:`_read_openephys`).
+
+    Parameters
+    ----------
+    folder : str or pathlib.Path
+        Recording folder.
+    stream_name : str
+        Stream to read.
+    require_sync : bool, default False
+        Raise instead of falling back to the inferred clock.
+
+    Returns
+    -------
+    spikeinterface BaseRecording
+        The recording, timed on the acquisition clock where possible.
+
+    Raises
+    ------
+    ValueError
+        If `require_sync` and the stream carries no sync.
     """
     rec = _read_openephys(folder, stream_name, load_sync_timestamps=False)
     if not _attach_sync_times(rec):
@@ -277,6 +391,25 @@ def open_stream(folder, phys_type: str, stream_name: str):
     The single place either acquisition system is handed to spikeinterface, so
     that "always use the synchronized timestamps" is a property of the package
     rather than a habit each call site has to remember.
+
+    Parameters
+    ----------
+    folder : str or pathlib.Path
+        Recording folder.
+    phys_type : str
+        Acquisition system.
+    stream_name : str
+        Stream to open.
+
+    Returns
+    -------
+    spikeinterface BaseRecording
+        The stream.
+
+    Raises
+    ------
+    ValueError
+        If `phys_type` is unsupported.
     """
     if phys_type == "spikeglx":
         return si.read_spikeglx(folder_path=folder, stream_name=stream_name)
@@ -293,9 +426,30 @@ def read_recording(
 ):
     """Load one recording, auto-detecting acquisition system and stream.
 
-    Accepts either a run/session directory or a path to a raw binary file.
-    Returns (recording, phys_type, stream_name); recording is None when
-    `band` is absent from this dataset.
+    Parameters
+    ----------
+    phys_path : str or pathlib.Path
+        Run/session directory or path to a raw binary file.
+    phys_type : str, optional
+        Acquisition system; detected if None.
+    stream_name : str, optional
+        Stream to load; inferred if None.
+    band : str, default "ap"
+        Band to load.
+
+    Returns
+    -------
+    recording : spikeinterface BaseRecording or None
+        None when `band` is absent from this dataset.
+    phys_type : str
+        Acquisition system.
+    stream_name : str or None
+        Stream that was loaded.
+
+    Raises
+    ------
+    FileNotFoundError
+        If `phys_path` does not exist.
     """
     phys_path = Path(phys_path).resolve()
     if not phys_path.exists():
@@ -321,6 +475,25 @@ def write_channel_map(rec, output_dir: Path, channel_rows=None) -> Path:
     want -- SpikeGLX keeps SY0 as a 385th row -- so `channel_rows` gives each
     channel's row index in the file. kilosort reads `n_chan_bin` rows per
     sample and then keeps `chanMap`, so this is how the extra rows get dropped.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        Recording whose probe geometry is written.
+    output_dir : pathlib.Path
+        Directory to write into.
+    channel_rows : sequence of int, optional
+        Row index of each channel in the binary.
+
+    Returns
+    -------
+    pathlib.Path
+        Path of the written file.
+
+    Raises
+    ------
+    ValueError
+        If `channel_rows` does not match the recording's channels.
     """
     if channel_rows is None:
         from spikeinterface.sorters.external.kilosortbase import KilosortBase
@@ -363,6 +536,16 @@ def _openephys_stream_folders(folder: Path) -> list:
     Found by the folder rather than by the continuous.dat in it, which may have
     been deleted to save space once the stream was preprocessed -- the
     timestamps.npy beside it, which is all the clock needs, is still there.
+
+    Parameters
+    ----------
+    folder : pathlib.Path
+        Recording folder.
+
+    Returns
+    -------
+    list of pathlib.Path
+        Stream folders.
     """
     return [
         stream
@@ -389,7 +572,22 @@ def _openephys_source_binary(folder: Path, stream_name: str):
 
 
 def locate_source_binary(phys_path: Path, phys_type: str, stream_name: str):
-    """Path to the flat binary behind a stream, or None if it is not obvious."""
+    """Locate the flat binary behind a stream.
+
+    Parameters
+    ----------
+    phys_path : pathlib.Path
+        Recording file or folder.
+    phys_type : str
+        Acquisition system.
+    stream_name : str
+        Stream of interest.
+
+    Returns
+    -------
+    pathlib.Path or None
+        Path of the binary, or None if it is not obvious.
+    """
     phys_path = Path(phys_path)
     if phys_path.is_file() and phys_path.suffix in (".bin", ".dat", ".raw"):
         return phys_path
@@ -406,6 +604,20 @@ def _timestamps_sidecar(phys_path, phys_type: str, stream_name: str):
 
     The same stream :func:`locate_source_binary` finds, found by its folder
     instead: the clock outlives a continuous.dat deleted to save space.
+
+    Parameters
+    ----------
+    phys_path : str or pathlib.Path
+        Recording file or folder.
+    phys_type : str
+        Acquisition system.
+    stream_name : str
+        Stream of interest.
+
+    Returns
+    -------
+    pathlib.Path or None
+        Path of ``timestamps.npy``, or None if it cannot be found.
     """
     if phys_type != "openephysbinary":
         return None
@@ -421,6 +633,16 @@ def _first_timestamp(sidecar: Path):
     """The first entry of an Open Ephys timestamps.npy, if it is a real time.
 
     Memory-mapped: these files run to gigabytes and one element is wanted.
+
+    Parameters
+    ----------
+    sidecar : pathlib.Path
+        Path of ``timestamps.npy``.
+
+    Returns
+    -------
+    float or None
+        First timestamp, or None if it is not finite and non-negative.
     """
     if not sidecar.exists():
         return None
@@ -429,7 +651,7 @@ def _first_timestamp(sidecar: Path):
 
 
 def probe_start_time(phys_path, phys_type: str):
-    """When the sorted stream's first sample happened, on the acquisition clock.
+    """Get when the sorted stream's first sample happened, on the acquisition clock.
 
     This is the number that converts between the two clocks the pipeline uses.
     Spike times out of kilosort, and the state-scoring bin grid, both count
@@ -443,8 +665,19 @@ def probe_start_time(phys_path, phys_type: str):
     neo, which is a great deal of work to read one float, and it fails on a
     tree that has the continuous data but not every sidecar -- or every
     sidecar but not the continuous data, once the probe's has been deleted.
-    Returns None when there is no synchronized clock to speak of, so callers
-    can leave times where they are instead of shifting them by a guess.
+    Parameters
+    ----------
+    phys_path : str or pathlib.Path
+        Recording file or folder.
+    phys_type : str
+        Acquisition system.
+
+    Returns
+    -------
+    float or None
+        Start time in seconds, or None when there is no synchronized clock to
+        speak of, so callers can leave times where they are instead of
+        shifting them by a guess.
     """
     if phys_type != "openephysbinary":
         return None
@@ -459,23 +692,53 @@ def probe_start_time(phys_path, phys_type: str):
 
 
 def stream_start_time(phys_path, phys_type: str, stream_name: str):
-    """When one named stream's first sample happened, on the acquisition clock.
+    """Get when one named stream's first sample happened, on the acquisition clock.
 
     See :func:`probe_start_time`, which is the same question asked of whichever
     stream was sorted.
+
+    Parameters
+    ----------
+    phys_path : str or pathlib.Path
+        Recording file or folder.
+    phys_type : str
+        Acquisition system.
+    stream_name : str
+        Stream of interest.
+
+    Returns
+    -------
+    float or None
+        Start time in seconds, or None if unavailable.
     """
     sidecar = _timestamps_sidecar(phys_path, phys_type, stream_name)
     return None if sidecar is None else _first_timestamp(sidecar)
 
 
 def check_source_binary(rec, path: Path, dtype="int16", n_check_samples=30000):
-    """Can `rec` be sorted straight out of `path`? Returns (n_file_channels, rows).
+    """Check whether a recording can be sorted straight out of a source binary.
 
-    Returns None when it cannot, which is not a failure -- the caller just
-    writes a fresh binary instead. Correctness here matters more than the time
-    saved, so the layout is not assumed: traces read directly from the file are
-    compared against spikeinterface's own for the same samples, at the start,
-    middle and end. Anything less than an exact match declines the shortcut.
+    Declining is not a failure -- the caller just writes a fresh binary
+    instead. Correctness here matters more than the time saved, so the layout
+    is not assumed: traces read directly from the file are compared against
+    spikeinterface's own for the same samples, at the start, middle and end.
+    Anything less than an exact match declines the shortcut.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        Recording to sort.
+    path : pathlib.Path
+        Candidate source binary.
+    dtype : str, default "int16"
+        Sample type of the binary.
+    n_check_samples : int, default 30000
+        Samples compared at each of the start, middle and end.
+
+    Returns
+    -------
+    tuple or None
+        ``(n_file_channels, rows)``, or None when the shortcut is declined.
     """
     path = Path(path)
     if not path.exists():
@@ -514,13 +777,27 @@ def check_source_binary(rec, path: Path, dtype="int16", n_check_samples=30000):
 
 
 def _stream_timestamps(phys_path, phys_type: str, stream_name: str):
-    """Full per-sample timestamps.npy for one stream's source binary.
+    """Load the full per-sample timestamps.npy for one stream's source binary.
 
     On the acquisition clock, as Open Ephys saved it -- not the uniform grid
-    `sampling_frequency` alone would imply. None when `phys_type` isn't
-    openephysbinary (SpikeGLX carries no such sidecar) or the stream's folder
-    or its timestamps.npy cannot be found. Memory-mapped: see
+    `sampling_frequency` alone would imply. Memory-mapped: see
     :func:`_first_timestamp` -- these run to gigabytes for one session.
+
+    Parameters
+    ----------
+    phys_path : str or pathlib.Path
+        Recording file or folder.
+    phys_type : str
+        Acquisition system.
+    stream_name : str
+        Stream of interest.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Memory-mapped timestamps; None when `phys_type` isn't openephysbinary
+        (SpikeGLX carries no such sidecar) or the stream's folder or its
+        timestamps.npy cannot be found.
     """
     sidecar = _timestamps_sidecar(phys_path, phys_type, stream_name)
     if sidecar is None or not sidecar.exists():
@@ -529,7 +806,7 @@ def _stream_timestamps(phys_path, phys_type: str, stream_name: str):
 
 
 def _concatenated_sync_times(info: dict, output_dir: Path | None = None):
-    """The real, saved acquisition-clock times for load_concatenated's binary.
+    """Load the real, saved acquisition-clock times for load_concatenated's binary.
 
     Open Ephys writes one timestamp per sample to timestamps.npy, on the
     hardware-synchronized clock. Deriving times from `sampling_frequency`
@@ -537,15 +814,26 @@ def _concatenated_sync_times(info: dict, output_dir: Path | None = None):
     quietly closes up the real gap between concatenated sessions and any
     within-session clock jitter.
 
-    Returns None (the caller then falls back to that estimate) when the
-    source isn't Open Ephys, a session's sidecar is missing, or a session's
-    saved timestamp count disagrees with what preprocess() recorded for it
-    -- concatenating past a mismatch would silently mis-time every later
-    sample rather than just this one session's worth.
-
     Memory-mapped either way: one session's sidecar directly, several via
     :func:`_concatenate_to_disk` into `output_dir` -- joined in RAM they are
     gigabytes per hour of recording.
+
+    Parameters
+    ----------
+    info : dict
+        Contents of ``concat_info.json``.
+    output_dir : pathlib.Path, optional
+        Where the concatenated timestamps are cached.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Times for every sample. None (the caller then falls back to the
+        sample-rate estimate) when the source isn't Open Ephys, a session's
+        sidecar is missing, or a session's saved timestamp count disagrees
+        with what preprocess() recorded for it -- concatenating past a
+        mismatch would silently mis-time every later sample rather than just
+        this one session's worth.
     """
     if info["phys_type"] != "openephysbinary":
         return None
@@ -576,10 +864,22 @@ def _concatenated_sync_times(info: dict, output_dir: Path | None = None):
 
 
 def _concatenate_to_disk(per_session, path: Path):
-    """The sessions' timestamps end to end in one .npy, opened memory-mapped.
+    """Write the sessions' timestamps end to end in one .npy, opened memory-mapped.
 
     Written a slice at a time, so no more than `chunk` samples are ever in
     RAM, and reused as-is on later loads when its length and ends still match.
+
+    Parameters
+    ----------
+    per_session : list of numpy.ndarray
+        Each session's timestamps.
+    path : pathlib.Path
+        Destination ``.npy``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Memory-mapped concatenation.
     """
     total = sum(len(t) for t in per_session)
     if path.exists():
@@ -614,6 +914,23 @@ def load_concatenated(output_dir: Path):
     to spikeinterface's own sample-rate estimate -- silently, with a warning
     -- when a raw session folder has moved or been cleaned up since
     preprocessing ran.
+
+    Parameters
+    ----------
+    output_dir : pathlib.Path
+        Run directory written by :func:`~spikeshpc.preprocess.preprocess`.
+
+    Returns
+    -------
+    rec : spikeinterface BaseRecording
+        The concatenated recording.
+    info : dict
+        Contents of ``concat_info.json``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the binary or its metadata is missing.
     """
     import probeinterface
 
@@ -690,7 +1007,23 @@ def load_concatenated(output_dir: Path):
 
 
 def channel_positions(rec):
-    """(num_channels, 2) array of contact positions, in probe coordinates."""
+    """Get the contact positions of a recording.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        Recording with a probe attached.
+
+    Returns
+    -------
+    numpy.ndarray
+        Shape (num_channels, 2), in probe coordinates.
+
+    Raises
+    ------
+    ValueError
+        If the recording has no probe geometry.
+    """
     loc = np.asarray(rec.get_channel_locations(), dtype=float)
     if loc.ndim != 2 or loc.shape[1] != 2:
         raise ValueError(
@@ -710,6 +1043,15 @@ class StateScoring:
     `codes` and the per-bin signals share the `times` grid (bin centres, in
     seconds on that recording's own clock). `intervals` holds the same
     information as contiguous [start, stop] spans per state name.
+
+    Attributes
+    ----------
+    codes : numpy.ndarray
+        State code per bin.
+    times : numpy.ndarray
+        Bin centres, in seconds on the recording's own clock.
+    intervals : dict
+        Contiguous ``[start, stop]`` spans per state name.
     """
 
     session: str
@@ -730,12 +1072,24 @@ class StateScoring:
 
     @property
     def names(self) -> np.ndarray:
-        """State name per bin, e.g. array(['WAKE', 'WAKE', 'NREM', ...])."""
+        """Get the state name of each bin.
+
+    Returns
+    -------
+    numpy.ndarray
+        State name per bin, e.g. ``array(['WAKE', 'WAKE', 'NREM', ...])``.
+    """
         lookup = {v: k for k, v in self.state_codes.items()}
         return np.array([lookup.get(int(c), "?") for c in self.codes])
 
     def signals(self) -> dict:
-        """The per-bin traces that are actually present, in display order."""
+        """Get the per-bin traces that are actually present.
+
+    Returns
+    -------
+    dict
+        Trace per signal name, in display order.
+    """
         wanted = (
             ("broadband", "broadband LFP (PC1)"),
             ("theta", "theta ratio"),
@@ -753,6 +1107,16 @@ class StateScoring:
 
         Built from the per-bin codes rather than from `intervals`, so each
         epoch carries the bin indices a plot needs.
+
+        Parameters
+        ----------
+        states : str or sequence of str, optional
+            Restrict to these states.
+
+        Returns
+        -------
+        list of tuple
+            ``(state, start_s, stop_s, i0, i1)`` per epoch.
         """
         # imported here: states.py reads recordings through this module,
         # so a module-level import would be circular
@@ -764,7 +1128,14 @@ class StateScoring:
 
     @property
     def vetoed(self) -> np.ndarray:
-        """Bins the movement veto reassigned, if the pre-veto codes were saved."""
+        """Find the bins the movement veto reassigned.
+
+    Returns
+    -------
+    numpy.ndarray of bool
+        True where the veto changed the code; all False if the pre-veto codes
+        were not saved.
+    """
         if self.codes_before_veto is None:
             return np.zeros(len(self.codes), dtype=bool)
         return np.asarray(self.codes_before_veto) != np.asarray(self.codes)
@@ -775,6 +1146,17 @@ class StateScoring:
         These no longer carry their original label -- a REM call rejected for
         movement is WAKE now -- so stepping through the scored epochs will
         never show them. This is how to review the veto's own decisions.
+
+        Returns
+        -------
+        list of tuple
+            Epochs in the form of :meth:`epochs`, labelled by the pre-veto
+            call; empty if the movement veto was not applied.
+
+        Raises
+        ------
+        ValueError
+            If the scoring has no ``codes_before_veto`` saved.
         """
         from .states import state_epochs
 
@@ -815,9 +1197,32 @@ def load_states(
     With several sessions in the directory, name one -- returning an arbitrary
     session's states would be a quiet way to analyse the wrong recording.
 
-    Pass `optitrack_csv` to attach the movement trace even when the scoring
-    was run without the veto, so it can always be plotted alongside the LFP
-    signals. See :func:`spikeshpc.states.attach_movement`.
+    Parameters
+    ----------
+    states_path : str or pathlib.Path
+        A states directory or a ``_states.json`` file.
+    session : str, optional
+        Session to load; required when the directory holds several.
+    optitrack_csv : str or pathlib.Path, optional
+        Attach the movement trace even when the scoring was run without the
+        veto, so it can always be plotted alongside the LFP signals. See
+        :func:`spikeshpc.states.attach_movement`.
+    frame_times : array-like, optional
+        Camera frame times for the movement trace.
+    rigid_body : str, optional
+        Rigid body to read from the OptiTrack export.
+
+    Returns
+    -------
+    StateScoring
+        The session's scoring.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no scoring can be found.
+    ValueError
+        If the session is ambiguous or unknown.
     """
     states_path = Path(states_path)
 

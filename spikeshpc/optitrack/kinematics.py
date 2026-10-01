@@ -22,6 +22,22 @@ def compute_kinematics(
     ``times`` is assumed uniformly sampled (true for a fixed-frame-rate
     OptiTrack take); the sample spacing used for the derivatives is its
     median step.
+
+    Parameters
+    ----------
+    position : numpy.ndarray
+        Positions, shape (n, 3).
+    times : numpy.ndarray
+        Sample times in seconds, shape (n,).
+    smooth_window : int, default 11
+        Savitzky-Golay window length, in frames.
+    polyorder : int, default 3
+        Savitzky-Golay polynomial order.
+
+    Returns
+    -------
+    dict of str to numpy.ndarray
+        Smoothed position, velocity and acceleration.
     """
     position = np.asarray(position, dtype=float)
     dt = float(np.median(np.diff(times)))
@@ -59,6 +75,22 @@ def compute_angular_velocity(
 
     ``times`` is assumed uniformly sampled, as there; the sample spacing is its
     median step.
+
+    Parameters
+    ----------
+    heading_deg : numpy.ndarray
+        Heading per frame, in degrees.
+    times : numpy.ndarray
+        Frame times in seconds.
+    smooth_window : int, default 11
+        Savitzky-Golay window length, in frames.
+    polyorder : int, default 3
+        Savitzky-Golay polynomial order.
+
+    Returns
+    -------
+    numpy.ndarray
+        Angular velocity per frame, in degrees per second.
     """
     unwrapped = np.unwrap(np.deg2rad(np.asarray(heading_deg, dtype=float)))
     dt = float(np.median(np.diff(times)))

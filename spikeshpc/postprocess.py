@@ -30,6 +30,19 @@ def _filtered(rec, bandpass):
 
     Pass ``bandpass=False`` to opt out (the binary is already filtered, say);
     a dict is merged over :data:`DEFAULT_BANDPASS`.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        Recording read by the analyzer.
+    bandpass : bool or dict or None
+        False to skip filtering; a dict of overrides for
+        :data:`DEFAULT_BANDPASS`; otherwise the defaults.
+
+    Returns
+    -------
+    spikeinterface BaseRecording
+        The (possibly filtered) recording.
     """
     if bandpass is False:
         print("    analyzer: bandpass disabled, using the recording as given")
@@ -52,7 +65,7 @@ REPLAYABLE_FILTERS = {
 
 
 def analyzer_recording(rec, analyzer):
-    """`rec` as `analyzer` measured it: its channels, through its own filters.
+    """Reproduce `rec` as `analyzer` measured it: its channels, through its own filters.
 
     An analyzer loaded on another machine usually cannot reopen its recording
     -- the saved path is relative (``../concatenated.bin``) or points at the
@@ -78,6 +91,25 @@ def analyzer_recording(rec, analyzer):
 
     A layer that is neither a channel slice nor a filter raises: dropping it
     quietly is the failure this function exists to prevent.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        Recording to adapt, usually the concatenated binary.
+    analyzer : spikeinterface SortingAnalyzer
+        Analyzer whose recording is replayed.
+
+    Returns
+    -------
+    spikeinterface BaseRecording
+        `rec` restricted to the analyzer's channels and filtered as its
+        recording was.
+
+    Raises
+    ------
+    ValueError
+        If the filtering of `rec` and the analyzer disagree, or a layer of
+        the analyzer's recording is neither a channel slice nor a filter.
     """
     out = rec.select_channels(list(analyzer.channel_ids))
     layers = _saved_recording_layers(analyzer)
@@ -122,13 +154,23 @@ def analyzer_recording(rec, analyzer):
 
 
 def _saved_recording_layers(analyzer):
-    """``(class name, kwargs, annotations)`` per layer of the analyzer's saved recording.
+    """Read the layers of the analyzer's saved recording.
 
-    Outermost first; the last entry is the reader at the bottom of the chain.
     Read from the provenance the analyzer wrote when it was created -- a dict
     of class names and parameters, never instantiated, so it works although
-    the files it names are gone. None for an in-memory analyzer, or one that
-    kept no provenance.
+    the files it names are gone.
+
+    Parameters
+    ----------
+    analyzer : spikeinterface SortingAnalyzer
+        Analyzer to inspect.
+
+    Returns
+    -------
+    list of tuple or None
+        ``(class name, kwargs, annotations)`` per layer, outermost first; the
+        last entry is the reader at the bottom of the chain. None for an
+        in-memory analyzer, or one that kept no provenance.
     """
     folder = getattr(analyzer, "folder", None)
     node = None
@@ -158,7 +200,7 @@ def _saved_recording_layers(analyzer):
 
 
 def kilosort_spike_locations(analyzer, results_dir: Path) -> np.ndarray:
-    """kilosort's per-spike positions, reordered to the analyzer's spike vector.
+    """Load kilosort's per-spike positions, reordered to the analyzer's spike vector.
 
     kilosort already estimates an (x, y) for every spike and writes it to
     spike_positions.npy, which is the same quantity ``spike_locations`` spends
@@ -174,6 +216,25 @@ def kilosort_spike_locations(analyzer, results_dir: Path) -> np.ndarray:
     with nothing to show for it afterwards. Sorting kilosort's spikes by
     (sample, cluster) reproduces spikeinterface's order, and the result is
     checked against both fields before it is used.
+
+    Parameters
+    ----------
+    analyzer : spikeinterface SortingAnalyzer
+        Analyzer whose spike vector sets the order.
+    results_dir : pathlib.Path
+        Kilosort results directory.
+
+    Returns
+    -------
+    numpy.ndarray
+        Structured array of (x, y) positions, one per spike, in the
+        analyzer's order.
+
+    Raises
+    ------
+    ValueError
+        If kilosort's spikes cannot be matched to the analyzer's spike for
+        spike.
     """
     results_dir = Path(results_dir)
     positions = np.load(results_dir / "spike_positions.npy")
@@ -211,6 +272,18 @@ def attach_spike_locations(analyzer, located: np.ndarray):
     for this -- ``compute`` is the only supported way in -- so the extension
     object is assembled the way ``compute`` would leave it: parameters set
     (which creates the folder), data attached, run marked complete, saved.
+
+    Parameters
+    ----------
+    analyzer : spikeinterface SortingAnalyzer
+        Analyzer to extend.
+    located : numpy.ndarray
+        Per-spike locations, in the analyzer's spike order.
+
+    Returns
+    -------
+    spikeinterface AnalyzerExtension
+        The registered extension.
     """
     from spikeinterface.core.sortinganalyzer import get_extension_class
 
@@ -248,6 +321,32 @@ def postprocess(
     printed, if the two sortings cannot be matched spike for spike. The metric
     extensions are then computed after it is attached, since the drift metric
     reads it.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        The concatenated recording.
+    output_dir : pathlib.Path
+        Run directory holding the kilosort results; the analyzer is saved
+        here.
+    extensions : dict
+        Analyzer extensions to compute, with their parameters.
+    bad_channel_ids : list, optional
+        Channels dropped from the recording first.
+    bandpass : bool or dict, optional
+        Filter applied before waveform extraction; see :func:`_filtered`.
+    use_KS_positions : bool, default True
+        Take ``spike_locations`` from kilosort's own output.
+
+    Returns
+    -------
+    spikeinterface SortingAnalyzer
+        The saved analyzer.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the kilosort results are missing.
     """
     results_dir = output_dir / SORTER_DIRNAME
     if not (results_dir / "spike_times.npy").exists():
@@ -305,7 +404,18 @@ def postprocess(
 
 
 def _is_metric_extension(name) -> bool:
-    """Whether `name` is a metrics extension (quality_metrics, template_metrics, ...)."""
+    """Check whether an extension is a metrics extension.
+
+    Parameters
+    ----------
+    name : str
+        Extension name.
+
+    Returns
+    -------
+    bool
+        True for quality_metrics, template_metrics and the like.
+    """
     from spikeinterface.core.analyzer_extension_core import BaseMetricExtension
     from spikeinterface.core.sortinganalyzer import get_extension_class
 

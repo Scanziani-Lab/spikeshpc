@@ -31,6 +31,25 @@ class StateEpochWidget:
 
     Requires an interactive matplotlib backend (``%matplotlib widget`` or
     ``%matplotlib qt``) and the figure to have keyboard focus: click it once.
+
+    Parameters
+    ----------
+    scoring : StateScoring
+        What :func:`spikeshpc.io.load_states` returns.
+    states : str or sequence of str, optional
+        Review only these states.
+    context_s : float, default 60.0
+        Seconds shown either side of the epoch.
+    min_duration_s : float, default 0.0
+        Skip epochs shorter than this.
+    vetoed : bool, default False
+        Step through the spans the movement veto overruled instead.
+    ylim : dict, optional
+        Fixed y-range per signal, e.g. ``{"movement (mm/s)": (0, 200)}``.
+    robust : tuple of float, default (0.5, 99.5)
+        Percentiles of the whole recording that set the y-ranges.
+    log_signals : tuple of str, default ()
+        Signals drawn on a log axis.
     """
 
     def __init__(self, scoring, states=None, context_s: float = 60.0,
@@ -100,7 +119,17 @@ class StateEpochWidget:
         self._draw()
 
     def _set_fixed_limits(self, overrides, robust, log_signals):
-        """One y-range per signal for the whole session, set once."""
+        """Set one y-range per signal for the whole session.
+
+    Parameters
+    ----------
+    overrides : dict or None
+        Explicit y-ranges per signal.
+    robust : tuple of float
+        Percentiles that set the default ranges.
+    log_signals : tuple of str
+        Signals drawn on a log axis.
+    """
         self.ylim = {}
         for ax, label, threshold in zip(self.axes, self.signals, self.thresholds):
             if label in log_signals:
@@ -173,19 +202,37 @@ def show_state_epochs(scoring, states=None, context_s: float = 60.0,
                       log_signals=()) -> StateEpochWidget:
     """Open an interactive figure; Left/Right step through scored epochs.
 
-    ``scoring`` is what :func:`spikeshpc.io.load_states` returns. Pass
-    ``states="REM"`` to review only the calls most worth checking, and
-    ``min_duration_s`` to skip the briefest ones.
-
-    ``vetoed=True`` steps through the spans the movement veto overruled
-    instead, each labelled by what the LFP alone had called it. Those spans
-    are WAKE in the final scoring, so they cannot be found any other way --
-    and they are the calls whose rejection is worth checking.
-
-    Y-axes are fixed across epochs so heights are comparable; see
-    :class:`StateEpochWidget` for ``ylim``, ``robust`` and ``log_signals``.
-    Movement spans orders of magnitude between immobility and locomotion, so
+    Y-axes are fixed across epochs so heights are comparable. Movement spans
+    orders of magnitude between immobility and locomotion, so
     ``log_signals=("movement (mm/s)",)`` is often easier to read.
+
+    Parameters
+    ----------
+    scoring : StateScoring
+        What :func:`spikeshpc.io.load_states` returns.
+    states : str or sequence of str, optional
+        Review only these states; ``"REM"`` shows the calls most worth
+        checking.
+    context_s : float, default 60.0
+        Seconds shown either side of the epoch.
+    min_duration_s : float, default 0.0
+        Skip the briefest epochs.
+    vetoed : bool, default False
+        Step through the spans the movement veto overruled instead, each
+        labelled by what the LFP alone had called it. Those spans are WAKE in
+        the final scoring, so they cannot be found any other way -- and they
+        are the calls whose rejection is worth checking.
+    ylim : dict, optional
+        Fixed y-range per signal; see :class:`StateEpochWidget`.
+    robust : tuple of float, default (0.5, 99.5)
+        Percentiles that set the y-ranges.
+    log_signals : tuple of str, default ()
+        Signals drawn on a log axis.
+
+    Returns
+    -------
+    StateEpochWidget
+        The open widget.
     """
     return StateEpochWidget(
         scoring, states=states, context_s=context_s,

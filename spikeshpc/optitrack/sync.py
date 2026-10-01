@@ -17,7 +17,7 @@ from .io import OptitrackTake
 
 
 def ttl_threshold(trace, max_iter: int = 50):
-    """Crossing level for a two-state signal, whatever its duty cycle.
+    """Find the crossing level for a two-state signal, whatever its duty cycle.
 
     Isodata: start at the midpoint of the range and iterate to the midpoint
     between the means of the two classes it separates.
@@ -30,7 +30,17 @@ def ttl_threshold(trace, max_iter: int = 50):
     on how much time is spent at each, and recovers the right rate down to
     one-sample pulses.
 
-    Returns None for a trace with no range at all.
+    Parameters
+    ----------
+    trace : array-like
+        Signal samples.
+    max_iter : int, default 50
+        Maximum iterations.
+
+    Returns
+    -------
+    float or None
+        Threshold, or None for a trace with no range at all.
     """
     trace = np.asarray(trace, dtype=float)
     lo, hi = float(np.min(trace)), float(np.max(trace))
@@ -49,12 +59,26 @@ def ttl_threshold(trace, max_iter: int = 50):
 
 
 def rail_fraction(trace, threshold=None) -> float:
-    """Fraction of samples sitting at either level: ~1 for a TTL, ~0.5 for noise.
+    """Compute the fraction of samples sitting at either level.
+
+    About 1 for a TTL, about 0.5 for noise.
 
     Measured against the two class means either side of `threshold`, so a
     short exposure pulse still scores ~1. This is what separates a real TTL
     from a floating input, where the threshold is meaningless and the detector
     would otherwise return millions of noise crossings.
+
+    Parameters
+    ----------
+    trace : array-like
+        Signal samples.
+    threshold : float, optional
+        Crossing level; found with :func:`ttl_threshold` if omitted.
+
+    Returns
+    -------
+    float
+        Fraction of samples near either level; 0 if it cannot be measured.
     """
     trace = np.asarray(trace, dtype=float)
     if threshold is None:
@@ -76,7 +100,7 @@ def rail_fraction(trace, threshold=None) -> float:
 def extract_shutter_close_times(
     events_raw, channel_id: str = "ADC0", min_rail_fraction: float = 0.8, force: bool = False
 ) -> np.ndarray:
-    """Falling-edge (shutter-close) timestamps on ``channel_id``, in recording time.
+    """Extract falling-edge (shutter-close) timestamps, in recording time.
 
     The threshold is found by :func:`ttl_threshold`, which works whether
     ``get_traces`` returns raw ADC counts or scaled volts, and whatever the
@@ -86,6 +110,27 @@ def extract_shutter_close_times(
     carry no TTL -- an unconnected input would otherwise yield millions of
     noise crossings -- and are rejected. Pass ``force=True`` to override, or
     call :func:`describe_analog_channels` to find the right channel.
+
+    Parameters
+    ----------
+    events_raw : spikeinterface BaseRecording
+        The analog stream.
+    channel_id : str, default "ADC0"
+        Channel carrying the TTL.
+    min_rail_fraction : float, default 0.8
+        Smallest :func:`rail_fraction` accepted.
+    force : bool, default False
+        Skip the :func:`rail_fraction` check.
+
+    Returns
+    -------
+    numpy.ndarray
+        Falling-edge times in seconds.
+
+    Raises
+    ------
+    ValueError
+        If the channel does not look like a TTL.
     """
     shutter_close_times = []
     for seg_idx in range(events_raw.get_num_segments()):
@@ -123,12 +168,32 @@ def describe_analog_channels(
     min_rail_fraction: float = 0.8,
     verbose: bool = True,
 ):
-    """Which channels of an analog stream actually carry a TTL?
+    """Find which channels of an analog stream actually carry a TTL.
 
     Samples `n_chunks` windows spread through the recording rather than
     reading the whole thing, and reports each channel's rail fraction and
     crossing rate. A shutter TTL shows a rail fraction near 1 and a crossing
     rate matching the camera frame rate.
+
+    Parameters
+    ----------
+    events_raw : spikeinterface BaseRecording
+        The analog stream.
+    segment_index : int, default 0
+        Segment to sample.
+    n_chunks : int, default 20
+        Number of windows sampled.
+    chunk_samples : int, default 30000
+        Samples per window.
+    min_rail_fraction : float, default 0.8
+        Smallest :func:`rail_fraction` that counts as a TTL.
+    verbose : bool, default True
+        Print a table.
+
+    Returns
+    -------
+    list of dict
+        One row per channel with its rail fraction and crossing rate.
     """
     fs = events_raw.get_sampling_frequency()
     n_total = events_raw.get_num_frames(segment_index=segment_index)
@@ -193,25 +258,45 @@ def plot_shutter_close_sanity_check(
     segment_index: int = 0,
     time_offset: float = 0.0,
 ):
-    """Zoom in on the first/last ``n_events`` detected events side by side.
+    """Zoom in on the first and last detected events side by side.
 
     Rather than eyeballing one arbitrary time window, this shows the falling-
     edge detection holds up at both ends of the recording. Assumes a single
     segment (``segment_index``)
 
-    ``time_offset`` is subtracted from the recording's own timestamps to put
-    the trace on the same clock as ``shutter_close_times``. It has to be given
-    whenever the caller has already moved those times somewhere else -- onto
-    the clock the spikes are on, say. Plotting one clock against the other
-    produces a figure that is wrong in a peculiarly convincing way: a pulse
-    train is periodic, so a whole-period error puts the marker neatly on the
-    wrong pulse and only the ends of the recording, where the train starts and
-    stops, give it away.
+    The residual in each title is the defence against a misaligned clock. It
+    measures from the marker to the nearest falling edge actually present in
+    the window, so a misalignment reads as a number rather than as something
+    to be spotted by eye at the width of a dashed line.
 
-    The residual in each title is the defence against that. It measures from
-    the marker to the nearest falling edge actually present in the window, so
-    a misalignment reads as a number rather than as something to be spotted by
-    eye at the width of a dashed line.
+    Parameters
+    ----------
+    events_raw : spikeinterface BaseRecording
+        The analog stream.
+    shutter_close_times : numpy.ndarray
+        Detected falling-edge times in seconds.
+    channel_id : str, default "ADC0"
+        Channel carrying the TTL.
+    n_events : int, default 2
+        Number of events shown at each end.
+    window : float, default 0.02
+        Width of each zoom, in seconds.
+    segment_index : int, default 0
+        Segment to read.
+    time_offset : float, default 0.0
+        Subtracted from the recording's own timestamps to put the trace on
+        the same clock as `shutter_close_times`. It has to be given whenever
+        the caller has already moved those times somewhere else -- onto the
+        clock the spikes are on, say. Plotting one clock against the other
+        produces a figure that is wrong in a peculiarly convincing way: a
+        pulse train is periodic, so a whole-period error puts the marker
+        neatly on the wrong pulse and only the ends of the recording, where
+        the train starts and stops, give it away.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure.
     """
     times = np.asarray(events_raw.get_times(segment_index=segment_index)) - time_offset
     trace = events_raw.get_traces(
@@ -263,7 +348,22 @@ def save_shutter_close_times(shutter_close_times: np.ndarray, out_path: str | Pa
 def cross_check_with_optitrack_csv(
     shutter_close_times: np.ndarray, optitrack_csv_path: str | Path
 ) -> dict:
-    """Compare detected event count/timing against the CSV's own frame count/rate."""
+    """Compare detected event count and timing against the CSV's own frame count and rate.
+
+    Parameters
+    ----------
+    shutter_close_times : numpy.ndarray
+        Detected falling-edge times in seconds.
+    optitrack_csv_path : str or pathlib.Path
+        Motive CSV export.
+
+    Returns
+    -------
+    dict
+        ``optitrack_total_frames``, ``optitrack_frame_rate``, ``n_detected``,
+        ``frame_count_difference``, ``n_regular_intervals``, ``n_intervals``,
+        ``irregular_interval_indices`` and ``plausible``.
+    """
     with open(optitrack_csv_path, "r") as f:
         header_fields = f.readline().strip().split(",")
     header = dict(zip(header_fields[0::2], header_fields[1::2]))
@@ -320,6 +420,25 @@ def align_frames_to_shutter_events(
     missing frame(s) are on isn't recoverable from the counts alone --
     verify with :func:`plot_shutter_close_sanity_check` and pass
     ``assume_missing="end"`` if the default looks wrong.
+
+    Parameters
+    ----------
+    shutter_close_times : numpy.ndarray
+        Detected falling-edge times in seconds.
+    take : OptitrackTake
+        The parsed CSV export.
+    assume_missing : {"start", "end"}, default "start"
+        Which end of the recording the missing frames are on.
+
+    Returns
+    -------
+    numpy.ndarray
+        CSV frame indices that line up 1:1 with `shutter_close_times`.
+
+    Raises
+    ------
+    ValueError
+        If `assume_missing` is invalid or the counts differ by too much.
     """
     n_detected = len(shutter_close_times)
     n_csv = len(take.frame_numbers)

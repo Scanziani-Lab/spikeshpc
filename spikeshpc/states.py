@@ -59,7 +59,7 @@ CONTAINER_DIRNAMES = ("raw", "ephys", "physiology", "continuous", "data")
 
 
 def session_name(phys_path) -> str:
-    """Which recording this is, from the path the pipeline was pointed at.
+    """Name the recording from the path the pipeline was pointed at.
 
     The leaf directory is the obvious answer and is wrong whenever the raw data
     sits in a subfolder: ".../session8/raw" names the session "raw", and every
@@ -70,6 +70,16 @@ def session_name(phys_path) -> str:
     So a leaf that describes its contents rather than the recording is skipped,
     as is an Open Ephys record-node folder. Pass `session=` to score_session to
     override this entirely.
+
+    Parameters
+    ----------
+    phys_path : str or pathlib.Path
+        Path the pipeline was pointed at.
+
+    Returns
+    -------
+    str
+        Session name.
     """
     path = Path(phys_path)
     parts = [p for p in path.parts if p not in ("/", "\\")]
@@ -89,6 +99,28 @@ def pick_channels(rec, n, explicit=None, exclude=()):
 
     Averaging a few sites is more robust than buzcode's single-channel pick
     while staying cheap: only these channels are ever read from disk.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        Recording to pick from.
+    n : int
+        Number of channels.
+    explicit : sequence, optional
+        Channels to use instead of picking.
+    exclude : sequence, default ()
+        Channels never picked.
+
+    Returns
+    -------
+    list
+        Channel ids.
+
+    Raises
+    ------
+    ValueError
+        If no channels are left after excluding, or `explicit` names channels
+        not in the recording.
     """
     excluded = {str(c) for c in exclude}
     available = [c for c in rec.channel_ids if str(c) not in excluded]
@@ -112,7 +144,7 @@ def pick_channels(rec, n, explicit=None, exclude=()):
 
 
 def bimodality_score(values, seed=0) -> float:
-    """How two-moded a distribution is, as a two-component Gaussian mixture.
+    """Measure how two-moded a distribution is, with a two-component Gaussian mixture.
 
     The distance between the component means in pooled standard deviations. A
     signal can only carry a threshold if it has two modes to put one between,
@@ -128,6 +160,19 @@ def bimodality_score(values, seed=0) -> float:
     And rare modes are penalised. On this rig REM is ~9% of sleep, so theta
     scores near 1 over all of sleep and near 2.6 over balanced REM/NREM -- the
     same signal, the same channels, a different denominator.
+
+    Parameters
+    ----------
+    values : array-like
+        Samples of the signal.
+    seed : int, default 0
+        Random seed of the mixture fit.
+
+    Returns
+    -------
+    float
+        Distance between the component means in pooled standard deviations;
+        NaN if it cannot be fit.
     """
     from sklearn.mixture import GaussianMixture
 
@@ -143,13 +188,27 @@ def bimodality_score(values, seed=0) -> float:
 
 
 def _progress(desc, total, unit="s"):
-    """A bar on stderr for one pass over the recording.
+    """Make a progress bar on stderr for one pass over the recording.
 
     A full pass over a long session runs for hours with nothing to print,
     which in a job log is indistinguishable from a hang. Shown whenever
     spikeinterface's own bars are -- the global job_kwargs' progress_bar, which
     the pipeline sets from its config -- so one switch governs every bar in a
     run.
+
+    Parameters
+    ----------
+    desc : str
+        Label of the bar.
+    total : float
+        Total amount of work.
+    unit : str, default "s"
+        Unit of the work.
+
+    Returns
+    -------
+    tqdm.tqdm or None
+        The bar, or None when bars are switched off.
     """
     from tqdm.auto import tqdm
 
@@ -174,7 +233,7 @@ def sampled_spectra(
         seed=0,
         desc="channel search",
 ):
-    """Log-spaced power spectra on `n_windows` windows spread through `rec`.
+    """Compute log-spaced power spectra on windows spread through a recording.
 
     The same frequency grid :func:`log_spectrogram` builds, so the signals
     derived from it here are the ones scoring would derive later -- the channel
@@ -185,7 +244,27 @@ def sampled_spectra(
     depend on the seed, and so the sample spans sleep and waking in whatever
     proportion the recording does.
 
-    Returns (freqs, spec) with spec shaped (n_channels, n_freqs, n_windows).
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        LFP recording.
+    channel_ids : sequence
+        Channels to compute.
+    config : dict
+        State-scoring configuration.
+    n_windows : int, default 240
+        Number of windows.
+    seed : int, default 0
+        Random seed.
+    desc : str, default "channel search"
+        Label of the progress bar.
+
+    Returns
+    -------
+    freqs : numpy.ndarray
+        Frequencies.
+    spec : numpy.ndarray
+        Power, shape (n_channels, n_freqs, n_windows).
     """
     sub = rec.select_channels(list(channel_ids))
     fs = sub.get_sampling_frequency()
@@ -227,13 +306,35 @@ def rank_channels_by_bimodality(
         n_windows=240,
         seed=0
 ):
-    """Bimodality of `signal` on each of `channel_ids`, best first.
+    """Rank channels by the bimodality of a signal, best first.
 
-    `signal` is "slow_wave" or "theta"; each channel is scored on exactly the
-    quantity scoring would threshold -- PC1 of its own z-scored log
-    spectrogram, or its own log theta ratio.
+    Each channel is scored on exactly the quantity scoring would threshold --
+    PC1 of its own z-scored log spectrogram, or its own log theta ratio.
 
-    Returns a list of (channel_id, score), NaN scores last.
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        LFP recording.
+    channel_ids : sequence
+        Channels to score.
+    config : dict
+        State-scoring configuration.
+    signal : {"slow_wave", "theta"}
+        Signal to score.
+    n_windows : int, default 240
+        Number of windows.
+    seed : int, default 0
+        Random seed.
+
+    Returns
+    -------
+    list of tuple
+        ``(channel_id, score)``, NaN scores last.
+
+    Raises
+    ------
+    ValueError
+        If `signal` is not recognised.
     """
     channel_ids = list(channel_ids)
     freqs, spec = sampled_spectra(
@@ -269,7 +370,7 @@ def pick_bimodal_channels(
         seed=0,
         verbose=True
 ):
-    """The `n` channels whose `signal` is most two-moded, buzcode-style.
+    """Pick the channels whose signal is most two-moded, buzcode-style.
 
     buzcode searches for the single most bimodal channel; this keeps the
     pipeline's habit of averaging several, because averaging the best few beat
@@ -286,6 +387,37 @@ def pick_bimodal_channels(
     cannot be tuned to states that have not been scored yet. On session8 its
     ranking correlated +0.87 with how well each channel actually separated REM
     from NREM.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        LFP recording.
+    n : int
+        Number of channels.
+    config : dict
+        State-scoring configuration.
+    signal : {"slow_wave", "theta"}
+        Signal to search on.
+    exclude : sequence, default ()
+        Channels never picked.
+    candidate_step : int, default 4
+        Only every this-many-th channel is a candidate.
+    n_windows : int, default 240
+        Number of windows.
+    seed : int, default 0
+        Random seed.
+    verbose : bool, default True
+        Print the result.
+
+    Returns
+    -------
+    list
+        Channel ids.
+
+    Raises
+    ------
+    ValueError
+        If no channels are left after excluding.
     """
     excluded = {str(c) for c in exclude}
     available = [c for c in rec.channel_ids if str(c) not in excluded]
@@ -319,7 +451,24 @@ def pick_bimodal_channels(
 
 
 def _mean_trace(rec, channel_ids, chunk_s=120.0, desc="LFP"):
-    """Mean trace (uV) across `channel_ids`, accumulated chunk by chunk."""
+    """Average the traces of several channels, chunk by chunk.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        Recording to read.
+    channel_ids : sequence
+        Channels to average.
+    chunk_s : float, default 120.0
+        Chunk length, in seconds.
+    desc : str, default "LFP"
+        Label of the progress bar.
+
+    Returns
+    -------
+    numpy.ndarray
+        Mean trace in µV.
+    """
     sub = rec.select_channels(channel_ids)
     n = sub.get_num_frames()
     fs = sub.get_sampling_frequency()
@@ -341,7 +490,34 @@ def log_spectrogram(sig, fs, window_s, step_s, freq_range, n_freqs):
     MATLAB's spectrogram() evaluates arbitrary frequency vectors directly; the
     equivalent here is a dense rFFT interpolated onto the log-spaced grid.
 
-    Returns (times, freqs, spec) with spec shaped (n_freqs, n_windows).
+    Parameters
+    ----------
+    sig : numpy.ndarray
+        Signal.
+    fs : float
+        Sampling rate, in Hz.
+    window_s : float
+        Window length, in seconds.
+    step_s : float
+        Step between windows, in seconds.
+    freq_range : tuple of float
+        Lowest and highest frequency, in Hz.
+    n_freqs : int
+        Number of log-spaced frequencies.
+
+    Returns
+    -------
+    times : numpy.ndarray
+        Window centres, in seconds.
+    freqs : numpy.ndarray
+        Frequencies, in Hz.
+    spec : numpy.ndarray
+        Power, shape (n_freqs, n_windows).
+
+    Raises
+    ------
+    ValueError
+        If the window does not fit the signal or the frequencies.
     """
     nwin = round(window_s * fs)
     nstep = round(step_s * fs)
@@ -371,7 +547,22 @@ def log_spectrogram(sig, fs, window_s, step_s, freq_range, n_freqs):
 
 
 def broadband_slow_wave(spec, freqs, slow_wave_max_hz=32.0):
-    """PC1 of the z-scored log spectrogram, signed so NREM is high."""
+    """Compute PC1 of the z-scored log spectrogram, signed so NREM is high.
+
+    Parameters
+    ----------
+    spec : numpy.ndarray
+        Power, shape (n_freqs, n_windows).
+    freqs : numpy.ndarray
+        Frequencies, in Hz.
+    slow_wave_max_hz : float, default 32.0
+        Upper edge of the band used to set the sign.
+
+    Returns
+    -------
+    numpy.ndarray
+        Standardised PC1 per window, float32.
+    """
     from sklearn.decomposition import PCA
 
     log_spec = np.log10(spec + np.finfo(np.float32).tiny)
@@ -389,7 +580,22 @@ def broadband_slow_wave(spec, freqs, slow_wave_max_hz=32.0):
 
 
 def theta_ratio(spec, freqs, theta_band, ref_band):
-    """Power in `theta_band` over power in `ref_band`."""
+    """Compute the power in the theta band over the power in a reference band.
+
+    Parameters
+    ----------
+    spec : numpy.ndarray
+        Power, shape (n_freqs, n_windows).
+    freqs : numpy.ndarray
+        Frequencies, in Hz.
+    theta_band, ref_band : tuple of float
+        Low and high edge of each band, in Hz.
+
+    Returns
+    -------
+    numpy.ndarray
+        Ratio per window, float32.
+    """
     num = spec[(freqs >= theta_band[0]) & (freqs <= theta_band[1])].sum(axis=0)
     den = spec[(freqs >= ref_band[0]) & (freqs <= ref_band[1])].sum(axis=0)
     return (num / np.maximum(den, np.finfo(np.float32).tiny)).astype(np.float32)
@@ -408,7 +614,33 @@ def emg_from_lfp(
 
     Volume conduction correlates neighbouring contacts whatever the animal is
     doing, so only pairs at least `min_distance_um` apart are averaged.
-    Evaluated on `window_s` windows centred on `times`.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        LFP-rate recording.
+    channel_ids : sequence
+        Channels to use.
+    band : tuple of float
+        Low and high edge of the high-frequency band, in Hz.
+    times : numpy.ndarray
+        Window centres, in seconds.
+    window_s : float
+        Window length, in seconds.
+    min_distance_um : float, default 100.0
+        Smallest separation of a pair.
+    chunk_windows : int, default 256
+        Windows processed at a time.
+
+    Returns
+    -------
+    numpy.ndarray
+        EMG proxy per window.
+
+    Raises
+    ------
+    ValueError
+        If there are too few channels or distant pairs.
     """
     sub = rec.select_channels(channel_ids)
     fs = sub.get_sampling_frequency()
@@ -473,6 +705,20 @@ def bimodal_threshold(x, n_grid=1000, seed=0):
     back to the median when the fit is degenerate (i.e. the distribution is
     not actually bimodal), which is the honest answer for a recording that
     never left one state.
+
+    Parameters
+    ----------
+    x : array-like
+        Samples of the signal.
+    n_grid : int, default 1000
+        Grid points searched for the crossing.
+    seed : int, default 0
+        Random seed of the mixture fit.
+
+    Returns
+    -------
+    float
+        The threshold.
     """
     from sklearn.mixture import GaussianMixture
 
@@ -500,6 +746,20 @@ def enforce_min_duration(codes, step_s, min_duration_s):
 
     Repeated until stable, shortest run first, so a brief flicker cannot
     survive by sitting between two other brief flickers.
+
+    Parameters
+    ----------
+    codes : numpy.ndarray
+        State code per bin.
+    step_s : float
+        Bin width, in seconds.
+    min_duration_s : float
+        Shortest run allowed.
+
+    Returns
+    -------
+    numpy.ndarray
+        Smoothed codes.
     """
     codes = np.asarray(codes).copy()
     min_len = round(min_duration_s / step_s)
@@ -527,7 +787,20 @@ def enforce_min_duration(codes, step_s, min_duration_s):
 
 
 def classify_states(broadband, theta, emg, thresholds):
-    """buzcode's decision rules over the three thresholded signals."""
+    """Apply buzcode's decision rules to the three thresholded signals.
+
+    Parameters
+    ----------
+    broadband, theta, emg : numpy.ndarray
+        The three signals, one value per bin.
+    thresholds : dict
+        Threshold of each signal.
+
+    Returns
+    -------
+    numpy.ndarray
+        State code per bin.
+    """
     nrem = broadband > thresholds["broadband"]
     quiet = emg <= thresholds["emg"]
     rem = (~nrem) & quiet & (theta > thresholds["theta"])
@@ -539,7 +812,22 @@ def classify_states(broadband, theta, emg, thresholds):
 
 
 def intervals_from_states(codes, times, step_s):
-    """Contiguous runs as {'WAKE': [[start, stop], ...], ...} in seconds."""
+    """Convert state codes to contiguous intervals.
+
+    Parameters
+    ----------
+    codes : numpy.ndarray
+        State code per bin.
+    times : numpy.ndarray
+        Bin centres, in seconds.
+    step_s : float
+        Bin width, in seconds.
+
+    Returns
+    -------
+    dict
+        ``{'WAKE': [[start, stop], ...], ...}`` in seconds.
+    """
     intervals = {name: [] for name in STATE_CODES}
     if len(codes) == 0:
         return intervals
@@ -568,6 +856,16 @@ def held_frames(position) -> np.ndarray:
     a bin's mean speed to zero, and the frame that finally moves carries the
     whole accumulated displacement in one frame interval, which reads as a
     violent burst.
+
+    Parameters
+    ----------
+    position : numpy.ndarray
+        Positions, shape (n_frames, n_dims).
+
+    Returns
+    -------
+    numpy.ndarray of bool
+        True for frames that repeat the previous position.
     """
     position = np.asarray(position, dtype=float)
     held = np.zeros(len(position), dtype=bool)
@@ -585,7 +883,7 @@ def binned_speed(
     interpolate_gaps_s=2.0,
     verbose=True,
 ):
-    """Mean speed per state bin, from tracked position sampled at frame_times.
+    """Compute the mean speed per state bin, from tracked position.
 
     Frames that are non-finite, or held over from a dropout
     (:func:`held_frames`), are treated as missing. Speed is then taken between
@@ -597,6 +895,33 @@ def binned_speed(
     `interpolate_gaps_s` are filled by interpolating between the neighbouring
     bins; longer ones are left NaN, which the veto skips rather than guessing
     at. Set `interpolate_gaps_s=0` to fill nothing.
+
+    Parameters
+    ----------
+    frame_times : numpy.ndarray
+        Time of each tracking frame, in seconds.
+    position : numpy.ndarray
+        Position per frame, shape (n_frames, 3).
+    times : numpy.ndarray
+        State-bin centres, in seconds.
+    step_s : float
+        State-bin width, in seconds.
+    max_gap_s : float, default 0.5
+        Longest interval between frames that counts as a speed.
+    interpolate_gaps_s : float, default 2.0
+        Fill NaN runs shorter than this.
+    verbose : bool, default True
+        Print a summary.
+
+    Returns
+    -------
+    numpy.ndarray
+        Speed per bin, NaN where unavailable.
+
+    Raises
+    ------
+    ValueError
+        If the inputs are inconsistent.
     """
     frame_times = np.asarray(frame_times, dtype=float)
     position = np.asarray(position, dtype=float)
@@ -649,8 +974,21 @@ def interpolate_gaps(values, step_s, max_gap_s=2.0) -> int:
 
     Only runs shorter than `max_gap_s`, and only those with real values on
     both sides -- a gap at either end has nothing to interpolate between, and
-    a long one would be invention rather than repair. Returns how many bins
-    were filled.
+    a long one would be invention rather than repair.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Values to fill, modified in place.
+    step_s : float
+        Bin width, in seconds.
+    max_gap_s : float, default 2.0
+        Longest run filled.
+
+    Returns
+    -------
+    int
+        Number of bins filled.
     """
     if max_gap_s <= 0:
         return 0
@@ -682,6 +1020,21 @@ def movement_threshold(speed, floor=1e-3, seed=0):
     (non-zero) modes each bin is in. Two modes are roughly log-normal and
     well separated; the same bimodal split used for the LFP metrics finds
     the trough between them.
+
+    Parameters
+    ----------
+    speed : numpy.ndarray
+        Speed per bin.
+    floor : float, default 1e-3
+        Speeds at or below this are ignored.
+    seed : int, default 0
+        Random seed of the mixture fit.
+
+    Returns
+    -------
+    float or None
+        Threshold in the units of `speed`, or None if there is too little
+        data.
     """
     log_speed = np.log10(np.maximum(np.asarray(speed, dtype=float), floor))
     finite = log_speed[np.isfinite(log_speed)]
@@ -700,8 +1053,9 @@ def apply_movement_veto(
     floor=1e-3,
     verbose=True,
 ):
-    """Reassign to WAKE any bin scored asleep while the animal was moving
-    (based on optitrack data)
+    """Reassign to WAKE any bin scored asleep while the animal was moving.
+
+    Movement comes from OptiTrack data.
 
     Deliberately asymmetric. Gross movement proves the animal is awake, but
     stillness proves nothing. Used as a veto, the tracker adds information
@@ -712,7 +1066,32 @@ def apply_movement_veto(
     smoothing is re-applied afterwards, since vetoing punches holes in
     otherwise good bouts.
 
-    Returns (codes, info).
+    Parameters
+    ----------
+    codes : numpy.ndarray
+        State code per bin.
+    speed : numpy.ndarray
+        Speed per bin, NaN where untracked.
+    threshold : float, optional
+        Speed above which the animal is moving; found with
+        :func:`movement_threshold` if omitted.
+    step_s : float, default 1.0
+        Bin width, in seconds.
+    min_duration_s : float, default 6.0
+        Shortest run allowed after the veto.
+    veto : tuple of str, default ("NREM", "REM")
+        States the veto can overrule.
+    floor : float, default 1e-3
+        Passed to :func:`movement_threshold`.
+    verbose : bool, default True
+        Print a summary.
+
+    Returns
+    -------
+    codes : numpy.ndarray
+        State codes after the veto.
+    info : dict
+        What the veto did, or why it did not apply.
     """
     codes = np.asarray(codes).copy()
     speed = np.asarray(speed, dtype=float)
@@ -761,18 +1140,39 @@ def load_movement(
         phys_type=None,
         info=None,
 ):
-    """Per-bin speed for `session`, or None when tracking is unavailable.
+    """Load the per-bin speed of a session.
 
-    `optitrack_csv` and `frame_times` are format strings taking `{session}`,
-    which is how the same config covers every session in a run.
-
+    ``optitrack_csv`` and ``frame_times`` in `config` are format strings taking
+    `{session}`, which is how the same config covers every session in a run.
     `frame_times` may be left unset: the shutter TTL is then extracted from
     the recording's own ADC stream and cached, so a session can be scored
     straight off the rig without a notebook step first.
 
-    `info`, if given, is filled with a "reason" whenever this returns None, so
-    the saved scoring can say why it has no movement rather than merely not
-    having any.
+    Parameters
+    ----------
+    config : dict
+        Movement configuration.
+    session : str
+        Session name.
+    times : numpy.ndarray
+        State-bin centres, in seconds.
+    step_s : float
+        State-bin width, in seconds.
+    phys_path : str or pathlib.Path, optional
+        Recording, for deriving frame times.
+    output_dir : pathlib.Path, optional
+        Run directory.
+    phys_type : str, optional
+        Acquisition system.
+    info : dict, optional
+        Filled with a "reason" whenever this returns None, so the saved
+        scoring can say why it has no movement rather than merely not having
+        any.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        Speed per bin, or None when tracking is unavailable.
     """
     def skip(reason):
         """Record why there is no movement, not just that there is none.
@@ -781,6 +1181,16 @@ def load_movement(
         thresholds, fractions, and no movement panel to notice the absence of.
         The reason belongs in the saved summary, where it is still there weeks
         later, rather than only in the job's log.
+
+        Parameters
+        ----------
+        reason : str
+            Why there is no movement.
+
+        Returns
+        -------
+        None
+            Always None, so callers can ``return skip(...)``.
         """
         print(f"      movement: {reason}, skipping")
         if info is not None:
@@ -853,6 +1263,26 @@ def score_recording(
     `speed` is an optional per-bin movement trace on the same time base; see
     :func:`apply_movement_veto` for how it is used. `speed_info` carries why
     there is none, when there is none, into the saved summary.
+
+    Parameters
+    ----------
+    rec_lfp : spikeinterface BaseRecording
+        LFP-rate recording.
+    rec_emg : spikeinterface BaseRecording
+        Recording the EMG proxy is computed from.
+    config : dict
+        State-scoring configuration.
+    exclude_channels : sequence, default ()
+        Channels never used.
+    speed : numpy.ndarray, optional
+        Per-bin movement trace on the same time base.
+    speed_info : dict, optional
+        Why there is no `speed`.
+
+    Returns
+    -------
+    dict
+        Signals, thresholds, state codes and summary.
     """
     step_s = float(config["step_s"])
 
@@ -989,7 +1419,20 @@ def score_recording(
 
 
 def _resample_to(rec, rate):
-    """Resample only if we are actually going down; never upsample."""
+    """Resample only if going down; never upsample.
+
+    Parameters
+    ----------
+    rec : spikeinterface BaseRecording
+        Recording to resample.
+    rate : float
+        Target rate, in Hz.
+
+    Returns
+    -------
+    spikeinterface BaseRecording
+        The resampled recording, or `rec` if it is already at or below `rate`.
+    """
     current = rec.get_sampling_frequency()
     if abs(current - rate) < 1e-6:
         return rec
@@ -1020,6 +1463,28 @@ def score_session(
     `session` names the recording for every file this writes and for the
     "{session}" templates in the movement config; left None it is inferred by
     :func:`session_name`.
+
+    Parameters
+    ----------
+    phys_path : str or pathlib.Path
+        Recording file or folder.
+    output_dir : pathlib.Path
+        Run directory.
+    config : dict
+        State-scoring configuration.
+    phys_type : str, optional
+        Acquisition system.
+    stream_name : str, optional
+        Stream to use.
+    exclude_channels : sequence, default ()
+        Channels never used.
+    session : str, optional
+        Name for the recording.
+
+    Returns
+    -------
+    dict
+        The result, with 'session' and 'duration_s' added.
     """
     from .channels import drop_sync_channels
 
@@ -1127,6 +1592,20 @@ def merge_to_concatenated_time(results, info, output_dir: Path):
 
     State scoring runs per session, but the sorting is concatenated, so this
     is the file you actually join spikes against.
+
+    Parameters
+    ----------
+    results : list of dict
+        Per-session results from :func:`score_session`.
+    info : dict
+        Contents of ``concat_info.json``.
+    output_dir : pathlib.Path
+        Run directory.
+
+    Returns
+    -------
+    dict
+        The record written to ``states_concatenated.json``.
     """
     from .config import STATES_CONCAT_NAME
 
@@ -1156,7 +1635,18 @@ def merge_to_concatenated_time(results, info, output_dir: Path):
 # ── using the scoring downstream ─────────────────────────────────────────
 @dataclass
 class StateEpoch:
-    """One contiguous run of a single state."""
+    """One contiguous run of a single state.
+
+    Attributes
+    ----------
+    state : str
+        State name.
+    start, stop : float
+        Leading edge of the first bin and trailing edge of the last, in
+        seconds.
+    first_bin, last_bin : int
+        Bin indices of the run; `last_bin` is inclusive.
+    """
 
     state: str
     start: float  # seconds, leading edge of the first bin
@@ -1176,7 +1666,26 @@ class StateEpoch:
 
 
 def state_epochs(codes, times, state_codes=None, step_s=1.0, states=None):
-    """Contiguous runs of one state, as StateEpoch objects in time order."""
+    """Find contiguous runs of one state.
+
+    Parameters
+    ----------
+    codes : numpy.ndarray
+        State code per bin.
+    times : numpy.ndarray
+        Bin centres, in seconds.
+    state_codes : dict, optional
+        State name to code; the standard codes by default.
+    step_s : float, default 1.0
+        Bin width, in seconds.
+    states : str or sequence of str, optional
+        Restrict to these states.
+
+    Returns
+    -------
+    list of StateEpoch
+        Epochs in time order.
+    """
     codes = np.asarray(codes)
     times = np.asarray(times, dtype=float)
     names = {v: k for k, v in (state_codes or STATE_CODES).items()}
@@ -1210,11 +1719,22 @@ def state_epochs(codes, times, state_codes=None, step_s=1.0, states=None):
 
 
 def times_in_states(query_times, intervals, states=("WAKE",)) -> np.ndarray:
-    """Boolean mask: which of `query_times` fall inside any of `states`.
+    """Find which times fall inside any of the given states.
 
-    `intervals` is the {state: [[start, stop], ...]} mapping from the scoring
-    (either StateScoring.intervals or states_concatenated.json). Times are
-    expected on the same clock as the intervals.
+    Parameters
+    ----------
+    query_times : array-like
+        Times, on the same clock as the intervals.
+    intervals : dict
+        ``{state: [[start, stop], ...]}`` from the scoring (either
+        ``StateScoring.intervals`` or ``states_concatenated.json``).
+    states : tuple of str, default ("WAKE",)
+        States to test against.
+
+    Returns
+    -------
+    numpy.ndarray of bool
+        True for times inside any of `states`.
     """
     query_times = np.asarray(query_times, dtype=float)
     wanted = [states] if isinstance(states, str) else list(states)
@@ -1245,6 +1765,16 @@ def intervals_between_frames(frame_mask) -> np.ndarray:
     enormous "interval" that absorbs every spike fired during it and credits
     them to a single heading. The fix is to drop those intervals rather than
     the frames: interval i survives only when frames i and i+1 both do.
+
+    Parameters
+    ----------
+    frame_mask : numpy.ndarray of bool
+        Which frames are kept.
+
+    Returns
+    -------
+    numpy.ndarray of bool
+        One value per inter-frame interval, so one shorter than `frame_mask`.
     """
     frame_mask = np.asarray(frame_mask, dtype=bool)
     if frame_mask.size < 2:
@@ -1253,11 +1783,27 @@ def intervals_between_frames(frame_mask) -> np.ndarray:
 
 
 def frames_in_states(frame_times, intervals, states=("WAKE",)):
-    """(frame_mask, interval_mask) for frames sampled at `frame_times`.
+    """Find the frames and inter-frame intervals inside the given states.
 
     Pass `interval_mask` to the tuning functions; see
     :func:`intervals_between_frames` for why the frame mask alone is not
     enough.
+
+    Parameters
+    ----------
+    frame_times : array-like
+        Time of each frame, in seconds.
+    intervals : dict
+        ``{state: [[start, stop], ...]}``.
+    states : tuple of str, default ("WAKE",)
+        States to keep.
+
+    Returns
+    -------
+    frame_mask : numpy.ndarray of bool
+        Frames inside `states`.
+    interval_mask : numpy.ndarray of bool
+        Inter-frame intervals with both frames inside.
     """
     frame_mask = times_in_states(frame_times, intervals, states)
     return frame_mask, intervals_between_frames(frame_mask)
@@ -1276,13 +1822,46 @@ _BEHAVIOR_THRESHOLDS = {
 
 
 def _true_runs(mask):
-    """(starts, stops) of each run of True in `mask`, stops exclusive."""
+    """Find each run of True in a mask.
+
+    Parameters
+    ----------
+    mask : numpy.ndarray of bool
+        Mask to scan.
+
+    Returns
+    -------
+    starts, stops : numpy.ndarray
+        Index of the first element of each run, and one past its last.
+    """
     edges = np.diff(np.r_[0, np.asarray(mask, dtype=np.int8), 0])
     return np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
 
 
 def _per_frame(values, name, needed_by, n_frames):
-    """`values` as floats, one per frame, or a ValueError saying what is wrong."""
+    """Check that a per-frame array is usable.
+
+    Parameters
+    ----------
+    values : array-like or None
+        Per-frame values.
+    name : str
+        Name of the argument, for messages.
+    needed_by : str
+        What needs it, for messages.
+    n_frames : int
+        Expected length.
+
+    Returns
+    -------
+    numpy.ndarray
+        `values` as floats.
+
+    Raises
+    ------
+    ValueError
+        If `values` is None or the wrong length.
+    """
     if values is None:
         raise ValueError(f"{needed_by} is set, so {name} is needed; it is None")
     values = np.asarray(values, dtype=float)
@@ -1299,6 +1878,20 @@ def _upper_fence(values, log=False, k=1.5):
 
     On log10 of the values when `log`, for quantities whose spread is
     multiplicative. Zeros have no log and cannot be upper outliers anyway.
+
+    Parameters
+    ----------
+    values : array-like
+        Values to fence.
+    log : bool, default False
+        Fence on log10 of the values.
+    k : float, default 1.5
+        IQR multiplier.
+
+    Returns
+    -------
+    float or None
+        The fence, or None with too few values.
     """
     values = values[np.isfinite(values)]
     if log:
@@ -1311,7 +1904,20 @@ def _upper_fence(values, log=False, k=1.5):
 
 
 def _automatic_threshold(name, values):
-    """A cut for threshold `name` read off `values`, or None if there are too few."""
+    """Read a cut for a threshold off a quantity's own distribution.
+
+    Parameters
+    ----------
+    name : str
+        Threshold name, e.g. ``"min_speed_mm_s"``.
+    values : array-like
+        The quantity over the starting frames.
+
+    Returns
+    -------
+    float or None
+        The cut, or None if there are too few values.
+    """
     if name == "min_speed_mm_s":
         values = values[np.isfinite(values)]
         # the mixture fit is the slow part, and a few hundred thousand evenly
@@ -1334,62 +1940,86 @@ def behavior_interval_mask(
     min_duration_s=0.0,
     verbose=True,
 ):
-    """The inter-frame intervals where the head was doing what an analysis wants.
+    """Select the inter-frame intervals where the head was doing what an analysis wants.
 
-    Starts from ``interval_mask`` -- usually the WAKE intervals, the second
-    output of :func:`frames_in_states` -- and keeps those whose frames pass
-    every threshold that is set:
-
-      max_elevation_deg           |elevation_deg|, nose above or below level
-      max_angular_velocity_deg_s  |angular head velocity| from ``heading_deg``
-                                  (:func:`optitrack.compute_angular_velocity`)
-      max_speed_mm_s              ``kinematics["speed"]`` at or below this
-      min_speed_mm_s              ``kinematics["speed"]`` above this
-
-    Returns ``(interval_mask, thresholds)``. The mask has the shape of the one
-    passed in, so it goes straight to ``interval_mask=`` of
-    :func:`optitrack.compute_all_units_tuning_curves`,
-    :func:`optitrack.compute_hd_tuning_significance` and
-    :func:`spikeshpc.decoder.run_decoder`. ``thresholds`` is the value each
-    threshold ended up with (None where it was not applied), plus
-    ``min_duration_s`` and which were ``"automatic"`` -- plain JSON, for the
-    parameters a result is saved with.
+    Starts from `interval_mask` and keeps those whose frames pass every
+    threshold that is set. An interval is kept only if both of its frames pass
+    -- the rule :func:`intervals_between_frames` applies to states -- and a
+    frame whose quantity is NaN fails every threshold that reads it. The
+    minimum is strict and the maxima are not, so ``min_speed_mm_s=t`` and
+    ``max_speed_mm_s=t`` split the same starting intervals into moving and
+    still with none in both.
 
     Each threshold is a number, None (not applied) or ``"automatic"``, which
     reads a cut off that quantity's own distribution over the frames of the
     starting intervals, each independently of the others:
 
-      maxima     Tukey's upper fence, Q3 + 1.5 IQR -- the end of a box plot's
-                 whisker. Speed and angular velocity are fenced on log10,
-                 because their spread is multiplicative: on a linear scale the
-                 fence lands inside ordinary behaviour (session7 wake: 143 deg/s
-                 and 197 mm/s, dropping 8.4% and 5.5% of it) where on log10 it
-                 reaches the tail (1133 deg/s, 978 mm/s). Elevation is bounded
-                 at 90 degrees and is fenced as it is (58.7 deg, 5% of wake,
-                 nearly all of it nose-up). The two overlap: heading is an
-                 azimuth and spins near vertical, so 93% of the angular-
-                 velocity outliers are elevation outliers too.
-      min speed  the trough between the immobility and locomotion modes of log
-                 speed, the split the movement veto uses
-                 (:func:`movement_threshold`; session7 wake: 14 mm/s).
+    - maxima: Tukey's upper fence, Q3 + 1.5 IQR -- the end of a box plot's
+      whisker. Speed and angular velocity are fenced on log10, because their
+      spread is multiplicative: on a linear scale the fence lands inside
+      ordinary behaviour (session7 wake: 143 deg/s and 197 mm/s, dropping 8.4%
+      and 5.5% of it) where on log10 it reaches the tail (1133 deg/s, 978
+      mm/s). Elevation is bounded at 90 degrees and is fenced as it is (58.7
+      deg, 5% of wake, nearly all of it nose-up). The two overlap: heading is
+      an azimuth and spins near vertical, so 93% of the angular-velocity
+      outliers are elevation outliers too.
+    - min speed: the trough between the immobility and locomotion modes of log
+      speed, the split the movement veto uses (:func:`movement_threshold`;
+      session7 wake: 14 mm/s).
 
-    An interval is kept only if both of its frames pass -- the rule
-    :func:`intervals_between_frames` applies to states -- and a frame whose
-    quantity is NaN fails every threshold that reads it. The minimum is strict
-    and the maxima are not, so ``min_speed_mm_s=t`` and ``max_speed_mm_s=t``
-    split the same starting intervals into moving and still with none in both.
-
-    ``min_duration_s`` then drops kept stretches shorter than it. A tuning
-    curve does not mind a fragmented mask; the decoder does, since
+    A tuning curve does not mind a fragmented mask; the decoder does, since
     :func:`spikeshpc.decoder.decode` skips stretches under a second. A
     frame-level speed threshold fragments heavily -- on session7 the median
-    stretch above the automatic minimum is 0.1 s -- so pass 1.0 when the mask
-    is for decoding.
+    stretch above the automatic minimum is 0.1 s -- so pass
+    ``min_duration_s=1.0`` when the mask is for decoding.
 
-    ``heading_deg``, ``kinematics`` (the dict from
-    :func:`optitrack.compute_kinematics`) and ``elevation_deg`` are the
-    shutter-aligned per-frame arrays, one entry per ``frame_times``; any of
-    them that no set threshold reads may be None.
+    Parameters
+    ----------
+    heading_deg : array-like
+        Heading per frame, in degrees. Any of `heading_deg`, `kinematics` and
+        `elevation_deg` that no set threshold reads may be None.
+    frame_times : array-like
+        Time of each frame, in seconds. `heading_deg`, `kinematics` and
+        `elevation_deg` are the shutter-aligned per-frame arrays, one entry
+        per frame time.
+    kinematics : dict, optional
+        The dict from :func:`optitrack.compute_kinematics`.
+    elevation_deg : array-like, optional
+        Head elevation per frame, in degrees.
+    interval_mask : array-like of bool, optional
+        Intervals to start from -- usually the WAKE intervals, the second
+        output of :func:`frames_in_states`.
+    max_elevation_deg : float or "automatic", optional
+        Maximum of ``|elevation_deg|``, nose above or below level.
+    max_angular_velocity_deg_s : float or "automatic", optional
+        Maximum ``|angular head velocity|`` from `heading_deg`
+        (:func:`optitrack.compute_angular_velocity`).
+    max_speed_mm_s : float or "automatic", optional
+        ``kinematics["speed"]`` must be at or below this.
+    min_speed_mm_s : float or "automatic", optional
+        ``kinematics["speed"]`` must be above this.
+    min_duration_s : float, default 0.0
+        Drop kept stretches shorter than this.
+    verbose : bool, default True
+        Print a summary.
+
+    Returns
+    -------
+    interval_mask : numpy.ndarray of bool
+        The mask, with the shape of the one passed in, so it goes straight to
+        ``interval_mask=`` of
+        :func:`optitrack.compute_all_units_tuning_curves`,
+        :func:`optitrack.compute_hd_tuning_significance` and
+        :func:`spikeshpc.decoder.run_decoder`.
+    thresholds : dict
+        The value each threshold ended up with (None where it was not
+        applied), plus ``min_duration_s`` and which were ``"automatic"`` --
+        plain JSON, for the parameters a result is saved with.
+
+    Raises
+    ------
+    ValueError
+        If a threshold is invalid or a needed per-frame array is missing.
     """
     frame_times = np.asarray(frame_times, dtype=float)
     n_frames = len(frame_times)
@@ -1494,7 +2124,7 @@ def behavior_interval_mask(
 
 
 def interval_mask_to_spans(frame_times, interval_mask) -> list:
-    """Each run of kept inter-frame intervals as a [start, stop] span, in seconds.
+    """Convert a mask of kept inter-frame intervals to spans.
 
     The way back from a mask to spans, for what wants spans: how long since the
     animal last moved (:func:`seconds_since` of a moving mask's spans), say, or
@@ -1504,6 +2134,23 @@ def interval_mask_to_spans(frame_times, interval_mask) -> list:
     For masking, keep the mask itself. Spans are tested half-open, so
     :func:`frames_in_states` would leave out the frame each span ends on, and
     with it the last interval of every run.
+
+    Parameters
+    ----------
+    frame_times : array-like
+        Time of each frame, in seconds.
+    interval_mask : array-like of bool
+        One value per inter-frame interval.
+
+    Returns
+    -------
+    list of list of float
+        ``[start, stop]`` in seconds for each run of kept intervals.
+
+    Raises
+    ------
+    ValueError
+        If the mask does not match the frame times.
     """
     frame_times = np.asarray(frame_times, dtype=float)
     mask = np.asarray(interval_mask, dtype=bool)
@@ -1517,7 +2164,7 @@ def interval_mask_to_spans(frame_times, interval_mask) -> list:
 
 
 def seconds_since(query_times, spans) -> np.ndarray:
-    """How long before each of `query_times` the most recent of `spans` ended.
+    """Measure how long before each time the most recent span ended.
 
     0 inside a span, inf before the first one. With the spans of a moving mask
     (:func:`interval_mask_to_spans` of a :func:`behavior_interval_mask` with a
@@ -1529,6 +2176,18 @@ def seconds_since(query_times, spans) -> np.ndarray:
 
     `spans` is [start, stop] pairs on the same clock as `query_times`; they need
     not be sorted or disjoint.
+
+    Parameters
+    ----------
+    query_times : array-like
+        Times to measure at.
+    spans : array-like
+        ``[start, stop]`` pairs on the same clock as `query_times`.
+
+    Returns
+    -------
+    numpy.ndarray
+        Seconds since the last span ended, per query time.
     """
     query_times = np.asarray(query_times, dtype=float)
     since = np.full(len(query_times), np.inf)
@@ -1558,6 +2217,27 @@ def slice_recording_to_states(
     this is for analyses that only need the samples themselves. Anything that
     has to line up with spike times or tracking should use
     :func:`times_in_states` and keep the original clock.
+
+    Parameters
+    ----------
+    recording : spikeinterface BaseRecording
+        Recording to slice.
+    intervals : dict
+        ``{state: [[start, stop], ...]}``.
+    states : tuple of str, default ("WAKE",)
+        States to keep.
+    min_duration_s : float, default 0.0
+        Skip intervals shorter than this.
+
+    Returns
+    -------
+    spikeinterface BaseRecording
+        The kept stretches joined into one segment.
+
+    Raises
+    ------
+    ValueError
+        If there is nothing to slice to.
     """
     import spikeinterface.full as si
 
@@ -1621,8 +2301,39 @@ def rescore_movement(
 
     ``min_duration_s``, ``veto`` and ``threshold`` default to whatever the
     original run used, read back from the saved summary, so the only thing that
-    changes is the movement trace. Returns the updated
-    :class:`~spikeshpc.io.StateScoring`.
+    changes is the movement trace.
+
+    Parameters
+    ----------
+    states_path : str or pathlib.Path
+        States directory or ``_states.json`` file.
+    session : str, optional
+        Session to rescore; required when the directory holds several.
+    optitrack_csv : str or pathlib.Path, optional
+        OptiTrack export.
+    frame_times : array-like or str or pathlib.Path, optional
+        Shutter times, as an array or a path.
+    rigid_body : str, optional
+        Rigid body to track.
+    min_duration_s : float, optional
+        Shortest run allowed; the original run's by default.
+    veto : tuple of str, optional
+        States the veto can overrule; the original run's by default.
+    threshold : float, optional
+        Movement threshold; the original run's by default.
+    write : bool, default True
+        Write the result back in place.
+
+    Returns
+    -------
+    spikeshpc.io.StateScoring
+        The updated scoring.
+
+    Raises
+    ------
+    ValueError
+        If the scoring cannot be rescored, or has no source path while
+        `write` is True.
     """
     import shutil
 
@@ -1720,7 +2431,29 @@ def attach_movement(scoring, optitrack_csv=None, frame_times=None, rigid_body=No
 
     `frame_times` may be an array or a path; left None it is looked for in the
     states directory (where the pipeline caches it) and then next to the CSV.
-    Returns `scoring`, modified in place.
+
+    Parameters
+    ----------
+    scoring : spikeshpc.io.StateScoring
+        Scoring to modify.
+    optitrack_csv : str or pathlib.Path
+        OptiTrack export. Required.
+    frame_times : array-like or str or pathlib.Path, optional
+        Shutter times, as an array or a path.
+    rigid_body : str, optional
+        Rigid body to track.
+
+    Returns
+    -------
+    spikeshpc.io.StateScoring
+        `scoring`, modified in place.
+
+    Raises
+    ------
+    ValueError
+        If `optitrack_csv` is missing or the inputs are inconsistent.
+    FileNotFoundError
+        If the CSV or frame times cannot be found.
     """
     from .optitrack.io import read_rigid_body_track
 

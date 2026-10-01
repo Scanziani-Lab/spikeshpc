@@ -37,7 +37,29 @@ SESSIONS_DIRNAME = "sessions"
 
 @dataclass
 class SessionSplit:
-    """One original recording, carved back out of the concatenated run."""
+    """One original recording, carved back out of the concatenated run.
+
+    Attributes
+    ----------
+    index : int
+        Position in the concatenation.
+    name : str
+        Session name.
+    sample_offset : int
+        First sample of the session in the concatenated recording.
+    num_samples : int
+        Length of the session, in samples.
+    sampling_frequency : float
+        Sampling rate, in Hz.
+    phys_path : str or None
+        Source recording path.
+    recording, sorting, analyzer : object or None
+        This session's slice of the corresponding concatenated object.
+    states : dict or None
+        State intervals in session-local seconds.
+    metrics : dict
+        Per-session metrics.
+    """
 
     index: int
     name: str
@@ -57,7 +79,13 @@ class SessionSplit:
 
     @property
     def t_start(self) -> float:
-        """Where this session begins on the concatenated clock, in seconds."""
+        """Start of this session on the concatenated clock.
+
+        Returns
+        -------
+        float
+            Seconds.
+        """
         return self.sample_offset / self.sampling_frequency
 
     def timestamps(self, relative_to: str = "session", dtype=np.float64):
@@ -71,6 +99,23 @@ class SessionSplit:
         Prefer arithmetic on frame indices where you can. float32 is not
         offered on purpose: past a few minutes its 24-bit mantissa cannot
         resolve a sample.
+
+        Parameters
+        ----------
+        relative_to : {"session", "concatenated"}, default "session"
+            Clock to count from.
+        dtype : numpy dtype, default numpy.float64
+            Output dtype.
+
+        Returns
+        -------
+        numpy.ndarray
+            Time of every sample, in seconds.
+
+        Raises
+        ------
+        ValueError
+            If `relative_to` or `dtype` is not supported.
         """
         if relative_to not in ("session", "concatenated"):
             raise ValueError(
@@ -98,13 +143,35 @@ class SessionSplit:
 
 
 def session_bounds(info: dict):
-    """[(start_frame, stop_frame), ...] for each original recording."""
+    """Get the frame span of each original recording.
+
+    Parameters
+    ----------
+    info : dict
+        Contents of ``concat_info.json``.
+
+    Returns
+    -------
+    list of tuple of int
+        ``(start_frame, stop_frame)`` per recording.
+    """
     offsets = info["sample_offsets"]
     return [(offsets[i], offsets[i + 1]) for i in range(len(offsets) - 1)]
 
 
 def session_names(info: dict):
-    """Session names taken from the source paths, as state scoring names them."""
+    """Get session names from the source paths, as state scoring names them.
+
+    Parameters
+    ----------
+    info : dict
+        Contents of ``concat_info.json``.
+
+    Returns
+    -------
+    list of str
+        One name per recording.
+    """
     paths = info.get("phys_paths") or []
     names = [Path(p).stem or Path(p).name for p in paths]
     if len(names) != len(info["sample_offsets"]) - 1:
@@ -113,7 +180,25 @@ def session_names(info: dict):
 
 
 def split_recording(recording, info: dict):
-    """Lazy frame_slice views, one per original recording."""
+    """Slice a concatenated recording back into lazy per-session views.
+
+    Parameters
+    ----------
+    recording : spikeinterface BaseRecording
+        Concatenated recording.
+    info : dict
+        Contents of ``concat_info.json``.
+
+    Returns
+    -------
+    list of spikeinterface BaseRecording
+        One ``frame_slice`` view per original recording.
+
+    Raises
+    ------
+    ValueError
+        If the recording does not match `info`.
+    """
     total = sum(info["num_samples"])
     if recording.get_num_frames() != total:
         raise ValueError(
@@ -124,17 +209,44 @@ def split_recording(recording, info: dict):
 
 
 def split_sorting(sorting, info: dict):
-    """Per-session sortings; frame_slice re-bases spike frames onto each session."""
+    """Slice a concatenated sorting into per-session sortings.
+
+    ``frame_slice`` re-bases spike frames onto each session.
+
+    Parameters
+    ----------
+    sorting : spikeinterface BaseSorting
+        Concatenated sorting.
+    info : dict
+        Contents of ``concat_info.json``.
+
+    Returns
+    -------
+    list of spikeinterface BaseSorting
+        One sorting per original recording.
+    """
     return [sorting.frame_slice(a, b) for a, b in session_bounds(info)]
 
 
 def split_states(states: dict, info: dict):
-    """Concatenated-clock state intervals -> per-session, session-local seconds.
+    """Convert concatenated-clock state intervals to session-local seconds.
 
     Intervals are clipped to each session's span. Scoring runs per session
     before concatenation, so nothing should straddle a junction; anything that
     does (e.g. states scored on the concatenation itself) is split across the
     sessions it covers rather than being dropped.
+
+    Parameters
+    ----------
+    states : dict
+        State intervals on the concatenated clock.
+    info : dict
+        Contents of ``concat_info.json``.
+
+    Returns
+    -------
+    list of dict
+        One state-interval dict per session.
     """
     fs = info["sampling_frequency"]
     per_session = []
@@ -157,6 +269,16 @@ def parent_extension_names(analyzer):
 
     get_saved_extension_names() only works for zarr/binary_folder analyzers
     and raises on an in-memory one, which is what you get from a notebook.
+
+    Parameters
+    ----------
+    analyzer : spikeinterface SortingAnalyzer
+        Analyzer to inspect.
+
+    Returns
+    -------
+    list of str
+        Names of the extensions it has.
     """
     names = []
     try:
@@ -190,6 +312,31 @@ def split_analyzer(
     `extensions` defaults to the parent's computed extensions with the same
     parameters. Sparsity is inherited so templates are directly comparable
     across sessions and with the parent.
+
+    Parameters
+    ----------
+    analyzer : spikeinterface SortingAnalyzer
+        Parent analyzer.
+    recordings : list of spikeinterface BaseRecording
+        Per-session recordings.
+    sortings : list of spikeinterface BaseSorting
+        Per-session sortings.
+    extensions : dict, optional
+        Extensions to compute, with their parameters; defaults to the
+        parent's.
+    folder : str or pathlib.Path, optional
+        Parent folder for saved analyzers.
+    format : str, default "memory"
+        Analyzer format.
+    inherit_sparsity : bool, default True
+        Reuse the parent's sparsity.
+    **job_kwargs
+        Passed to spikeinterface's job machinery.
+
+    Returns
+    -------
+    list of spikeinterface SortingAnalyzer
+        One analyzer per session.
     """
     if extensions is None:
         extensions = {}
@@ -236,8 +383,34 @@ def split_run(
     to split ones you already have in memory. `with_analyzer` is off by
     default because it recomputes every extension per session.
 
-    Returns a list of SessionSplit, in the order the recordings were
-    concatenated.
+    Parameters
+    ----------
+    output_dir : str or pathlib.Path
+        Run directory.
+    recording, sorting, analyzer : optional
+        Objects to split instead of loading them from `output_dir`.
+    states : dict, optional
+        State intervals to split instead of loading them.
+    info : dict, optional
+        Contents of ``concat_info.json``.
+    with_analyzer : bool, default False
+        Also split the analyzer.
+    extensions : dict, optional
+        Analyzer extensions to compute per session.
+    analyzer_format : str, default "memory"
+        Format of the per-session analyzers.
+    **job_kwargs
+        Passed to spikeinterface's job machinery.
+
+    Returns
+    -------
+    list of SessionSplit
+        One per recording, in the order they were concatenated.
+
+    Raises
+    ------
+    ValueError
+        If the analyzer is requested without both a recording and a sorting.
     """
     from .io import load_concatenated
 
@@ -319,6 +492,20 @@ def save_splits(splits, output_dir, save_timestamps: bool = False):
     `save_timestamps` writes the full seconds-per-sample array as
     timestamps.npy. It is off by default because it is 8 bytes per sample --
     everything needed to regenerate it is in split_info.json.
+
+    Parameters
+    ----------
+    splits : list of SessionSplit
+        Sessions to write.
+    output_dir : str or pathlib.Path
+        Run directory.
+    save_timestamps : bool, default False
+        Also write ``timestamps.npy``.
+
+    Returns
+    -------
+    list of pathlib.Path
+        Folders written.
     """
     output_dir = Path(output_dir)
     written = []

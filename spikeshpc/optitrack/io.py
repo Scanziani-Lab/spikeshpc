@@ -31,7 +31,15 @@ _HEADER_ROWS = 8
 
 @dataclass
 class RigidBodyTrack:
-    """One rigid body's pose across all frames of a take."""
+    """One rigid body's pose across all frames of a take.
+
+    Attributes
+    ----------
+    rotation_xyzw : numpy.ndarray
+        Quaternions, shape (n_frames, 4).
+    position : numpy.ndarray
+        Positions in millimetres, shape (n_frames, 3).
+    """
 
     rotation_xyzw: np.ndarray  # (n_frames, 4), quaternion
     position: np.ndarray  # (n_frames, 3), millimeters
@@ -44,6 +52,19 @@ class PositionTrack:
     What the brain-state movement veto needs. :func:`load_optitrack_csv`
     returns the full take instead, rotation and all, for the head-direction
     analysis.
+
+    Attributes
+    ----------
+    name : str
+        Rigid body name.
+    position : numpy.ndarray
+        Positions in millimetres, shape (n_frames, 3).
+    frame_numbers : numpy.ndarray
+        Frame numbers, shape (n_frames,).
+    frame_rate : float
+        Capture rate, in Hz.
+    metadata : dict
+        Header fields of the export.
     """
 
     name: str
@@ -58,7 +79,21 @@ class PositionTrack:
 
 @dataclass
 class OptitrackTake:
-    """A parsed OptiTrack Motive CSV export."""
+    """A parsed OptiTrack Motive CSV export.
+
+    Attributes
+    ----------
+    frame_numbers : numpy.ndarray
+        Frame numbers, shape (n_frames,).
+    times : numpy.ndarray
+        Frame times in seconds on the take-relative clock.
+    frame_rate : float
+        Capture rate, in Hz.
+    rigid_bodies : dict of str to RigidBodyTrack
+        Pose of each rigid body.
+    metadata : dict
+        Header fields of the export.
+    """
 
     frame_numbers: np.ndarray  # (n_frames,)
     times: np.ndarray  # (n_frames,) seconds, take-relative clock
@@ -68,7 +103,18 @@ class OptitrackTake:
 
 
 def load_optitrack_csv(csv_path: str | Path) -> OptitrackTake:
-    """Load an OptiTrack Motive CSV export's rigid-body rotation/position data."""
+    """Load an OptiTrack Motive CSV export's rigid-body rotation/position data.
+
+    Parameters
+    ----------
+    csv_path : str or pathlib.Path
+        Motive CSV export.
+
+    Returns
+    -------
+    OptitrackTake
+        The parsed take.
+    """
     csv_path = Path(csv_path)
 
     with open(csv_path, "r", newline="") as f:
@@ -140,7 +186,18 @@ def _read_header(csv_path: Path):
 
 
 def rigid_body_names(csv_path) -> list[str]:
-    """Names of the rigid bodies in a Motive export, in column order."""
+    """List the rigid bodies in a Motive export.
+
+    Parameters
+    ----------
+    csv_path : str or pathlib.Path
+        Motive CSV export.
+
+    Returns
+    -------
+    list of str
+        Rigid body names, in column order.
+    """
     rows = _read_header(Path(csv_path))
     type_row, name_row = rows[2], rows[3]
     names = []
@@ -153,9 +210,25 @@ def rigid_body_names(csv_path) -> list[str]:
 def read_rigid_body_track(csv_path, rigid_body: str | None = None) -> PositionTrack:
     """Load one rigid body's per-frame position from a Motive CSV export.
 
-    `rigid_body` may be left None when the take has exactly one; with several
-    it must be named, since picking one arbitrarily would silently track the
-    wrong object.
+    Parameters
+    ----------
+    csv_path : str or pathlib.Path
+        Motive CSV export.
+    rigid_body : str, optional
+        Rigid body to read. May be left None when the take has exactly one;
+        with several it must be named, since picking one arbitrarily would
+        silently track the wrong object.
+
+    Returns
+    -------
+    PositionTrack
+        The body's position track.
+
+    Raises
+    ------
+    ValueError
+        If the export has no rigid-body columns, or the body is missing or
+        ambiguous.
     """
     csv_path = Path(csv_path)
     rows = _read_header(csv_path)

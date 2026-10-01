@@ -50,23 +50,43 @@ RECORDING_TYPES = ("baseline", "pre", "post")
 
 
 def putative_matches(prob, unit_ids, session_ids, ref, other, threshold: float = 0.5) -> pd.DataFrame:
-    """Every (ref unit, other unit) pair UnitMatch puts above `threshold` in either direction.
-
-    ``prob`` is UnitMatch's ``(n, n)`` match probability, with rows and columns
-    in the order of ``unit_ids`` (``clus_info["original_ids"]``) and
-    ``session_ids`` (``clus_info["session_id"]``). ``ref`` and ``other`` are
-    session ids as ``session_ids`` holds them.
-
-    Columns:
-      ref_unit, other_unit   cluster ids in their own recordings
-      p_ref_row              P[ref, other]: the ref unit's row
-      p_other_row            P[other, ref]: the other unit's row
-      p_avg                  their mean
-      n_ref_candidates       how many candidates this ref unit has
-      n_other_candidates     how many ref units this other unit is a candidate for
+    """List every (ref unit, other unit) pair above `threshold` in either direction.
 
     UnitMatch's MatchTable.csv is oriented the other way round: its row with
     ``ID1 = a, ID2 = b`` holds ``P[b, a]``.
+
+    Parameters
+    ----------
+    prob : numpy.ndarray
+        UnitMatch match probability, shape (n, n), with rows and columns in
+        the order of `unit_ids` and `session_ids`.
+    unit_ids : array-like
+        Cluster ids (``clus_info["original_ids"]``).
+    session_ids : array-like
+        Session id of each unit (``clus_info["session_id"]``).
+    ref, other : object
+        Session ids, as `session_ids` holds them.
+    threshold : float, default 0.5
+        Minimum probability in either direction.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per candidate pair, sorted by ``ref_unit`` then descending
+        ``p_avg``, with columns:
+
+        - ``ref_unit``, ``other_unit``: cluster ids in their own recordings
+        - ``p_ref_row``: P[ref, other], the ref unit's row
+        - ``p_other_row``: P[other, ref], the other unit's row
+        - ``p_avg``: their mean
+        - ``n_ref_candidates``: number of candidates this ref unit has
+        - ``n_other_candidates``: number of ref units this other unit is a
+          candidate for
+
+    Raises
+    ------
+    ValueError
+        If the inputs are inconsistent or a session has no units.
     """
     prob = np.asarray(prob, dtype=float)
     unit_ids = np.asarray(unit_ids).ravel()
@@ -99,19 +119,32 @@ def putative_matches(prob, unit_ids, session_ids, ref, other, threshold: float =
 
 
 def estimate_rotation(candidates: pd.DataFrame, hd_ref, hd_other, min_pairs: int = 3):
-    """How far the whole head-direction population turned between two recordings.
+    """Estimate how far the head-direction population turned between two recordings.
 
     Measured on the pairs least likely to be wrong -- a ref unit with exactly
     one candidate that is nobody else's candidate -- where both units are
     significantly tuned, as the circular mean of their preferred directions'
-    difference (other - ref). ``hd_ref`` and ``hd_other`` are the two
-    recordings' :class:`spikeshpc.optitrack.HDTuning`; a unit missing from one
-    is skipped.
+    difference (other - ref). A unit missing from one recording is skipped.
 
-    Returns ``(rotation_deg, R, n_pairs)``: the angle in (-180, 180], the
-    resultant length of the differences (near 1 when the population turned as
-    one), and how many pairs it rests on. With fewer than `min_pairs` there is
-    nothing to measure, so the rotation is 0, R is NaN, and a warning says so.
+    Parameters
+    ----------
+    candidates : pandas.DataFrame
+        Output of :func:`putative_matches`.
+    hd_ref, hd_other : spikeshpc.optitrack.HDTuning
+        Tuning of the reference and other recordings.
+    min_pairs : int, default 3
+        Fewest pairs needed to measure a rotation.
+
+    Returns
+    -------
+    rotation_deg : float
+        Rotation in (-180, 180]; 0 if fewer than `min_pairs` pairs (a warning
+        says so).
+    R : float
+        Resultant length of the differences (near 1 when the population
+        turned as one); NaN if fewer than `min_pairs` pairs.
+    n_pairs : int
+        Number of pairs the estimate rests on.
     """
     unique = candidates[
         (candidates["n_ref_candidates"] == 1) & (candidates["n_other_candidates"] == 1)
@@ -144,13 +177,29 @@ def estimate_rotation(candidates: pd.DataFrame, hd_ref, hd_other, min_pairs: int
 
 
 def tuning_similarity(curve_ref, curve_other, rotation_deg: float = 0.0) -> float:
-    """Pearson r between two tuning curves, after turning `curve_other` back by `rotation_deg`.
+    """Pearson r between two tuning curves, after turning `curve_other` back.
 
     Both are rates over the same evenly spaced ring of heading bins starting at
     0 degrees -- the curves :func:`spikeshpc.optitrack.load_hd_tuning` returns --
     so the rotation is a circular shift by the nearest whole number of bins.
-    NaN if either curve is flat, as a unit that never fired in the tuning
-    intervals is.
+
+    Parameters
+    ----------
+    curve_ref, curve_other : array-like
+        Rates over the same ring of heading bins.
+    rotation_deg : float, default 0.0
+        Rotation to undo on `curve_other`, in degrees.
+
+    Returns
+    -------
+    float
+        Pearson r, or NaN if either curve is flat, as a unit that never fired
+        in the tuning intervals is.
+
+    Raises
+    ------
+    ValueError
+        If the curves differ in shape.
     """
     ref = np.asarray(curve_ref, dtype=float)
     other = np.asarray(curve_other, dtype=float)
@@ -164,28 +213,44 @@ def tuning_similarity(curve_ref, curve_other, rotation_deg: float = 0.0) -> floa
 
 
 def select_partners(candidates: pd.DataFrame, rule: str, similarity=None) -> pd.DataFrame:
-    """One partner per ref unit and one ref unit per partner, from `candidates`.
-
-    ``rule="probability"`` ranks pairs by ``p_avg``. ``rule="tuning"`` ranks
-    them by ``similarity``, highest first -- one value per row of
-    `candidates`, from :func:`tuning_similarity` -- and puts pairs without one
-    after every pair that has one, in ``p_avg`` order. Leave it NaN wherever
-    tuning cannot tell candidates apart: a curve missing or flat, or a ref
-    unit that is not head-direction tuned, whose curve is noise.
+    """Pick one partner per ref unit and one ref unit per partner.
 
     Walking down the ranking, a pair is accepted when neither of its units is
     already taken. So the better-ranked of two ref units competing for one
     partner keeps it, and the other falls back to its next candidate, if it has
     one -- even a ref unit whose only candidate that partner was.
 
-    Returns `candidates` with columns added:
-      similarity   (rule "tuning" only)
-      rank         0 for the best-ranked pair
-      chosen       the pairs that stand
-      reason       "only candidate", "best tuning similarity", "highest
-                   average P" or "fallback" (its better candidates went to
-                   other ref units) for chosen pairs; "lost to unit N" or "not
-                   needed" (its ref unit took a better candidate) for the rest
+    Parameters
+    ----------
+    candidates : pandas.DataFrame
+        Output of :func:`putative_matches`.
+    rule : {"probability", "tuning"}
+        ``"probability"`` ranks pairs by ``p_avg``. ``"tuning"`` ranks them by
+        `similarity`, highest first, and puts pairs without one after every
+        pair that has one, in ``p_avg`` order.
+    similarity : array-like, optional
+        One value per row of `candidates`, from :func:`tuning_similarity`.
+        Required for ``rule="tuning"``. Leave it NaN wherever tuning cannot
+        tell candidates apart: a curve missing or flat, or a ref unit that is
+        not head-direction tuned, whose curve is noise.
+
+    Returns
+    -------
+    pandas.DataFrame
+        `candidates` with columns added:
+
+        - ``similarity``: rule "tuning" only
+        - ``rank``: 0 for the best-ranked pair
+        - ``chosen``: the pairs that stand
+        - ``reason``: "only candidate", "best tuning similarity", "highest
+          average P" or "fallback" (its better candidates went to other ref
+          units) for chosen pairs; "lost to unit N" or "not needed" (its ref
+          unit took a better candidate) for the rest
+
+    Raises
+    ------
+    ValueError
+        If `rule` is unknown or `similarity` is missing or the wrong length.
     """
     table = candidates.reset_index(drop=True).copy()
     p_avg = table["p_avg"].to_numpy(dtype=float)
@@ -246,12 +311,27 @@ def select_partners(candidates: pd.DataFrame, rule: str, similarity=None) -> pd.
 
 
 def recording_colors(types) -> list:
-    """A line color per recording from its type: "baseline", "pre" or "post".
+    """Assign a line color to each recording from its type.
 
     The baseline is black. Other pre-lesion recordings are gray and post-lesion
     ones red, in shades from light to dark in list order -- so with the list in
     chronological order the latest post-lesion recording is the darkest red. A
     single recording of a type gets that type's middle shade.
+
+    Parameters
+    ----------
+    types : sequence of str
+        Type of each recording: "baseline", "pre" or "post".
+
+    Returns
+    -------
+    list
+        One color per recording.
+
+    Raises
+    ------
+    ValueError
+        If a type is not recognised.
     """
     import matplotlib
 
@@ -289,20 +369,42 @@ def plot_tracked_tuning(
     per_page: int = 36,
     panel_size=(2.4, 1.9),
 ) -> list:
-    """One panel per tracked unit: its tuning curve in every recording it was found in.
-
-    ``curves`` is ``{unit: {recording: (bin_centers_deg, rate_hz)}}``, keyed by
-    the baseline unit; a recording in which it had no partner, or its partner
-    no curve, is simply absent. ``recordings`` fixes the drawing and legend
-    order, ``colors`` gives one color per recording (see
-    :func:`recording_colors`) and ``labels`` the legend text (default: the
-    recording names). ``titles`` optionally overrides a panel's title.
+    """Plot one panel per tracked unit, with its tuning curve in every recording.
 
     Curves are in Hz, each panel scaled to its own unit, so a rate that fell
     after the lesion shows as a lower curve and not just a flatter one. At most
     `per_page` panels go on a figure, each with the legend across its top.
 
-    Returns the list of figures.
+    Parameters
+    ----------
+    curves : dict
+        ``{unit: {recording: (bin_centers_deg, rate_hz)}}``, keyed by the
+        baseline unit; a recording in which it had no partner, or its partner
+        no curve, is simply absent.
+    recordings : sequence
+        Recording names, fixing the drawing and legend order.
+    colors : sequence
+        One color per recording (see :func:`recording_colors`).
+    labels : sequence of str, optional
+        Legend text; defaults to the recording names.
+    titles : dict, optional
+        Overrides a panel's title, keyed by unit.
+    ncols : int, default 6
+        Panels per row.
+    per_page : int, default 36
+        Maximum panels per figure.
+    panel_size : tuple of float, default (2.4, 1.9)
+        Width and height of one panel, in inches.
+
+    Returns
+    -------
+    list of matplotlib.figure.Figure
+        The figures.
+
+    Raises
+    ------
+    ValueError
+        If no unit has a curve in any recording.
     """
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
