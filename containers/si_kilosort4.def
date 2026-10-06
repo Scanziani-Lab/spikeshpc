@@ -46,18 +46,15 @@ From: pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
     # binding and still provides the `pynvml` module, while the standalone pynvml
     # package is deprecated and makes torch emit a FutureWarning on every import.
     # Installing both would have two distributions fighting over the same module.
+    #
+    # probeinterface>=0.4: older releases can't parse the imro header of NP2004
+    # probes ('invalid literal for int() with base 10: NP2004').
     pip install --no-cache-dir \
         "spikeinterface[full]" \
+        "probeinterface>=0.4" \
         kilosort \
         nvidia-ml-py \
         numpy pandas zarr
-
-    # NP2004 probes: released probeinterface can't parse their imro header
-    # ('invalid literal for int() with base 10: NP2004'). Fixed on main but
-    # not yet released. Installed last so it wins over the released version
-    # pulled in as a spikeinterface dependency above.
-    pip install --no-cache-dir --upgrade \
-        "probeinterface @ git+https://github.com/SpikeInterface/probeinterface.git"
 
     # Fail the build now, rather than mid-job, if anything above conflicted.
     python -c "import torch, spikeinterface, kilosort, probeinterface, pynvml"

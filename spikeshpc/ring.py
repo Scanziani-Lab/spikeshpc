@@ -127,6 +127,7 @@ __all__ = [
     "circular_r",
     "compare_angles",
     "compare_rings",
+    "control_band",
     "decode_ring",
     "fit_ring",
     "pair_correlogram",
@@ -2022,6 +2023,125 @@ def pair_decodes(a: Decoded, b: Decoded) -> tuple[np.ndarray, np.ndarray]:
     inside = j >= 0
     inside[inside] = a.time_s[inside] < stop[j[inside]]
     return np.flatnonzero(inside), j[inside]
+
+
+def control_band(
+    unit_ids,
+    depths_um,
+    band_um: tuple[float, float],
+    n_units: int | None = None,
+    gap_um: float = 0.0,
+    side: str = "either",
+) -> tuple[tuple[float, float], np.ndarray]:
+    """A depth band clear of `band_um`, about as wide and holding as many units.
+
+    The negative control for a ring: :func:`run_ring` on as many units, from
+    tissue the head-direction structure does not reach, should find no ring.
+    Equal numbers matter because the screen, the Isomap graph and the
+    population vector all change with the number of units.
+
+    Every run of `n_units` units consecutive in depth, all more than `gap_um`
+    outside `band_um`, is a candidate. A run that fits within `band_um`'s
+    width with no other unit inside gets exactly that width; one that does
+    not gets as close as it can -- its own span if it is wider, out to its
+    neighbours if it is narrower. A band never reaches past the outermost
+    unit, where the probe may have no channels, or into the gap. Of the runs
+    that come closest to the width, the furthest from `band_um` wins, as the
+    least likely to hold head-direction cells that straggle past it.
+
+    Parameters
+    ----------
+    unit_ids : sequence
+        Candidate units, such as ``hd.unit_ids``.
+    depths_um : array-like
+        Their depths, in the same order, such as ``hd.depths``.
+    band_um : (float, float)
+        The ring's band, ends included, as the notebook's ``ring_depth_um``.
+    n_units : int, optional
+        Units the control band should hold. Default: as many as `band_um`
+        holds, which is ``len(ring_units)``.
+    gap_um : float, default 0
+        Clearance between the two bands.
+    side : {"either", "below", "above"}
+        Smaller or larger depth values than `band_um`.
+
+    Returns
+    -------
+    band_um : (float, float)
+        The control band, ends included.
+    unit_ids : numpy.ndarray
+        Its units, in the order given.
+
+    Warns
+    -----
+    UserWarning
+        When the band's width is more than 10% off `band_um`'s: the units
+        outside `band_um` are denser or sparser than inside it.
+    """
+    unit_ids = np.asarray(unit_ids)
+    depths = np.asarray(depths_um, dtype=float)
+    if depths.shape != unit_ids.shape:
+        raise ValueError(
+            f"{depths.size} depths for {unit_ids.size} units; give one per unit"
+        )
+    if side not in ("either", "below", "above"):
+        raise ValueError(f"side must be 'either', 'below' or 'above', not {side!r}")
+    low, high = sorted(float(edge) for edge in band_um)
+    width = high - low
+    if n_units is None:
+        n_units = int(np.sum((depths >= low) & (depths <= high)))
+    if n_units < 1:
+        raise ValueError("the control band needs at least 1 unit")
+
+    tol = 1e-6  # um: an edge short of the neighbouring unit, not on it
+    best = None
+    for name, inner in (("below", low - gap_um), ("above", high + gap_um)):
+        if side not in ("either", name):
+            continue
+        outside = depths < inner if name == "below" else depths > inner
+        d = np.sort(depths[outside])
+        for i in range(d.size - n_units + 1):
+            first, last = d[i], d[i + n_units - 1]
+            if i > 0:
+                floor = d[i - 1] + tol
+            else:
+                floor = first if name == "below" else inner + tol
+            if i + n_units < d.size:
+                ceiling = d[i + n_units] - tol
+            else:
+                ceiling = inner - tol if name == "below" else last
+            if floor > first or ceiling < last:
+                continue  # a unit at the same depth as the run's end
+            w = float(np.clip(width, last - first, ceiling - floor))
+            # centred on the run, as far as its neighbours allow
+            start = float(
+                np.clip(
+                    (first + last - w) / 2,
+                    max(floor, last - w),
+                    min(first, ceiling - w),
+                )
+            )
+            distance = low - (start + w) if name == "below" else start - high
+            key = (abs(w - width), -distance)
+            if best is None or key < best[0]:
+                best = (key, (start, start + w))
+
+    if best is None:
+        where = "" if side == "either" else f", {side} it"
+        raise ValueError(
+            f"fewer than {n_units} units, or none consecutive, lie more than "
+            f"{gap_um:g} um outside {low:.0f}-{high:.0f} um{where}"
+        )
+    band = best[1]
+    if best[0][0] > 0.1 * width:
+        warnings.warn(
+            f"the control band is {band[1] - band[0]:.0f} um wide, against "
+            f"{width:.0f} um: {n_units} units are spread differently outside "
+            f"{low:.0f}-{high:.0f} um",
+            stacklevel=2,
+        )
+    inside = (depths >= band[0]) & (depths <= band[1])
+    return band, unit_ids[inside]
 
 
 # ── comparisons ──────────────────────────────────────────────────────────

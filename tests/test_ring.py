@@ -34,6 +34,7 @@ from spikeshpc.ring import (
     circular_r,
     compare_angles,
     compare_rings,
+    control_band,
     decode_ring,
     fit_ring,
     pair_correlogram,
@@ -589,6 +590,49 @@ def test_a_unit_map_is_followed_and_missing_units_are_skipped(halves):
     assert comparison.structure is None and comparison.angles.shuffle is None
     with pytest.raises(ValueError, match="at least 4"):
         compare_rings(first, second, unit_map={units[0]: units[0]})
+
+
+def test_a_control_band_matches_the_ring_band_s_units_and_width_away_from_it():
+    rng = np.random.default_rng(11)
+    depths = np.concatenate(
+        [
+            rng.uniform(0, 1000, 60),  # sparse, below
+            rng.uniform(1500, 1800, 40),  # the ring's band, dense
+            rng.uniform(2000, 3000, 100),  # as dense as the band, above
+        ]
+    )
+    ids = np.arange(depths.size) + 100
+    band, units = control_band(ids, depths, (1500.0, 1800.0), gap_um=50.0)
+    assert units.size == 40
+    assert band[1] - band[0] == pytest.approx(300.0)
+    assert band[0] > 1850.0  # only the units above are dense enough
+    assert band[1] <= depths.max()
+    inside = ids[(depths >= band[0]) & (depths <= band[1])]
+    np.testing.assert_array_equal(units, inside)
+
+    # the furthest of the bands that fit, as close as it gets otherwise
+    band_far, _ = control_band(ids, depths, (1500.0, 1800.0), side="above")
+    assert band_far[1] > 2800.0
+    with pytest.warns(UserWarning, match="wide"):
+        band_below, units_below = control_band(
+            ids, depths, (1500.0, 1800.0), side="below"
+        )
+    assert units_below.size == 40 and band_below[1] < 1500.0
+    assert band_below[1] - band_below[0] > 300.0
+
+    _, ten = control_band(ids, depths, (1500.0, 1800.0), n_units=10)
+    assert ten.size == 10
+    with pytest.raises(ValueError, match="fewer than 61"):
+        control_band(ids, depths, (1500.0, 1800.0), n_units=61, side="below")
+
+
+def test_a_control_band_never_splits_units_at_one_depth():
+    depths = np.array([0, 10, 20, 20, 30, 40, 100, 110, 120], dtype=float)
+    band, units = control_band(np.arange(9), depths, (100.0, 120.0))
+    assert units.size == 3
+    assert band[1] < 100.0
+    assert np.sum((depths >= band[0]) & (depths <= band[1])) == 3
+    assert set(units.tolist()) == {1, 2, 3}  # the only run that keeps 20 um whole
 
 
 def test_ring_vs_tuning_finds_the_tuned_units(session, ring):

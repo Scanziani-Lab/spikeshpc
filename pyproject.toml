@@ -18,7 +18,8 @@ dependencies = [
     # floor rather than exactly: 0.104 is where the extension/analyzer API
     # this package calls settled.
     "spikeinterface[full]>=0.104",
-    "probeinterface",
+    # 0.4.0 is the first release that parses NP2004 imro headers.
+    "probeinterface>=0.4",
     "ipykernel>=7.3.0",
 ]
 
@@ -27,7 +28,34 @@ dependencies = [
 # from the container image (containers/si_kilosort4.def), not from pip, so
 # they are kept out of the hard dependencies.
 sorting = ["kilosort>=4.1"]
-dev = ["pytest>=7"]
+# For the OptiTrack heading video widget only, which imports cv2 when it opens
+# a video: `import spikeshpc` and the pipeline run without it, as they must in
+# the cluster image. Headless: nothing opens a cv2 window.
+video = ["opencv-python-headless"]
+
+[dependency-groups]
+# The local analysis environment that `uv sync` builds on top of the package:
+# kilosort, what the notebooks and GUIs need, and pytest. None of it is a
+# dependency of the package, so the cluster image and `pip install` never see it.
+dev = [
+    "kilosort>=4.1",
+    # Listed directly only so that [tool.uv.sources] applies to it: uv ignores
+    # sources for transitive dependencies.
+    "torch",
+    "nvidia-ml-py",  # provides pynvml, which kilosort uses to report GPU memory
+    "bombcell>=0.89",
+    # Used by 0_curate. Its only release declares Python ~=3.11: uv ignores the
+    # upper bound but not the lower one, hence the marker.
+    "slay; python_version >= '3.11'",
+    # PySide6 and pyqtgraph. PySide6 is then also what %matplotlib qt uses; with
+    # PyQt6 installed too, matplotlib would prefer it, and two Qt bindings can't
+    # share one kernel.
+    "spikeinterface-gui[desktop]",
+    "ipympl",  # %matplotlib widget
+    "jupyterlab",
+    "opencv-python-headless",  # the heading video widget (the `video` extra)
+    "pytest>=7",
+]
 
 [project.urls]
 Repository = "https://github.com/Scanziani-Lab/spikeshpc"
@@ -43,3 +71,21 @@ include = ["spikeshpc*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv]
+# The notebooks run from the folder that holds this repo, and the repo's folder
+# is named spikeshpc too. From there, setuptools' default editable import hook
+# loses to that folder as an empty namespace package. A plain path entry (compat
+# mode) wins, because a regular package anywhere on sys.path beats a namespace
+# portion.
+config-settings-package = { spikeshpc = { editable_mode = "compat" } }
+
+# torch on PyPI is CPU-only for Windows, so take it from PyTorch's CUDA 12.6
+# index (on Linux too, for one build everywhere; macOS has no CUDA).
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126", marker = "sys_platform != 'darwin'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

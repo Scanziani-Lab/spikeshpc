@@ -25,6 +25,7 @@ hpc_load_sort_post.py          entry point that needs no install
 spikeshpc/                     the package
 slurm/                         multisession_sorting.slurm (cluster job wrapper)
 containers/                    si_kilosort4.def (apptainer image definition)
+envs/unitmatch/                Python 3.12 environment for UnitMatch (see Install)
 tests/
 ```
 
@@ -60,9 +61,39 @@ so a config can be reused for a one-off (e.g. `--skip_sorting`) without editing.
 
 ### Install
 
+With [uv](https://docs.astral.sh/uv/), from the repo root:
+
+```bash
+uv sync         # .venv on Python 3.14: the package, kilosort4, CUDA torch, notebook/GUI tools, pytest
+uv run pytest
+```
+
+`uv sync` installs the `dev` dependency group along with the package, and takes torch from
+PyTorch's CUDA 12.6 index (PyPI's Windows torch is CPU-only). To use the environment from
+Jupyter, register it once as a kernel:
+
+```bash
+uv run python -m ipykernel install --user --name spikeshpc --display-name "spikeshpc (Python 3.14)"
+```
+
+UnitMatch has its own environment, [`envs/unitmatch`](envs/unitmatch/pyproject.toml), on
+Python 3.12: UnitMatchPy pins numpy<2, and spikeinterface 0.105 onwards needs numpy 2. It
+installs this repo and UnitMatchPy from a clone of the lab's [UnitMatch fork](https://github.com/Scanziani-Lab/UnitMatch)
+next to the repo, both editable. Its `spikeshpc` branch is upstream plus fixes for Kilosort 4
+data, truncated recordings and the GUI layout:
+
+```bash
+git clone --filter=blob:none -b spikeshpc https://github.com/Scanziani-Lab/UnitMatch.git ../UnitMatch
+uv sync --directory envs/unitmatch
+uv run --directory envs/unitmatch python -m ipykernel install --user --name unitmatch --display-name "unitmatch (Python 3.12)"
+```
+
+Or with pip:
+
 ```bash
 pip install -e .              # numpy, scipy, spikeinterface[full], probeinterface
 pip install -e ".[sorting]"   # ...plus kilosort4
+pip install -e ".[video]"     # ...plus OpenCV, for the OptiTrack heading video widget
 ```
 
 If `pip` gives you a CPU-only torch, install the CUDA build from [pytorch.org](https://pytorch.org/get-started/locally/)

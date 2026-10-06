@@ -1,0 +1,39 @@
+# UnitMatch's environment, kept apart from the main one: UnitMatchPy pins
+# numpy<2, and spikeinterface>=0.105 needs numpy>=2. Python 3.12 is the newest
+# numpy 1.x has wheels for. Runs spikeshpc.tracking.run_unitmatch and
+# 3_run_unitmatch.ipynb; spikeshpc.matching takes UnitMatch's arrays, so what
+# comes after the match probabilities also runs in the main environment.
+[project]
+name = "unitmatch-env"
+version = "0.1.0"
+requires-python = "==3.12.*"
+dependencies = [
+    "spikeshpc",
+    # Releases from 3.5 pin numpy<2. 3.4.0 allowed numpy 2 and was reverted
+    # upstream the same day ("newer Numpy version did not work"), so a resolver
+    # must never fall back to it.
+    "UnitMatchPy>=3.5",
+    # Listed directly only so that [tool.uv.sources] applies to it: uv ignores
+    # sources for transitive dependencies.
+    "torch",
+    "ipykernel>=7.3.0",
+]
+
+[tool.uv]
+package = false  # an environment, not a package
+# So that `import spikeshpc` works from the notebooks' folder; see the comment
+# on the same setting in the repo's pyproject.toml.
+config-settings-package = { spikeshpc = { editable_mode = "compat" } }
+
+[tool.uv.sources]
+spikeshpc = { path = "../..", editable = true }
+# A UnitMatch clone next to this repo, on the `spikeshpc` branch of the fork
+# github.com/Scanziani-Lab/UnitMatch: upstream plus fixes for Kilosort 4 data,
+# truncated recordings and the GUI layout, which PyPI's releases don't have.
+UnitMatchPy = { path = "../../../UnitMatch/UnitMatchPy", editable = true }
+torch = [{ index = "pytorch-cu126", marker = "sys_platform != 'darwin'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

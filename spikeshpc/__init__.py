@@ -87,6 +87,12 @@ from .states import (
     times_in_states,
 )
 from .traces import get_traces, plot_traces, time_range_to_frames
+from .tracking import (
+    git_commit,
+    recording_paths,
+    run_unitmatch,
+    waveform_status,
+)
 from .turns import (
     Turns,
     clockwise_sign,
@@ -132,6 +138,7 @@ __all__ = [
     "fit_encoding_model",
     "fit_ring",
     "get_traces",
+    "git_commit",
     "frames_in_states",
     "interval_mask_to_spans",
     "load_concatenated",
@@ -161,6 +168,7 @@ __all__ = [
     "read_openephys_synced",
     "read_recording",
     "recording_colors",
+    "recording_paths",
     "reference_decode",
     "rescore_movement",
     "restrict_data",
@@ -168,6 +176,7 @@ __all__ = [
     "ring_vs_tuning",
     "run_decoder",
     "run_pipeline",
+    "run_unitmatch",
     "run_ring",
     "save_splits",
     "score_recording",
@@ -188,4 +197,5 @@ __all__ = [
     "times_in_states",
     "tuning_similarity",
     "unit_raster",
+    "waveform_status",
 ]

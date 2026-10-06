@@ -11,7 +11,6 @@ through frames here and adjust those two until it does.
 
 from __future__ import annotations
 
-import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -56,6 +55,10 @@ class HeadingVideoWidget:
         start_frame: int = 0,
         compass_rotation_offset_deg: float = 0.0,
     ):
+        # Imported here, not at the top: `import spikeshpc` loads this module,
+        # and the cluster image that runs the pipeline has no OpenCV.
+        import cv2
+
         warn_if_noninteractive_backend()
         self.cap = cv2.VideoCapture(str(video_path))
         if not self.cap.isOpened():
@@ -107,6 +110,8 @@ class HeadingVideoWidget:
         return None
 
     def _show_frame(self, frame_idx: int):
+        import cv2
+
         frame_idx = int(np.clip(frame_idx, 0, self.n_video_frames - 1))
         if frame_idx != self.current_frame + 1:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
