@@ -385,9 +385,11 @@ def plot_turn_summary(table: pd.DataFrame, recordings, colors: dict, units: dict
         One row per trace: ``recording``, ``state`` ("wake" or "REM"),
         ``source`` and the :meth:`Turns.as_row` measures. ``source`` is
         "decoded" (a filled circle in the recording's color), "optitrack" (the
-        measured heading, an open square; drawn for wake only) or "reference"
+        measured heading, an open square; drawn for wake only), "reference"
         (the baseline decoded with that recording's units, an open black
-        diamond, as in :func:`~spikeshpc.decoder.plot_transfer_summary`).
+        diamond, as in :func:`~spikeshpc.decoder.plot_transfer_summary`) or
+        "ring" (the recording's own ring from :mod:`spikeshpc.ring`, decoded
+        from its units' co-firing: an open triangle in its color).
     recordings : sequence of str
         Recordings to draw, in order.
     colors : dict
@@ -424,11 +426,13 @@ def plot_turn_summary(table: pd.DataFrame, recordings, colors: dict, units: dict
 
     rows = {(row.recording, row.state, row.source): row for row in table.itertuples()}
     # x offset within a column: a wake decode and the measured heading as a pair,
-    # the baseline with the same units set apart to the left; each source keeps
-    # its offset in both columns. OptiTrack is drawn for wake only.
+    # the baseline with the same units set apart to the left and the ring to the
+    # right; each source keeps its offset in both columns. OptiTrack is drawn for
+    # wake only.
     placement = {
         ("wake", "reference"): -0.36, ("wake", "decoded"): -0.06, ("wake", "optitrack"): 0.1,
-        ("REM", "reference"): -0.36, ("REM", "decoded"): -0.06,
+        ("wake", "ring"): 0.3,
+        ("REM", "reference"): -0.36, ("REM", "decoded"): -0.06, ("REM", "ring"): 0.14,
     }
     styles = {
         "decoded": lambda c: dict(marker="o", ls="none", color=c, ms=7, zorder=3),
@@ -436,6 +440,8 @@ def plot_turn_summary(table: pd.DataFrame, recordings, colors: dict, units: dict
                                     zorder=3),
         "reference": lambda c: dict(marker="D", ls="none", mfc="none", mec="k", mew=1.2, ms=7,
                                     zorder=4),
+        "ring": lambda c: dict(marker="^", ls="none", mfc="none", mec=c, mew=1.5, ms=7,
+                               zorder=3),
     }
     # counts beside a decode's and the measured heading's markers. Side by side,
     # two labels at one height would print over each other, so a pair's point
@@ -471,7 +477,7 @@ def plot_turn_summary(table: pd.DataFrame, recordings, colors: dict, units: dict
                 if np.isfinite(row.cw_ccw_ratio) and row.cw_ccw_ratio > 0:
                     ratios.append(row.cw_ccw_ratio)
                     ratio_ax.plot(x + offset, row.cw_ccw_ratio, **marker)
-                if source != "reference":
+                if source in ("decoded", "optitrack"):
                     labelled[source] = (x + offset, row)
             for ax, measure, text in counted:
                 ys = {
@@ -535,7 +541,9 @@ def plot_turn_summary(table: pd.DataFrame, recordings, colors: dict, units: dict
     ]
     if "reference" in set(table["source"]):
         handles.append(Line2D([], [], label="baseline, same units", **styles["reference"]("k")))
-    constant_ax.legend(handles=handles, fontsize=7, frameon=False, loc="best", ncol=3)
+    if "ring" in set(table["source"]):
+        handles.append(Line2D([], [], label="own ring (correlations)", **styles["ring"]("k")))
+    constant_ax.legend(handles=handles, fontsize=7, frameon=False, loc="best", ncol=4)
     axes[0].figure.tight_layout()
     return axes
 
@@ -547,8 +555,8 @@ def plot_turn_sweep(table: pd.DataFrame, recordings, colors: dict, current: floa
     Rows of panels: the three measures; columns: wake, then REM. One line per
     recording and source, in the recording's color: solid decoded, dashed the
     measured heading (wake only; in REM the head does not turn), dotted the
-    baseline decoded with that recording's units. Net drift has no threshold,
-    so it is not here.
+    baseline decoded with that recording's units, dash-dot the recording's own
+    ring. Net drift has no threshold, so it is not here.
 
     Parameters
     ----------
@@ -591,6 +599,7 @@ def plot_turn_sweep(table: pd.DataFrame, recordings, colors: dict, current: floa
         "decoded": dict(ls="-", marker="o"),
         "optitrack": dict(ls="--", marker="s", mfc="none"),
         "reference": dict(ls=":", marker="D", mfc="none"),
+        "ring": dict(ls="-.", marker="^", mfc="none"),
     }
 
     ratios = []
@@ -651,6 +660,9 @@ def plot_turn_sweep(table: pd.DataFrame, recordings, colors: dict, current: floa
     if "reference" in set(table["source"]):
         handles.append(Line2D([], [], color="k", lw=1.2, ms=4, label="baseline, same units",
                               **styles["reference"]))
+    if "ring" in set(table["source"]):
+        handles.append(Line2D([], [], color="k", lw=1.2, ms=4, label="own ring (correlations)",
+                              **styles["ring"]))
     if current is not None:
         handles.append(Line2D([], [], color="0.85", lw=4, label=f"in use: {current:g} deg/s"))
     axes[0, 1].legend(handles=handles, fontsize=7, frameon=False, loc="best")

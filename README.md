@@ -263,6 +263,46 @@ print(run.summary())
 The method follows Moritz's `run_decoder.py`, which used `replay_trajectory_classification`; 
 that package is unmaintained and does not install here
 
+`decode_nrem=True` decodes NREM as well, judged against the same unit-permutation null as REM.
+`apply_decoder` and `reference_decode` carry it to other recordings, and `plot_transfer_summary`
+adds an NREM panel when there is one. NREM is long, so it costs the run's longest decode and
+shuffles to match, and the random walk was fitted to waking head movement while the internal
+heading moves faster in NREM: decode it again with `movement_var_deg2=np.inf` as the control.
+
+### Ring attractor from correlations
+
+`spikeshpc/ring.py` reads heading without tuning curves. It is a port of the lab's
+`HD_CCH_to_ring.m`, with ideas from SPUD (Chaudhuri et al. 2019):
+
+1. Pairs of units are scored by zero-lag correlation minus the mean correlation 5–10 s out.
+2. Units are placed on a ring by Isomap of those scores.
+3. Heading is decoded with a population vector around the ring.
+
+A unit's place on the ring belongs to the network rather than to its tuning, so it can check
+cross-day unit matching where tuning is disrupted: `compare_rings` asks whether matched units sit
+at the same places on two rings, and are correlated alike in both.
+
+```python
+# band_unit_ids: GOOD + MUA units in the depth band of the head-direction structure
+ring_run = run_ring(analyzer, band_unit_ids, heading_deg, shutter_close_times,
+                    scoring.intervals, interval_mask=hd.interval_mask)
+print(ring_run.summary())
+print(ring_vs_tuning(ring_run.ring, hd).summary())   # did it find the tuned units?
+```
+
+`run_ring` masks and splits wake exactly as `run_decoder` does, so with the same settings both
+hold out the same bins. Its decodes are `Decoded` objects, so `show_decoded`, `plot_error` and
+`metrics_by_group` work on them. Where it departs from the MATLAB, and why, is in the module
+docstring. The biggest change: units with no partner correlated beyond noise are screened off
+before the embedding, because left in they pull the ring apart. Units of other structures have
+partners of their own, though, so give the ring one structure's units by depth: on session7 the
+whole probe's 285 units decoded wake at 70°, the 51 in the head-direction band at 18°.
+
+A ring's decode is read as heading through its own alignment, or, with `RingAlignment.then`,
+through matched units onto another recording's ring and that ring's alignment. The second way
+needs none of the recording's own tuning. `plot_turn_summary` and `plot_turn_sweep` take a
+`"ring"` source beside the decoded one.
+
 ## Looking at raw traces
 
 `spikeshpc.plot_traces` and `spikeshpc.get_traces` take the same arguments as

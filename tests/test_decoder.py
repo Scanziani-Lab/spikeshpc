@@ -962,6 +962,69 @@ def test_a_session_with_no_rem_warns_rather_than_failing(session):
     assert run.rem is None
 
 
+@pytest.fixture(scope="module")
+def nrem_run(session):
+    """`full_run` with NREM decoded too."""
+    return run_decoder(
+        session["analyzer"],
+        session["unit_ids"],
+        session["heading_deg"],
+        session["frame_times"],
+        session["intervals"],
+        test_fraction=0.3,
+        block_s=30.0,
+        n_shuffles=10,
+        decode_nrem=True,
+        seed=1,
+        verbose=False,
+    )
+
+
+def test_nrem_is_decoded_only_when_asked(session, full_run, nrem_run):
+    assert full_run.nrem is None and full_run.nrem_mask is None
+    start, stop = session["intervals"]["NREM"][0]
+    assert nrem_run.nrem.duration_s.sum() == pytest.approx(stop - start, rel=0.02)
+    # no heading to score against, as in REM; confidence is still reported
+    assert "median_abs_error_deg" not in nrem_run.nrem.metrics
+    assert nrem_run.nrem.metrics["mean_posterior_max"] > 0
+    assert nrem_run.nrem_shuffle.kind == "units"
+    assert len(nrem_run.nrem_shuffle.null) == 10
+    # and the REM decode is the one it would have been without it
+    np.testing.assert_array_equal(nrem_run.rem.decoded_deg, full_run.rem.decoded_deg)
+
+
+def test_unstructured_nrem_is_less_confident_than_rem(nrem_run):
+    """The synthetic NREM fires flat and slow: there is no heading in it to be sure of."""
+    nrem = nrem_run.nrem.metrics["mean_posterior_max"]
+    assert nrem < nrem_run.rem.metrics["mean_posterior_max"]
+    assert nrem < nrem_run.test.metrics["mean_posterior_max"]
+    # scrambling which curve is whose costs the REM population its coherence,
+    # and the unstructured NREM nothing like as much
+    assert nrem_run.rem_shuffle.z_score > nrem_run.nrem_shuffle.z_score
+
+
+def test_a_session_with_no_nrem_warns_rather_than_failing(session):
+    no_nrem = {k: v for k, v in session["intervals"].items() if k != "NREM"}
+    with pytest.warns(UserWarning, match="no decoder bin falls inside a NREM"):
+        run = run_decoder(
+            session["sorting"],
+            session["unit_ids"],
+            session["heading_deg"],
+            session["frame_times"],
+            no_nrem,
+            n_shuffles=0,
+            decode_rem=False,
+            decode_nrem=True,
+            verbose=False,
+        )
+    assert run.nrem is None and run.nrem_mask is None
+
+
+def test_the_summary_reports_nrem_when_it_was_decoded(full_run, nrem_run):
+    assert "NREM" in nrem_run.summary()
+    assert "NREM" not in full_run.summary()
+
+
 def test_a_session_with_no_wake_is_refused(session):
     with pytest.raises(ValueError, match="no decoder bin falls inside a WAKE"):
         run_decoder(
@@ -1170,6 +1233,52 @@ def test_a_reference_decodes_the_baseline_s_own_held_out_bins(full_run):
     assert set(reference.wake.bin_index) <= set(np.flatnonzero(full_run.test_mask))
     np.testing.assert_array_equal(reference.wake.decoded_deg, expected.decoded_deg)
     assert reference.rem.n_decoded == full_run.rem.n_decoded
+
+
+def test_a_transfer_decodes_nrem_when_asked(session, data, model, turned):
+    transfer = transfer_to(session, turned, model, data, decode_rem=False, decode_nrem=True)
+    start, stop = session["intervals"]["NREM"][0]
+    assert transfer.rem is None
+    assert transfer.nrem.duration_s.sum() == pytest.approx(stop - start, rel=0.02)
+    assert transfer.nrem.label == "transfer NREM"
+    row = transfer.as_row()
+    assert row["nrem_s"] == pytest.approx(transfer.nrem.duration_s.sum())
+    assert row["rem_s"] == 0.0
+    assert "NREM" in transfer.summary()
+    assert transfer_to(session, turned, model, data, decode_rem=False).nrem is None
+
+
+def test_a_reference_decodes_nrem_if_the_run_did(full_run, nrem_run):
+    units = list(nrem_run.model.unit_ids[:10])
+    reference = reference_decode(nrem_run, units, n_shuffles=0, verbose=False)
+    assert reference.nrem.n_decoded == nrem_run.nrem.n_decoded
+    assert reference_decode(full_run, units, n_shuffles=0, verbose=False).nrem is None
+
+
+def test_the_transfer_summary_gets_an_nrem_panel_when_needed(full_run, nrem_run):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from spikeshpc.decoder import plot_transfer_summary
+
+    units = list(nrem_run.model.unit_ids)
+    with_nrem = reference_decode(nrem_run, units, n_shuffles=3, verbose=False)
+    without = reference_decode(full_run, units, n_shuffles=0, verbose=False)
+
+    axes = plot_transfer_summary({"a": with_nrem, "b": without}, references={"b": with_nrem})
+    assert len(axes) == 4
+    assert axes[3].get_ylabel() == "NREM posterior max"
+    plt.close(axes[0].figure)
+
+    axes = plot_transfer_summary({"b": without})
+    assert len(axes) == 3
+    plt.close(axes[0].figure)
+
+    _, three = plt.subplots(1, 3)
+    with pytest.raises(ValueError, match="4 panels"):
+        plot_transfer_summary({"a": with_nrem}, axes=three)
+    plt.close("all")
 
 
 def test_a_transfer_summarises_tabulates_and_draws(session, data, model, turned, full_run):

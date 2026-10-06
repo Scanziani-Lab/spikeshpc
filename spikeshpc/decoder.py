@@ -1953,6 +1953,12 @@ class DecoderRun:
         Unit-permutation null for `rem`.
     rem_mask : numpy.ndarray of bool or None
         REM bins decoded.
+    nrem : Decoded or None
+        Decode of NREM, if asked for.
+    nrem_shuffle : ShuffleTest or None
+        Unit-permutation null for `nrem`.
+    nrem_mask : numpy.ndarray of bool or None
+        NREM bins decoded.
     movement_var_deg2 : float
         Random-walk variance used, in deg^2 per bin.
     """
@@ -1966,6 +1972,9 @@ class DecoderRun:
     rem: Decoded | None = None
     rem_shuffle: ShuffleTest | None = None
     rem_mask: np.ndarray | None = None
+    nrem: Decoded | None = None
+    nrem_shuffle: ShuffleTest | None = None
+    nrem_mask: np.ndarray | None = None
     movement_var_deg2: float = float("nan")
 
     def summary(self) -> str:
@@ -1987,19 +1996,186 @@ class DecoderRun:
                 lines.append(f"    {key} = {self.test.metrics[key]:.3f}")
         if self.test_shuffle is not None:
             lines.append(f"    vs shuffle: {self.test_shuffle}")
-        if self.rem is not None:
-            lines.append(f"  REM: {self.rem}")
+        for state, decoded, shuffle in (
+            ("REM", self.rem, self.rem_shuffle),
+            ("NREM", self.nrem, self.nrem_shuffle),
+        ):
+            if decoded is None:
+                continue
+            lines.append(f"  {state}: {decoded}")
             lines.append(
                 f"    mean posterior max = "
-                f"{self.rem.metrics['mean_posterior_max']:.3f} "
+                f"{decoded.metrics['mean_posterior_max']:.3f} "
                 f"(wake test {self.test.metrics['mean_posterior_max']:.3f})"
             )
-            if self.rem_shuffle is not None:
-                lines.append(f"    vs shuffle: {self.rem_shuffle}")
+            if shuffle is not None:
+                lines.append(f"    vs shuffle: {shuffle}")
         return "\n".join(lines)
 
     def __repr__(self) -> str:
         return self.summary()
+
+
+def _wake_mask(
+    data, intervals, frame_times, within=None, interval_mask=None, verbose=True
+):
+    """Find the WAKE bins to train and test on, inside `within` and `interval_mask`.
+
+    Shared by :func:`run_decoder` and :func:`spikeshpc.ring.run_ring`, so that
+    with the same settings both split exactly the same bins.
+
+    Parameters
+    ----------
+    data : DecoderData
+        Binned data.
+    intervals : dict
+        ``{state: [[start, stop], ...]}``.
+    frame_times : array-like
+        The shutter-aligned frame times `data` was prepared from.
+    within : list of list of float, optional
+        ``[start, stop]`` spans; only WAKE bins lying wholly inside one are kept.
+    interval_mask : array-like of bool, optional
+        Mask over the inter-frame intervals of `frame_times`; only WAKE bins
+        whose every frame interval it keeps are kept.
+    verbose : bool, default True
+        Print how much wake each restriction keeps.
+
+    Returns
+    -------
+    numpy.ndarray of bool
+        One value per bin.
+
+    Raises
+    ------
+    ValueError
+        If no WAKE bin remains, or `interval_mask` is not over the intervals.
+    """
+    wake_mask = state_interval_mask(data, intervals, "WAKE")
+    if not wake_mask.any():
+        raise ValueError("no decoder bin falls inside a WAKE interval")
+    if within is not None:
+        wake_s = data.duration_s[wake_mask].sum()
+        spans = np.asarray(within, dtype=float).reshape(-1, 2).tolist()
+        wake_mask &= state_interval_mask(data, {"WITHIN": spans}, "WITHIN")
+        if not wake_mask.any():
+            raise ValueError("no WAKE decoder bin lies inside the `within` spans")
+        if verbose:
+            print(
+                f"  within the given spans: {data.duration_s[wake_mask].sum():.0f}s "
+                f"of {wake_s:.0f}s wake"
+            )
+    if interval_mask is not None:
+        interval_mask = np.asarray(interval_mask, dtype=bool)
+        n_intervals = len(frame_times) - 1
+        if interval_mask.shape != (n_intervals,):
+            raise ValueError(
+                f"interval_mask has {interval_mask.shape} entries but there are "
+                f"{n_intervals} inter-frame intervals. It masks intervals, not "
+                "frames -- see spikeshpc.states.frames_in_states."
+            )
+        wake_s = data.duration_s[wake_mask].sum()
+        wake_mask &= bins_in_interval_mask(data, interval_mask)
+        if not wake_mask.any():
+            raise ValueError("no WAKE decoder bin lies wholly inside `interval_mask`")
+        if verbose:
+            print(
+                f"  within interval_mask: {data.duration_s[wake_mask].sum():.0f}s "
+                f"of {wake_s:.0f}s wake"
+            )
+    return wake_mask
+
+
+def _decode_state(
+    data,
+    model,
+    mask,
+    state,
+    label,
+    shared,
+    n_shuffles,
+    seed,
+    n_jobs,
+    keep_posterior,
+    verbose,
+    warn_prefix="",
+    stacklevel=3,
+):
+    """Decode one sleep state and judge it against the unit-permutation null.
+
+    There is no heading to be wrong about in sleep, so the null has to break
+    the population code rather than its alignment in time; the statistic is
+    how concentrated the posterior is.
+
+    Parameters
+    ----------
+    data : DecoderData
+        Binned data.
+    model : EncodingModel
+        Fitted model.
+    mask : numpy.ndarray of bool or None
+        The state's bins; None if it was not asked for.
+    state : str
+        State name, for the warning.
+    label : str
+        Name of the decode.
+    shared : dict
+        ``movement_var_deg2``, ``acausal`` and ``tolerance_deg``.
+    n_shuffles, seed, n_jobs
+        As for :func:`shuffle_test`; no shuffles if `n_shuffles` is 0.
+    keep_posterior : bool
+        Keep the full posterior.
+    verbose : bool
+        Print progress.
+    warn_prefix : str, default ""
+        Put before the warning.
+    stacklevel : int, default 3
+        Of the warning.
+
+    Returns
+    -------
+    decoded : Decoded or None
+        The decode; None if `mask` is None or keeps no bin (a warning says so).
+    shuffle : ShuffleTest or None
+        The null of ``mean_posterior_max``.
+    mask : numpy.ndarray of bool or None
+        `mask`, or None where there was nothing to decode.
+    """
+    if mask is None:
+        return None, None, None
+    if not mask.any():
+        warnings.warn(
+            f"{warn_prefix}no decoder bin falls inside a {state} interval",
+            stacklevel=stacklevel,
+        )
+        return None, None, None
+    decoded = decode(
+        data,
+        model,
+        mask,
+        keep_posterior=keep_posterior,
+        with_metrics=False,
+        label=label,
+        **shared,
+    )
+    if verbose:
+        print(f"  {decoded}")
+    shuffle = None
+    if n_shuffles:
+        shuffle = shuffle_test(
+            data,
+            model,
+            mask,
+            kind="units",
+            metric="mean_posterior_max",
+            n_shuffles=n_shuffles,
+            seed=seed,
+            with_metrics=False,
+            n_jobs=n_jobs,
+            **shared,
+        )
+        if verbose:
+            print(f"    {shuffle}")
+    return decoded, shuffle, mask
 
 
 def run_decoder(
@@ -2021,6 +2197,7 @@ def run_decoder(
     n_shuffles: int = 100,
     min_shift_s: float = 30.0,
     decode_rem: bool = True,
+    decode_nrem: bool = False,
     keep_posterior: bool = True,
     seed: int = 0,
     verbose: bool = True,
@@ -2029,7 +2206,7 @@ def run_decoder(
     n_jobs: int | None = None,
 ) -> DecoderRun:
     """
-    Train on wake, test on held-out wake against a shuffle, then decode REM.
+    Train on wake, test on held-out wake against a shuffle, then decode REM (and NREM).
 
     Parameters
     ----------
@@ -2072,8 +2249,11 @@ def run_decoder(
     decode_rem : bool, default True
         Whether to run the decoder on REM data. Set False for fine-tuning the
         model.
+    decode_nrem : bool, default False
+        Whether to run the decoder on NREM data too, judged against the same
+        unit-permutation null as REM.
     keep_posterior : bool, default True
-        Whether to save posteriors for REM analysis.
+        Whether to save posteriors for REM and NREM analysis.
     seed : int, default 0
         Seed for generating the random train/test split.
     verbose : bool, default True
@@ -2082,14 +2262,14 @@ def run_decoder(
         ``[start, stop]`` spans on the recording clock, e.g. ``[[0, 7200]]``
         for the first two hours. Only WAKE bins lying wholly inside one are
         trained and tested on, so both sides of the split come from those
-        periods. REM is decoded as before. Default is all of wake.
+        periods. REM and NREM are decoded as before. Default is all of wake.
     interval_mask : array-like of bool, optional
         Mask over the inter-frame intervals of `frame_times` (length
         ``len(frame_times) - 1``) -- the one the tuning functions take, e.g.
         from :func:`spikeshpc.behavior_interval_mask`. Only WAKE bins whose
         every frame interval it keeps are trained and tested on, and it is
         applied before the train/test split, so both sides come from the kept
-        time. REM is decoded as before. Default is all of wake.
+        time. REM and NREM are decoded as before. Default is all of wake.
     n_jobs : int, optional
         Worker processes for the shuffles. Default is one per CPU core; 1 runs
         them in this process.
@@ -2097,7 +2277,7 @@ def run_decoder(
     Returns
     -------
     DecoderRun
-        The model, the train/test masks, and the decoded test and REM
+        The model, the train/test masks, and the decoded test, REM and NREM
         stretches with their shuffle tests.
 
     Raises
@@ -2185,6 +2365,15 @@ def run_decoder(
       result, which is what :func:`plot_decoded` shades; it is the memory the
       run holds, roughly ``n_bins x n_angle_bins x 4`` bytes.
 
+    **decode_nrem** (False) -- NREM is usually hours long, so it costs the
+      longest decode of the run and shuffles to match, and its posterior is
+      the largest thing ``keep_posterior`` keeps. Read it knowing that the
+      random walk was fitted to waking head movement, while the internal
+      heading moves several times faster in NREM than in wake (Peyrache et al.
+      2015): the prior can smooth over real jumps. Decode it once more with
+      ``decode(run.data, run.model, run.nrem_mask, movement_var_deg2=np.inf)``
+      as the control.
+
     **seed** (0) -- fixes both the train/test split and the shuffles. Vary it
       to check a result is not an artefact of one particular split; if the
       metrics move a lot across seeds, the test set is too small.
@@ -2193,38 +2382,7 @@ def run_decoder(
     if verbose:
         print(f"  {data}")
 
-    wake_mask = state_interval_mask(data, intervals, "WAKE")
-    if not wake_mask.any():
-        raise ValueError("no decoder bin falls inside a WAKE interval")
-    if within is not None:
-        wake_s = data.duration_s[wake_mask].sum()
-        spans = np.asarray(within, dtype=float).reshape(-1, 2).tolist()
-        wake_mask &= state_interval_mask(data, {"WITHIN": spans}, "WITHIN")
-        if not wake_mask.any():
-            raise ValueError("no WAKE decoder bin lies inside the `within` spans")
-        if verbose:
-            print(
-                f"  within the given spans: {data.duration_s[wake_mask].sum():.0f}s "
-                f"of {wake_s:.0f}s wake"
-            )
-    if interval_mask is not None:
-        interval_mask = np.asarray(interval_mask, dtype=bool)
-        n_intervals = len(frame_times) - 1
-        if interval_mask.shape != (n_intervals,):
-            raise ValueError(
-                f"interval_mask has {interval_mask.shape} entries but there are "
-                f"{n_intervals} inter-frame intervals. It masks intervals, not "
-                "frames -- see spikeshpc.states.frames_in_states."
-            )
-        wake_s = data.duration_s[wake_mask].sum()
-        wake_mask &= bins_in_interval_mask(data, interval_mask)
-        if not wake_mask.any():
-            raise ValueError("no WAKE decoder bin lies wholly inside `interval_mask`")
-        if verbose:
-            print(
-                f"  within interval_mask: {data.duration_s[wake_mask].sum():.0f}s "
-                f"of {wake_s:.0f}s wake"
-            )
+    wake_mask = _wake_mask(data, intervals, frame_times, within, interval_mask, verbose)
 
     train_mask, test_mask = split_train_test(
         data, wake_mask, test_fraction, split_mode, block_s, seed
@@ -2295,41 +2453,25 @@ def run_decoder(
         if verbose:
             print(f"    {test_shuffle}")
 
-    rem = rem_shuffle = rem_mask = None
-    if decode_rem:
-        rem_mask = state_interval_mask(data, intervals, "REM")
-        if not rem_mask.any():
-            warnings.warn("no decoder bin falls inside a REM interval", stacklevel=2)
-            rem_mask = None
-        else:
-            rem = decode(
-                data,
-                model,
-                rem_mask,
-                keep_posterior=keep_posterior,
-                with_metrics=False,
-                label="REM",
-                **shared,
-            )
-            if verbose:
-                print(f"  {rem}")
-            if n_shuffles:
-                # no heading to be wrong about in REM, so the null has to break
-                # the population code rather than its alignment in time
-                rem_shuffle = shuffle_test(
-                    data,
-                    model,
-                    rem_mask,
-                    kind="units",
-                    metric="mean_posterior_max",
-                    n_shuffles=n_shuffles,
-                    seed=seed,
-                    with_metrics=False,
-                    n_jobs=n_jobs,
-                    **shared,
-                )
-                if verbose:
-                    print(f"    {rem_shuffle}")
+    # no heading to be wrong about in sleep, so each state's null breaks the
+    # population code rather than its alignment in time
+    sleep = {}
+    for state, wanted in (("REM", decode_rem), ("NREM", decode_nrem)):
+        sleep[state] = _decode_state(
+            data,
+            model,
+            state_interval_mask(data, intervals, state) if wanted else None,
+            state,
+            label=state,
+            shared=shared,
+            n_shuffles=n_shuffles,
+            seed=seed,
+            n_jobs=n_jobs,
+            keep_posterior=keep_posterior,
+            verbose=verbose,
+        )
+    rem, rem_shuffle, rem_mask = sleep["REM"]
+    nrem, nrem_shuffle, nrem_mask = sleep["NREM"]
 
     return DecoderRun(
         data=data,
@@ -2341,6 +2483,9 @@ def run_decoder(
         rem=rem,
         rem_shuffle=rem_shuffle,
         rem_mask=rem_mask,
+        nrem=nrem,
+        nrem_shuffle=nrem_shuffle,
+        nrem_mask=nrem_mask,
         movement_var_deg2=movement_var_deg2,
     )
 
@@ -2355,12 +2500,13 @@ class TransferRun:
     """An encoding model read out on spikes it was not fitted on.
 
     Either another recording's, through :func:`apply_decoder`, or the fitting
-    recording's own held-out wake and REM through :func:`reference_decode`.
-    ``unit_ids`` are the model's units and ``partner_ids`` the units whose
-    spikes stood in for them, in the same order -- the same ids, for a
-    reference. ``wake_shuffles`` maps each of :data:`WAKE_SHUFFLE_METRICS` to
-    its :class:`ShuffleTest` against the time-shift null; ``rem_shuffle`` is the
-    unit-permutation null of the REM posterior's confidence.
+    recording's own held-out wake, REM and NREM through
+    :func:`reference_decode`. ``unit_ids`` are the model's units and
+    ``partner_ids`` the units whose spikes stood in for them, in the same order
+    -- the same ids, for a reference. ``wake_shuffles`` maps each of
+    :data:`WAKE_SHUFFLE_METRICS` to its :class:`ShuffleTest` against the
+    time-shift null; ``rem_shuffle`` and ``nrem_shuffle`` are the
+    unit-permutation nulls of the sleep posteriors' confidence.
 
     Attributes
     ----------
@@ -2370,15 +2516,15 @@ class TransferRun:
         The model's units, and the units whose spikes stood in for them.
     data : DecoderData
         Binned data.
-    wake, rem : Decoded
-        Decodes of wake and REM (`rem` may be None).
-    wake_mask, rem_mask : numpy.ndarray of bool
+    wake, rem, nrem : Decoded
+        Decodes of wake, REM and NREM (`rem` and `nrem` may be None).
+    wake_mask, rem_mask, nrem_mask : numpy.ndarray of bool
         Bins decoded.
     wake_shuffles : dict
         Each of :data:`WAKE_SHUFFLE_METRICS` mapped to its
         :class:`ShuffleTest`.
-    rem_shuffle : ShuffleTest or None
-        Unit-permutation null of the REM posterior's confidence.
+    rem_shuffle, nrem_shuffle : ShuffleTest or None
+        Unit-permutation nulls of the REM and NREM posteriors' confidence.
     """
 
     label: str
@@ -2391,6 +2537,9 @@ class TransferRun:
     rem: Decoded | None = None
     rem_mask: np.ndarray | None = None
     rem_shuffle: ShuffleTest | None = None
+    nrem: Decoded | None = None
+    nrem_mask: np.ndarray | None = None
+    nrem_shuffle: ShuffleTest | None = None
 
     @property
     def offset_deg(self) -> float:
@@ -2433,14 +2582,20 @@ class TransferRun:
             row[f"wake_{short}_null_mean"] = float(test.null.mean())
             row[f"wake_{short}_p"] = test.p_value
             row[f"wake_{short}_z"] = test.z_score
-        row["rem_s"] = float(self.rem.duration_s.sum()) if self.rem is not None else 0.0
-        row["rem_mean_posterior_max"] = (
-            self.rem.metrics["mean_posterior_max"] if self.rem is not None else np.nan
-        )
-        if self.rem_shuffle is not None:
-            row["rem_null_mean"] = float(self.rem_shuffle.null.mean())
-            row["rem_p"] = self.rem_shuffle.p_value
-            row["rem_z"] = self.rem_shuffle.z_score
+        for key, decoded, shuffle in (
+            ("rem", self.rem, self.rem_shuffle),
+            ("nrem", self.nrem, self.nrem_shuffle),
+        ):
+            row[f"{key}_s"] = (
+                float(decoded.duration_s.sum()) if decoded is not None else 0.0
+            )
+            row[f"{key}_mean_posterior_max"] = (
+                decoded.metrics["mean_posterior_max"] if decoded is not None else np.nan
+            )
+            if shuffle is not None:
+                row[f"{key}_null_mean"] = float(shuffle.null.mean())
+                row[f"{key}_p"] = shuffle.p_value
+                row[f"{key}_z"] = shuffle.z_score
         return row
 
     def summary(self) -> str:
@@ -2457,14 +2612,19 @@ class TransferRun:
         ]
         for test in self.wake_shuffles.values():
             lines.append(f"    vs shuffle: {test}")
-        if self.rem is not None:
-            lines.append(f"  REM: {self.rem}")
+        for state, decoded, shuffle in (
+            ("REM", self.rem, self.rem_shuffle),
+            ("NREM", self.nrem, self.nrem_shuffle),
+        ):
+            if decoded is None:
+                continue
+            lines.append(f"  {state}: {decoded}")
             lines.append(
-                f"    mean posterior max = {self.rem.metrics['mean_posterior_max']:.3f} "
+                f"    mean posterior max = {decoded.metrics['mean_posterior_max']:.3f} "
                 f"(wake {wake['mean_posterior_max']:.3f})"
             )
-            if self.rem_shuffle is not None:
-                lines.append(f"    vs shuffle: {self.rem_shuffle}")
+            if shuffle is not None:
+                lines.append(f"    vs shuffle: {shuffle}")
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -2487,6 +2647,7 @@ def apply_decoder(
     min_shift_s: float = 30.0,
     seed: int = 0,
     decode_rem: bool = True,
+    decode_nrem: bool = False,
     keep_posterior: bool = False,
     label: str = "transfer",
     verbose: bool = True,
@@ -2504,10 +2665,11 @@ def apply_decoder(
     ``interval_mask``, the mask this recording's own tuning was computed on,
     as the baseline's split is inside its own -- scored raw and with its
     constant offset removed (see :func:`decoding_metrics`), each against the
-    time-shift null. REM is decoded and judged against the unit-permutation
-    null exactly as :func:`run_decoder` does. ``movement_var_deg2`` should be
-    the baseline run's, so the prior is the one the model was scored with, and
-    the remaining settings should match that run's too.
+    time-shift null. REM, and NREM if asked for, are decoded and judged
+    against the unit-permutation null exactly as :func:`run_decoder` does.
+    ``movement_var_deg2`` should be the baseline run's, so the prior is the
+    one the model was scored with, and the remaining settings should match
+    that run's too.
 
     Parameters
     ----------
@@ -2542,6 +2704,8 @@ def apply_decoder(
         Random seed.
     decode_rem : bool, default True
         Also decode REM.
+    decode_nrem : bool, default False
+        Also decode NREM.
     keep_posterior : bool, default False
         Keep the full posterior.
     label : str, default "transfer"
@@ -2593,6 +2757,7 @@ def apply_decoder(
                 f"{label}: no WAKE decoder bin lies wholly inside `interval_mask`"
             )
     rem_mask = state_interval_mask(data, intervals, "REM") if decode_rem else None
+    nrem_mask = state_interval_mask(data, intervals, "NREM") if decode_nrem else None
 
     return _read_out(
         data,
@@ -2600,6 +2765,7 @@ def apply_decoder(
         np.asarray(partners),
         wake_mask,
         rem_mask,
+        nrem_mask=nrem_mask,
         movement_var_deg2=movement_var_deg2,
         acausal=acausal,
         tolerance_deg=tolerance_deg,
@@ -2631,7 +2797,8 @@ def reference_decode(
     What :func:`apply_decoder` on another recording should be compared with:
     the same units and the same curves, on data the model never saw. Without
     it, a recording where fewer units were found looks worse for having fewer
-    units rather than for coding worse.
+    units rather than for coding worse. NREM is decoded too if the run decoded
+    it.
 
     Parameters
     ----------
@@ -2672,6 +2839,7 @@ def reference_decode(
         np.asarray(unit_ids),
         run.test_mask,
         run.rem_mask,
+        nrem_mask=run.nrem_mask,
         movement_var_deg2=run.movement_var_deg2,
         acausal=acausal,
         tolerance_deg=tolerance_deg,
@@ -2701,8 +2869,9 @@ def _read_out(
     label,
     verbose,
     n_jobs=None,
+    nrem_mask=None,
 ) -> TransferRun:
-    """Decode wake and REM with a model and judge both against their nulls.
+    """Decode wake and sleep with a model and judge each against its null.
 
     Parameters
     ----------
@@ -2713,7 +2882,7 @@ def _read_out(
     partner_ids : sequence
         Units whose spikes stand in for the model's.
     wake_mask, rem_mask : numpy.ndarray of bool
-        Bins to decode.
+        Bins to decode; `rem_mask` None skips REM.
     movement_var_deg2, acausal, tolerance_deg, n_shuffles, min_shift_s, seed
         As for :func:`apply_decoder`.
     keep_posterior : bool
@@ -2724,6 +2893,8 @@ def _read_out(
         Print progress.
     n_jobs : int, optional
         As for :func:`shuffle_test`.
+    nrem_mask : numpy.ndarray of bool, optional
+        NREM bins to decode; None skips NREM.
 
     Returns
     -------
@@ -2763,39 +2934,26 @@ def _read_out(
             for test in wake_shuffles.values():
                 print(f"    {test}")
 
-    rem = rem_shuffle = None
-    if rem_mask is not None and not rem_mask.any():
-        warnings.warn(
-            f"{label}: no decoder bin falls inside a REM interval", stacklevel=3
-        )
-        rem_mask = None
-    if rem_mask is not None:
-        rem = decode(
+    sleep = {
+        state: _decode_state(
             data,
             model,
-            rem_mask,
+            mask,
+            state,
+            label=f"{label} {state}",
+            shared=shared,
+            n_shuffles=n_shuffles,
+            seed=seed,
+            n_jobs=n_jobs,
             keep_posterior=keep_posterior,
-            with_metrics=False,
-            label=f"{label} REM",
-            **shared,
+            verbose=verbose,
+            warn_prefix=f"{label}: ",
+            stacklevel=4,
         )
-        if verbose:
-            print(f"  {rem}")
-        if n_shuffles:
-            rem_shuffle = shuffle_test(
-                data,
-                model,
-                rem_mask,
-                kind="units",
-                metric="mean_posterior_max",
-                n_shuffles=n_shuffles,
-                seed=seed,
-                with_metrics=False,
-                n_jobs=n_jobs,
-                **shared,
-            )
-            if verbose:
-                print(f"    {rem_shuffle}")
+        for state, mask in (("REM", rem_mask), ("NREM", nrem_mask))
+    }
+    rem, rem_shuffle, rem_mask = sleep["REM"]
+    nrem, nrem_shuffle, nrem_mask = sleep["NREM"]
 
     return TransferRun(
         label=label,
@@ -2808,6 +2966,9 @@ def _read_out(
         rem=rem,
         rem_mask=rem_mask,
         rem_shuffle=rem_shuffle,
+        nrem=nrem,
+        nrem_mask=nrem_mask,
+        nrem_shuffle=nrem_shuffle,
     )
 
 
@@ -3210,6 +3371,9 @@ def plot_transfer_summary(
     - wake offset: how far the population reads turned
     - REM posterior max: against 5-95% of its unit-permutation null
 
+    and a fourth, NREM posterior max drawn the same way, when any run decoded
+    NREM.
+
     Parameters
     ----------
     runs : dict
@@ -3222,17 +3386,17 @@ def plot_transfer_summary(
         recording's units, drawn as an open black diamond in its column -- the
         number that recording has to be compared with.
     axes : sequence of matplotlib.axes.Axes, optional
-        The three axes to draw on.
+        The axes to draw on: three, or four when any run decoded NREM.
 
     Returns
     -------
     sequence of matplotlib.axes.Axes
-        The three axes.
+        The three (or four) axes.
 
     Raises
     ------
     ValueError
-        If there are no runs to plot.
+        If there are no runs to plot, or `axes` is the wrong length.
     """
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
@@ -3244,9 +3408,18 @@ def plot_transfer_summary(
         cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
         colors = {name: cycle[i % len(cycle)] for i, name in enumerate(names)}
     references = references or {}
+    # the sleep states some run decoded, each a panel of its own
+    states = ["rem"]
+    if any(run.nrem is not None for run in runs.values()):
+        states.append("nrem")
+    n_panels = 2 + len(states)
     if axes is None:
-        _, axes = plt.subplots(1, 3, figsize=(max(9.0, 6.0 + 1.3 * len(names)), 3.8))
-    error_ax, offset_ax, rem_ax = axes
+        width = max(3.0 * n_panels, 2.0 * n_panels + 1.3 * len(names))
+        _, axes = plt.subplots(1, n_panels, figsize=(width, 3.8))
+    if len(axes) != n_panels:
+        raise ValueError(f"{n_panels} panels to draw but {len(axes)} axes")
+    error_ax, offset_ax = axes[:2]
+    sleep_axes = dict(zip(states, axes[2:]))
     null_style = dict(color="0.8", lw=7, zorder=1)
     reference_style = dict(
         marker="D", ls="none", mfc="none", mec="k", mew=1.2, ms=7, zorder=4
@@ -3272,14 +3445,16 @@ def plot_transfer_summary(
             zorder=3,
         )
         offset_ax.plot(i, run.offset_deg, "o", color=color, ms=7, zorder=3)
-        if run.rem is not None:
-            if run.rem_shuffle is not None:
-                rem_ax.vlines(
-                    i, *np.percentile(run.rem_shuffle.null, [5, 95]), **null_style
-                )
-            rem_ax.plot(
+        for state, ax in sleep_axes.items():
+            decoded = getattr(run, state)
+            if decoded is None:
+                continue
+            shuffle = getattr(run, f"{state}_shuffle")
+            if shuffle is not None:
+                ax.vlines(i, *np.percentile(shuffle.null, [5, 95]), **null_style)
+            ax.plot(
                 i,
-                run.rem.metrics["mean_posterior_max"],
+                decoded.metrics["mean_posterior_max"],
                 "o",
                 color=color,
                 ms=7,
@@ -3292,10 +3467,10 @@ def plot_transfer_summary(
                 i, reference.wake.metrics["median_abs_error_deg"], **reference_style
             )
             offset_ax.plot(i, reference.offset_deg, **reference_style)
-            if reference.rem is not None:
-                rem_ax.plot(
-                    i, reference.rem.metrics["mean_posterior_max"], **reference_style
-                )
+            for state, ax in sleep_axes.items():
+                decoded = getattr(reference, state)
+                if decoded is not None:
+                    ax.plot(i, decoded.metrics["mean_posterior_max"], **reference_style)
 
     # the legend in black, whatever color each recording's markers are
     handles = [
@@ -3324,7 +3499,8 @@ def plot_transfer_summary(
     offset_ax.set_ylim(-180, 180)
     offset_ax.set_yticks(np.arange(-180, 181, 90))
     offset_ax.set_ylabel("wake offset (deg)")
-    rem_ax.set_ylabel("REM posterior max")
+    for state, ax in sleep_axes.items():
+        ax.set_ylabel(f"{state.upper()} posterior max")
 
     ticks = [f"{name}\n{len(runs[name].unit_ids)} units" for name in names]
     for ax in axes:

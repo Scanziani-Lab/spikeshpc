@@ -288,6 +288,51 @@ def test_a_pairs_counts_point_away_from_each_other(measured_rate, decoded_label,
         plt.close(axes[0].figure)
 
 
+def with_rings(table):
+    """Add a "ring" row beside every decoded one."""
+    rings = table[table["source"] == "decoded"].assign(source="ring")
+    return pd.concat([table, rings], ignore_index=True)
+
+
+def test_a_ring_is_drawn_to_the_right_of_each_column_without_counts():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    axes = plot_turn_summary(with_rings(summary_table()), ["s1", "s2"], {"s1": "k", "s2": "r"})
+    try:
+        rate_ax = axes[1]
+        triangles = sorted(
+            line.get_xdata()[0] for line in rate_ax.get_lines() if line.get_marker() == "^"
+        )
+        assert triangles == pytest.approx([0.3, 1.14, 2.3, 3.14])  # wake, REM of s1 and s2
+        # the counts still belong to the wake pair alone
+        offsets = sorted(t.xyann[1] for t in rate_ax.texts if 1.5 < t.xy[0] < 2.5)
+        assert offsets == [-7, 7]
+        labels = [t.get_text() for t in axes[0].get_legend().get_texts()]
+        assert "own ring (correlations)" in labels
+    finally:
+        plt.close(axes[0].figure)
+
+
+def test_a_ring_gets_its_own_line_in_the_sweep():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    table = with_rings(summary_table(thresholds=(20.0, 40.0, 80.0)))
+    axes = plot_turn_sweep(table, ["s1", "s2"], {"s1": "k", "s2": "r"}, min_turns=3)
+    try:
+        for column in (0, 1):  # wake and REM alike
+            ring_lines = [line for line in axes[1, column].get_lines()
+                          if line.get_marker() == "^"]
+            assert len(ring_lines) == 2 and all(line.get_linestyle() == "-." for line in ring_lines)
+        labels = [t.get_text() for t in axes[0, 1].get_legend().get_texts()]
+        assert "own ring (correlations)" in labels
+    finally:
+        plt.close(axes[0, 0].figure)
+
+
 def test_plot_turn_sweep_draws_each_measure_against_the_threshold():
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
