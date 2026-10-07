@@ -231,8 +231,7 @@ whose hippocampal theta is otherwise indistinguishable from REM.
 The immobility threshold is a bimodal split on log10 speed, so breathing and postural
 sway (which keep movement non-zero) are handled without a hand-tuned floor.
 
-`spikeshpc/tracking.py` reads the Motive CSV directly; the `optitrack` package is not
-a dependency.
+`spikeshpc/optitrack/io.py` reads the Motive CSV directly.
 
 ## Curating results
 

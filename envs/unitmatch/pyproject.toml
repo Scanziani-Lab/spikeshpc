@@ -1,7 +1,7 @@
 # UnitMatch's environment, kept apart from the main one: UnitMatchPy pins
 # numpy<2, and spikeinterface>=0.105 needs numpy>=2. Python 3.12 is the newest
 # numpy 1.x has wheels for. Runs spikeshpc.tracking.run_unitmatch and
-# 3_run_unitmatch.ipynb; spikeshpc.matching takes UnitMatch's arrays, so what
+# 3_tracking.ipynb; spikeshpc.matching takes UnitMatch's arrays, so what
 # comes after the match probabilities also runs in the main environment.
 [project]
 name = "unitmatch-env"
