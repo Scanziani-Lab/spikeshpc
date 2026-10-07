@@ -717,7 +717,11 @@ def return_matches(
     baseline, others = _split(rec_type)
     tuning_ids = {r: set(tuning[r].unit_ids.tolist()) for r in rec_type}
     tuned_set = set(tuned_base)
-    tables, rotations = [], {}
+    # Typed so that pd.concat below picks its DataFrame overload: pandas' stubs
+    # say concatenating an iterable of None never returns, and an untyped []
+    # matches that, so Pylance would read the rest of this function as dead.
+    tables: list[pd.DataFrame] = []
+    rotations = {}
     for r in others:
         run = um_runs[f"{baseline}_vs_{r}" if unitmatch_mode == "pairwise" else "joint"]
         session = {name: i for i, name in enumerate(run["names"])}
