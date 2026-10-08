@@ -1269,7 +1269,9 @@ class RingAlignment:
         )
 
     def __str__(self) -> str:
-        turn = f"{'mirrored, then ' if self.flip else ''}turned {self.offset_deg:+.1f} deg"
+        turn = (
+            f"{'mirrored, then ' if self.flip else ''}turned {self.offset_deg:+.1f} deg"
+        )
         if not np.isfinite(self.resultant):
             return f"{turn} (composed, not fitted)"
         return (
@@ -2471,12 +2473,16 @@ def ring_vs_tuning(
     structure_r, structure = float("nan"), None
     curve = pd.DataFrame(columns=["difference_deg", "mean_z", "sem_z", "n_pairs"])
     if tuned.sum() >= 3:
-        angles = compare_angles(ring.angle_deg[tuned], preferred[tuned], n_shuffles, seed)
+        angles = compare_angles(
+            ring.angle_deg[tuned], preferred[tuned], n_shuffles, seed
+        )
         aligned = angles.alignment.apply(ring.angle_deg)
 
         index = np.flatnonzero(tuned)
         corr = ring.corr_z[np.ix_(index, index)]
-        cosine = np.cos(np.deg2rad(preferred[index][:, None] - preferred[index][None, :]))
+        cosine = np.cos(
+            np.deg2rad(preferred[index][:, None] - preferred[index][None, :])
+        )
         structure_r, structure = _structure_test(cosine, corr, n_shuffles, seed)
         upper = np.triu_indices(index.size, 1)
         difference = np.abs(
@@ -2664,7 +2670,9 @@ def compare_rings(
     else:
         pairs = [(a, b) for a, b in unit_map.items() if a in on_a and b in on_b]
     if len(pairs) < 4:
-        raise ValueError(f"{len(pairs)} pairs of units are on both rings: need at least 4")
+        raise ValueError(
+            f"{len(pairs)} pairs of units are on both rings: need at least 4"
+        )
     units_a = np.asarray([a for a, _ in pairs])
     units_b = np.asarray([b for _, b in pairs])
     index_a = _unit_positions(ring_a.unit_ids, units_a.tolist())
@@ -2732,7 +2740,7 @@ def _identity_lines(ax):
     ax.set_yticks(np.arange(0, 361, 90))
 
 
-def plot_ring(ring: RingModel, color=None, cmap="hsv", axes=None):
+def plot_ring(ring: RingModel, color=None, cmap="turbo", axes=None):
     """Plot the ring, its sorted correlations, its consistency and its eigenvalues.
 
     MATLAB's Figs 1d and 2, plus the eigenvalue check:
@@ -2802,7 +2810,7 @@ def plot_ring(ring: RingModel, color=None, cmap="hsv", axes=None):
     order = np.argsort(ring.angle_deg, kind="stable")
     matrix = ring.corr_z[np.ix_(order, order)]
     limit = float(np.nanpercentile(np.abs(matrix), 98)) or 1.0
-    colormap = matplotlib.colormaps["RdBu_r"].with_extremes(bad="0.85")
+    colormap = matplotlib.colormaps["vanimo"].with_extremes(bad="0.85")
     image = matrix_ax.imshow(
         matrix, cmap=colormap, vmin=-limit, vmax=limit, interpolation="nearest"
     )
@@ -2877,10 +2885,18 @@ def plot_correlograms(data: DecoderData, ring: RingModel, mask, pairs=None, axes
     if pairs is None:
         upper = np.triu_indices(ring.n_units, 1)
         values = z[upper]
-        picks = [np.nanargmax(values), np.nanargmin(np.abs(values)), np.nanargmin(values)]
-        pairs = [(ring.unit_ids[upper[0][k]], ring.unit_ids[upper[1][k]]) for k in picks]
+        picks = [
+            np.nanargmax(values),
+            np.nanargmin(np.abs(values)),
+            np.nanargmin(values),
+        ]
+        pairs = [
+            (ring.unit_ids[upper[0][k]], ring.unit_ids[upper[1][k]]) for k in picks
+        ]
     if axes is None:
-        _, axes = plt.subplots(1, len(pairs), figsize=(4.2 * len(pairs), 3.4), sharey=True)
+        _, axes = plt.subplots(
+            1, len(pairs), figsize=(4.2 * len(pairs), 3.4), sharey=True
+        )
     axes = np.atleast_1d(axes)
     start = ring.params.get("baseline_start_s", 5.0)
     max_lag = ring.params.get("max_lag_s", 10.0)
@@ -3037,7 +3053,9 @@ def plot_ring_comparison(comparison: RingComparison, labels=("a", "b"), axes=Non
     else:
         angle_null_ax.set_axis_off()
 
-    corr_ax.scatter(comparison.corr_a, comparison.corr_b, s=10, color="k", alpha=0.5, lw=0)
+    corr_ax.scatter(
+        comparison.corr_a, comparison.corr_b, s=10, color="k", alpha=0.5, lw=0
+    )
     corr_ax.set_xlabel(f"pair metric in {a} (z)")
     corr_ax.set_ylabel(f"pair metric in {b} (z)")
     corr_ax.set_title(

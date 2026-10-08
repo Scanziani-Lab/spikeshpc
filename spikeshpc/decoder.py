@@ -3011,7 +3011,7 @@ def plot_encoding_model(model: EncodingModel, sort_by_preferred: bool = True, ax
         aspect="auto",
         origin="lower",
         extent=(0, 360, -0.5, len(order) - 0.5),
-        cmap="viridis",
+        cmap="magma",
         interpolation="nearest",
     )
     ax.set_xlabel("head direction (deg)")

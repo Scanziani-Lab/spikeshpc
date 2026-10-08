@@ -1,24 +1,24 @@
 # spikeshpc
 
-Processing pipeline for Neuropixels recordings along with OptiTrack head tracking on HPC: 
-brain-state scoring, channel-aligned concatenation, pre-processing, kilosort4 
-and spikeinterface post-processing.
+Processing pipeline for Neuropixels recordings along with OptiTrack head tracking on HPC:
+brain-state scoring, channel-aligned concatenation, pre-processing, kilosort4 and
+spikeinterface post-processing.
 
-Four independent re-runnable stages, each with a `--skip_*` flag:
+Four independent stages, each skippable with a flag:
 
 | # | Stage | Writes |
-|---|-------|--------|
-| 1 | **state scoring** — per session, before concatenation. Uses an adapted Buzsaki Lab algorithm (from Buzcode) | `states/` |
-| 2 | **pre-processing** — load, align channels, concatenate, pre-process | `preprocessed.bin`, `concat_info.json`, `chanMap.mat`, `probe.json` |
-| 3 | **sorting** — kilosort4 in a freshly started process | `kilosort4/` |
-| 4 | **post-processing** — builds a spike interface sorting analyzer | `analyzer.zarr` |
+| - | ----- | ------ |
+| 1 | **state scoring** | `states/` |
+| 2 | **pre-processing** | `preprocessed.bin`, `concat_info.json`, `chanMap.mat`, `probe.json` |
+| 3 | **sorting** | `kilosort4/` |
+| 4 | **post-processing** | `analyzer.zarr` |
 
 Everything a later stage needs is written to disk by the earlier ones, so any stage
 can be re-run on its own using existing `--output_dir`.
 
 ## Layout
 
-```
+```text
 pyproject.toml
 pipeline_config.example.json   example run config -- works locally and on the cluster
 hpc_load_sort_post.py          entry point that needs no install
@@ -45,7 +45,7 @@ Start from [`pipeline_config.example.json`](pipeline_config.example.json):
    an error
 
 Paths are written for whichever machine will run the job, so in practice you keep one
-config per run per machine. Copy the example rather than editing it 
+config per run per machine. Copy the example rather than editing it
 (`pipeline_config.json` at the repo root is git-ignored), or keep run
 configs next to the data. Before a first run, check the following:
 
@@ -54,7 +54,7 @@ configs next to the data. Before a first run, check the following:
 - `state_scoring.movement` — the example enables an OptiTrack movement veto with a
   cluster path; point `optitrack_csv` at your tracking files or set `"enabled": false`
 
-Anything given on the command line overrides the `run` block in the config file, 
+Anything given on the command line overrides the `run` block in the config file,
 so a config can be reused for a one-off (e.g. `--skip_sorting`) without editing.
 
 ## Running locally
@@ -163,7 +163,7 @@ The header of [`containers/si_kilosort4.def`](containers/si_kilosort4.def) has a
 check to run on a GPU node afterwards; it matters for newer (Blackwell) cards.
 
 **3. Write the run config** — copy [`pipeline_config.example.json`](pipeline_config.example.json)
-to `/scratch` or `/home` and fill in the cluster paths as [above](#the-run-config). 
+to `/scratch` or `/home` and fill in the cluster paths as [above](#run-config-file-for-local-and-hpc-runs).
 Keep `run.tmp_dir` and `run.output_dir` off `/home` due to file size restrictions.
 
 The `.sif` container can only see directories that are bind-mounted into it. The job derives
@@ -203,7 +203,7 @@ apptainer exec --nv --bind /scratch/user/$USER /scratch/user/$USER/containers/si
 ## Brain-state scoring
 
 WAKE/NREM/REM from LFP, after [Watson et al. 2016](https://pmc.ncbi.nlm.nih.gov/articles/PMC4873379/).
-Runs per session before concatenation so the 10 s spectrogram window never straddles a junction between 
+Runs per session before concatenation so the 10 s spectrogram window never straddles a junction between
 sessions.
 
 Three signals in 1 s steps over a 5 s window: the first principal component of the z-scored log
@@ -214,18 +214,18 @@ pseudo-EMG from zero-lag correlations between 300–600 Hz signals at separated 
 This is a reimplementation from the published description, **not** an exact port of buzcode's
 `SleepScoreMaster`. It has not been validated against hand-scored data. See the
 module docstring in `spikeshpc/states.py` for the specific deviations. Theta is a
-hippocampal signal — on a probe spanning several structures, set `state_scoring.theta_channels` 
+hippocampal signal — on a probe spanning several structures, set `state_scoring.theta_channels`
 explicitly rather than averaging over everything.
 
-With no dedicated LFP stream (Neuropixels 2.0) the LFP and the pseudo-EMG are each resampled 
-from the 30 kHz AP band, and each is a full read of the raw binary: twice over a ~1 TB file 
-for a 12 h recording. My runs on the cluster's scratch have taken about 20 m per hour of recording. 
+With no dedicated LFP stream (Neuropixels 2.0) the LFP and the pseudo-EMG are each resampled
+from the 30 kHz AP band, and each is a full read of the raw binary: twice over a ~1 TB file
+for a 12 h recording. My runs on the cluster's scratch have taken about 20 m per hour of recording.
 Each pass shows a progress bar on stderr (the job's `.err` file), switched on/off by `job_kwargs.progress_bar`.
 
 ### OptiTrack movement veto
 
 Optional. Gross movement proves the animal is awake, so it overrules an NREM/REM call;
-stillness proves nothing and is ignored. This is the only signal here that catches running, 
+stillness proves nothing and is ignored. This is the only signal here that catches running,
 whose hippocampal theta is otherwise indistinguishable from REM.
 
 The immobility threshold is a bimodal split on log10 speed, so breathing and postural
@@ -247,7 +247,7 @@ opens spikeinterface-gui with outputs displayed (`spikeshpc/curation.py`):
 GUI reads everything from the session's `curation/` folder:
 
 | file | contents |
-|---|---|
+| --- | --- |
 | `sorting.json` | the sorting the folder belongs to: unit ids, spikes per unit, a templates checksum |
 | `unitrefine_labels.csv`, `slay_merges.npz` | UnitRefine's and SLAy's results, next to bombcell's own files |
 | `automated_labels.csv` | every tool's call, one row per unit: what the GUI shows |
@@ -259,7 +259,7 @@ GUI reads everything from the session's `curation/` folder:
 python -m spikeshpc.curation <output_dir> [--curation-dir DIR]   # started by launch_gui()
 ```
 
-Everything in `curation/` is keyed by unit ID and each re-sort will have unique unit IDs. 
+Everything in `curation/` is keyed by unit ID and each re-sort will have unique unit IDs.
 Because of this, each curation folder is tied to the sorting it was made from. After a pipeline re-run,
 make sure to move the old folder aside rather than loading the last sorting's labels.
 
@@ -278,8 +278,8 @@ The Merge tab is filled through spikeinterface-gui 0.13.1's internals, and
 
 ## Head-direction decoding
 
-`spikeshpc/decoder.py` has functions to train a decoder on head-direction-tuned units. 
-The decoder is a sorted-spikes point-process decoder on a ring, with the units' tuning curves 
+`spikeshpc/decoder.py` has functions to train a decoder on head-direction-tuned units.
+The decoder is a sorted-spikes point-process decoder on a ring, with the units' tuning curves
 as the encoding model, a Poisson likelihood per time bin and a Gaussian random walk for
 the dynamics. `run_decoder()` trains on wake, tests on held-out wake against a
 shuffle control, and then decodes REM/NREM.
@@ -290,7 +290,7 @@ run = run_decoder(analyzer, hd_unit_ids, heading_deg, shutter_close_times,
 print(run.summary())
 ```
 
-The method follows Moritz's `run_decoder.py`, which used `replay_trajectory_classification`; 
+The method follows Moritz's `run_decoder.py`, which used `replay_trajectory_classification`;
 that package is unmaintained and does not install here
 
 `decode_nrem=True` decodes NREM as well, judged against the same unit-permutation null as REM.
