@@ -247,7 +247,7 @@ opens spikeinterface-gui with outputs displayed (`spikeshpc/curation.py`):
 GUI reads everything from the session's `curation/` folder:
 
 | file | contents |
-| --- | --- |
+| -- | --- |
 | `sorting.json` | the sorting the folder belongs to: unit ids, spikes per unit, a templates checksum |
 | `unitrefine_labels.csv`, `slay_merges.npz` | UnitRefine's and SLAy's results, next to bombcell's own files |
 | `automated_labels.csv` | every tool's call, one row per unit: what the GUI shows |
