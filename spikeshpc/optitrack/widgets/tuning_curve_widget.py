@@ -5,7 +5,7 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import numpy as np
 
-from ._backend import warn_if_noninteractive_backend
+from ._backend import use_backend
 
 
 class HDTuningCurveWidget:
@@ -22,9 +22,9 @@ class HDTuningCurveWidget:
     above the 97.5th percentile is unremarkable. The verdict in the title is
     still the MVL shuffle test.
 
-    Requires an interactive matplotlib backend (``%matplotlib widget`` or
-    ``%matplotlib qt`` in Jupyter) and the figure to have keyboard focus
-    (click on it once) before arrow keys will do anything.
+    Needs an interactive matplotlib backend, which `backend` switches to, and
+    the figure to have keyboard focus (click on it once) before arrow keys
+    will do anything.
 
     Parameters
     ----------
@@ -37,6 +37,10 @@ class HDTuningCurveWidget:
         Output of :func:`optitrack.tuning.compute_hd_tuning_significance`.
     show_null : bool, default True
         Draw the shuffled band when `stats` carries one.
+    backend : str or None, default "qt"
+        Matplotlib backend to switch to first, as ``%matplotlib`` names it:
+        ``"qt"`` opens a window, ``"widget"`` draws in the notebook. Only
+        applied in IPython; None keeps the current one.
     """
 
     def __init__(
@@ -45,8 +49,9 @@ class HDTuningCurveWidget:
         unit_depths: dict | None = None,
         stats: dict | None = None,
         show_null: bool = True,
+        backend: str | None = "qt",
     ):
-        warn_if_noninteractive_backend()
+        use_backend(backend)
         self.unit_ids = list(tuning_curves.keys())
         self.tuning_curves = tuning_curves
         self.unit_depths = unit_depths or {}
@@ -166,6 +171,7 @@ def show_hd_tuning_widget(
     unit_depths: dict | None = None,
     stats: dict | None = None,
     show_null: bool = True,
+    backend: str | None = "qt",
 ) -> HDTuningCurveWidget:
     """Open an interactive figure; Left/Right arrow keys step through units.
 
@@ -193,6 +199,9 @@ def show_hd_tuning_widget(
         Output of :func:`optitrack.tuning.compute_hd_tuning_significance`.
     show_null : bool, default True
         Draw the shuffled band when `stats` carries one.
+    backend : str or None, default "qt"
+        Matplotlib backend to switch to first; ``"widget"`` draws in the
+        notebook, None keeps the current one.
 
     Returns
     -------
@@ -200,5 +209,9 @@ def show_hd_tuning_widget(
         The open widget.
     """
     return HDTuningCurveWidget(
-        tuning_curves, unit_depths=unit_depths, stats=stats, show_null=show_null
+        tuning_curves,
+        unit_depths=unit_depths,
+        stats=stats,
+        show_null=show_null,
+        backend=backend,
     )

@@ -52,6 +52,9 @@ dev = [
     # share one kernel.
     "spikeinterface-gui[desktop]",
     "ipympl",  # %matplotlib widget
+    # Fabio Crameri's perceptually uniform colormaps; importing it registers
+    # them with matplotlib as "cmc.<name>" (e.g. cmap="cmc.batlow").
+    "cmcrameri",
     "jupyterlab",
     "opencv-python-headless",  # the heading video widget (the `video` extra)
     "pytest>=7",

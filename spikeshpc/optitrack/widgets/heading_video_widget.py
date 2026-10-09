@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from ..io import OptitrackTake
-from ._backend import warn_if_noninteractive_backend
+from ._backend import use_backend
 
 
 class HeadingVideoWidget:
@@ -26,9 +26,9 @@ class HeadingVideoWidget:
     with capture frames, but that isn't independently verifiable from the
     files alone, which is exactly what stepping through this widget checks.
 
-    Requires an interactive matplotlib backend (``%matplotlib widget`` or
-    ``%matplotlib qt`` in Jupyter) and the figure to have keyboard focus
-    (click on it once) before arrow keys will do anything.
+    Needs an interactive matplotlib backend, which `backend` switches to, and
+    the figure to have keyboard focus (click on it once) before arrow keys
+    will do anything.
 
     Parameters
     ----------
@@ -44,6 +44,10 @@ class HeadingVideoWidget:
         Video frame shown first.
     compass_rotation_offset_deg : float, default 0.0
         Rotation applied to the compass arrow.
+    backend : str or None, default "qt"
+        Matplotlib backend to switch to first, as ``%matplotlib`` names it:
+        ``"qt"`` opens a window, ``"widget"`` draws in the notebook. Only
+        applied in IPython; None keeps the current one.
     """
 
     def __init__(
@@ -54,12 +58,13 @@ class HeadingVideoWidget:
         frame_offset: int = 0,
         start_frame: int = 0,
         compass_rotation_offset_deg: float = 0.0,
+        backend: str | None = "qt",
     ):
         # Imported here, not at the top: `import spikeshpc` loads this module,
         # and the cluster image that runs the pipeline has no OpenCV.
         import cv2
 
-        warn_if_noninteractive_backend()
+        use_backend(backend)
         self.cap = cv2.VideoCapture(str(video_path))
         if not self.cap.isOpened():
             raise OSError(f"Could not open video: {video_path}")
@@ -155,6 +160,7 @@ def show_heading_video_widget(
     frame_offset: int = 0,
     start_frame: int = 0,
     compass_rotation_offset_deg: float = 0.0,
+    backend: str | None = "qt",
 ) -> HeadingVideoWidget:
     """Open an interactive figure; Left/Right arrow keys step ±1 video frame.
 
@@ -175,6 +181,9 @@ def show_heading_video_widget(
         Video frame shown first.
     compass_rotation_offset_deg : float, default 0.0
         Rotation applied to the compass arrow.
+    backend : str or None, default "qt"
+        Matplotlib backend to switch to first; ``"widget"`` draws in the
+        notebook, None keeps the current one.
 
     Returns
     -------
@@ -188,4 +197,5 @@ def show_heading_video_widget(
         frame_offset=frame_offset,
         start_frame=start_frame,
         compass_rotation_offset_deg=compass_rotation_offset_deg,
+        backend=backend,
     )

@@ -1,10 +1,10 @@
 # spikeshpc
 
-Processing pipeline for Neuropixels recordings along with OptiTrack head tracking on HPC:
-brain-state scoring, channel-aligned concatenation, pre-processing, kilosort4 and
-spikeinterface post-processing.
+Processing pipeline for analyzing Neuropixels recordings along with OptiTrack head tracking.
+Can be run on a local desktop or HPC. Also includes wrapper functions for SpikeInterface,
+Bombcell, UnitMatch and more for post-processing analysis
 
-Four independent stages, each skippable with a flag:
+Initial pipeline contains four stages, each skippable with a flag:
 
 | # | Stage | Writes |
 | - | ----- | ------ |
@@ -13,18 +13,18 @@ Four independent stages, each skippable with a flag:
 | 3 | **sorting** | `kilosort4/` |
 | 4 | **post-processing** | `analyzer.zarr` |
 
-Everything a later stage needs is written to disk by the earlier ones, so any stage
-can be re-run on its own using existing `--output_dir`.
+Each stage writes outputs to disk so later stages can be run independently
+using existing `--output_dir`.
 
 ## Layout
 
 ```text
 pyproject.toml
-pipeline_config.example.json   example run config -- works locally and on the cluster
+pipeline_config.example.json   example run config - works locally and on the cluster
 hpc_load_sort_post.py          entry point that needs no install
-spikeshpc/                     the package
-slurm/                         multisession_sorting.slurm (cluster job wrapper)
-containers/                    si_kilosort4.def (apptainer image definition)
+spikeshpc/                     
+slurm/                         multisession_sorting.slurm (HPC job wrapper)
+containers/                    apptainer image definition for use on HPC
 envs/unitmatch/                Python 3.12 environment for UnitMatch (see Install)
 tests/
 ```
@@ -32,30 +32,28 @@ tests/
 ## Run config file (for local and HPC runs)
 
 Use one JSON file per run. The same file can drive a local run or a slurm job.
-Start from [`pipeline_config.example.json`](pipeline_config.example.json):
+Start from template [`pipeline_config.example.json`](pipeline_config.example.json):
 
-- **`run`** — *which* data: `phys_paths` (one or more recording directories or raw
+- **`run`** specifies which data: `phys_paths` (one or more recording directories or raw
   binaries; multiple are concatenated), `output_dir`, `tmp_dir`, the four
   `skip_*` stage flags, and `bind_paths` (cluster only, see below). `phys_type` and
   `stream_name` may also go here; both are auto-detected when left out.
-- **everything else** — *how* to process it: `job_kwargs`, `preprocessing`,
+- **everything else** specifies how to process it: `job_kwargs`, `preprocessing`,
   `state_scoring`, `bad_channels`, `detect_bad_channels`, `sorting` (kilosort4
-  settings), and so on. These are merged onto `spikeshpc.config.DEFAULT_PIPELINE`,
-  overwriting defaults when there are conflicts. A misspelled top-level key raises
-   an error
+  settings), etc. These are merged onto `spikeshpc.config.DEFAULT_PIPELINE`,
+  overwriting defaults when there are conflicts
 
-Paths are written for whichever machine will run the job, so in practice you keep one
-config per run per machine. Copy the example rather than editing it
-(`pipeline_config.json` at the repo root is git-ignored), or keep run
-configs next to the data. Before a first run, check the following:
+Paths are written for whichever machine runs the pipeline, so keep one config
+per run per machine. Keep run configs separate from repo.
+Before a first run, check the following:
 
 - `run.phys_paths`, `run.output_dir`, `run.tmp_dir`
-- `job_kwargs.n_jobs` — no more than the cores you have (on slurm, `--cpus-per-task`)
+- `job_kwargs.n_jobs` — <= the number of available cores (on slurm, `--cpus-per-task`)
 - `state_scoring.movement` — the example enables an OptiTrack movement veto with a
   cluster path; point `optitrack_csv` at your tracking files or set `"enabled": false`
 
-Anything given on the command line overrides the `run` block in the config file,
-so a config can be reused for a one-off (e.g. `--skip_sorting`) without editing.
+Input to the command line overrides the `run` block in the config file, so a config file
+can be reused for a one-off run (e.g. `--skip_sorting`) without editing.
 
 ## Running locally
 
@@ -68,19 +66,16 @@ uv sync         # .venv on Python 3.14: the package, kilosort4, CUDA torch, note
 uv run pytest
 ```
 
-`uv sync` installs the `dev` dependency group along with the package, and takes torch from
-PyTorch's CUDA 12.6 index (PyPI's Windows torch is CPU-only). To use the environment from
-Jupyter, register it once as a kernel:
+To use the environment in Jupyter notebooks, register it once as a kernel:
 
 ```bash
 uv run python -m ipykernel install --user --name spikeshpc --display-name "spikeshpc (Python 3.14)"
 ```
 
-UnitMatch has its own environment, [`envs/unitmatch`](envs/unitmatch/pyproject.toml), on
+UnitMatch has its own environment, [`envs/unitmatch`](envs/unitmatch/pyproject.toml) with
 Python 3.12: UnitMatchPy pins numpy<2, and spikeinterface 0.105 onwards needs numpy 2. It
-installs this repo and UnitMatchPy from a clone of the lab's [UnitMatch fork](https://github.com/Scanziani-Lab/UnitMatch)
-next to the repo, both editable. Its `spikeshpc` branch is upstream plus fixes for Kilosort 4
-data, truncated recordings and the GUI layout:
+installs this repo and UnitMatchPy from a clone of my [UnitMatch fork](https://github.com/Scanziani-Lab/UnitMatch)
+next to the repo, both editable.
 
 ```bash
 git clone --filter=blob:none -b spikeshpc https://github.com/Scanziani-Lab/UnitMatch.git ../UnitMatch
@@ -97,7 +92,7 @@ pip install -e ".[video]"     # ...plus OpenCV, for the OptiTrack heading video 
 ```
 
 If `pip` gives you a CPU-only torch, install the CUDA build from [pytorch.org](https://pytorch.org/get-started/locally/)
-first. State scoring and pre-processing alone don't need kilosort or PyTorch.
+first. State scoring and pre-processing don't need kilosort or PyTorch.
 
 ### Run
 
@@ -109,31 +104,31 @@ or, without a config, give the recordings and flags directly:
 
 ```bash
 # whole pipeline; acquisition system and stream auto-detected
-spikeshpc /data/m1_g0 /data/m1_g1 --output_dir /scratch/m1
+spikeshpc /data/session0 /data/session1 --output_dir /scratch/m1
 
 # re-sort with dead channels excluded, reusing everything before sorting
-spikeshpc /data/m1_g0 --output_dir /scratch/m1 \
+spikeshpc /data/session0 --output_dir /scratch/m1 \
     --skip_statescoring --skip_preprocessing --bad_channels 191 192
 
 # brain-state scoring only
-spikeshpc /data/m1_g0 /data/m1_g1 --output_dir /scratch/m1 \
+spikeshpc /data/session0 /data/session1 --output_dir /scratch/m1 \
     --skip_preprocessing --skip_sorting --skip_postprocessing
 ```
 
 `python -m spikeshpc` and `python hpc_load_sort_post.py` are equivalent;
-the latter needs no install since it puts the repo root on `sys.path`.
+the latter doesn't need installation since it puts the repo root on `sys.path`.
 `spikeshpc --help` lists every flag.
 
 On Windows, write paths in the JSON with forward slashes (`"D:/data/m1_g0"`) or
 doubled backslashes (`"D:\\data\\m1_g0"`) to avoid invalid JSON.
 
-From a jupyter notebook, call `run_pipeline()` with the same pieces as keyword arguments:
+From a Jupyter notebook, call `run_pipeline()` with the same pieces as keyword arguments:
 
 ```python
 from spikeshpc.pipeline import run_pipeline
 
 run_pipeline(
-    ["/data/m1_g0", "/data/m1_g1"],
+    ["/data/session0", "/data/session1"],
     output_dir="/scratch/m1",
     skip_statescoring=True,
     sorting={"nblocks": 5},          # any top-level config key other than "run"
@@ -142,8 +137,8 @@ run_pipeline(
 
 ## Running on an HPC (slurm + apptainer)
 
-On the cluster nothing is pip-installed: the job runs `hpc_load_sort_post.py` from a
-clone of this repo inside a container that provides spikeinterface, kilosort4 and CUDA.
+On the cluster the job runs `hpc_load_sort_post.py` from a clone of this repo inside
+a container that provides spikeinterface, kilosort4 and CUDA.
 
 **1. Clone the repo** somewhere the compute nodes can see (should be small enough to
 easily fit on home mount):
@@ -160,25 +155,25 @@ apptainer build --fakeroot /scratch/user/$USER/containers/si_kilosort4.sif conta
 ```
 
 The header of [`containers/si_kilosort4.def`](containers/si_kilosort4.def) has a
-check to run on a GPU node afterwards; it matters for newer (Blackwell) cards.
+check to run on a GPU node afterwards; only matters for newer (Blackwell) cards.
 
 **3. Write the run config** — copy [`pipeline_config.example.json`](pipeline_config.example.json)
 to `/scratch` or `/home` and fill in the cluster paths as [above](#run-config-file-for-local-and-hpc-runs).
-Keep `run.tmp_dir` and `run.output_dir` off `/home` due to file size restrictions.
+Keep `run.tmp_dir` and `run.output_dir` off the `/home` mount due to storage restrictions.
 
-The `.sif` container can only see directories that are bind-mounted into it. The job derives
-them from the config — recordings, output and scratch directories, and the OptiTrack
-path templates — so `run.bind_paths` can normally stay empty. Set it only if something
+The `.sif` container can only see directories that are bind-mounted into it. Each job derives
+them from the config (recordings, output and scratch directories, and the OptiTrack
+path templates) so `run.bind_paths` can normally stay empty. Set it only if something
 lives outside those, e.g. behind a symlink.
 
-**4. Edit [`slurm/multisession_sorting.slurm`](slurm/multisession_sorting.slurm)** —
-only the deployment details live there:
+**4. Edit [`slurm/multisession_sorting.slurm`](slurm/multisession_sorting.slurm)** with the
+following parameters:
 
+- `#SBATCH` header: set the partition, `--cpus-per-task` (keep `job_kwargs.n_jobs` at or
+  below it), memory, time, and the `--output`/`--error` log directory, which must already exist
 - `REPO_DIR` — repository clone from step 1
 - `SI_SIF` — `.sif` image from step 2
 - `PIPELINE_CONFIG` — edited config JSON from step 3
-- the `#SBATCH` header: set the partition, `--cpus-per-task` (keep `job_kwargs.n_jobs` at or
-  below it), memory, time, and the `--output`/`--error` log directory, which must already exist
 - `APPTAINER_CACHEDIR` / `APPTAINER_TMPDIR`, need to be off `/home`
 
 **5. Submit:**
@@ -187,18 +182,34 @@ only the deployment details live there:
 sbatch slurm/multisession_sorting.slurm
 ```
 
-The script checks that the config, the image and every recording exist before
-launching.
-
-To re-run part of the pipeline, set the matching `run.skip_*` flags (or change
-`bad_channels`, sorting settings, etc.) in the config and submit again; each stage reads
-what the earlier ones left in `output_dir`. The same config can also be run by hand
-inside the container from an interactive GPU session:
+A config can also be run inside the container from an interactive GPU session:
 
 ```bash
 apptainer exec --nv --bind /scratch/user/$USER /scratch/user/$USER/containers/si_kilosort4.sif \
     python -u ~/spikeshpc/hpc_load_sort_post.py --pipeline_config /scratch/user/$USER/runs/m1.json
 ```
+
+## Looking at raw traces
+
+`spikeshpc.plot_traces` and `spikeshpc.get_traces` take the same arguments as
+spikeinterface's functions of the same name. Use them instead on long recordings:
+
+```python
+from spikeshpc import open_stream, plot_traces, get_traces
+
+rec = open_stream(phys_path, "openephysbinary", stream_name)
+plot_traces(rec, time_range=(1000.0, 1000.2), relative=True, mode="map")
+traces, times = get_traces(rec, (1000.0, 1000.2), relative=True, return_times=True)
+```
+
+Only the requested frames are read, and the time vector is never loaded whole.
+`time_range` is on the recording's clock. For Open Ephys that is the synchronized
+acquisition clock, which doesn't necessarily start at 0.
+`relative=True` counts from the first sample instead.
+
+Open Ephys `timestamps.npy` is also memory-mapped rather than read into RAM
+(~11 GB for 12.75 h at 30 kHz). When several sessions are concatenated, their
+timestamps are joined once into `output_dir/sync_timestamps.npy`.
 
 ## Brain-state scoring
 
@@ -220,14 +231,11 @@ explicitly rather than averaging over everything.
 With no dedicated LFP stream (Neuropixels 2.0) the LFP and the pseudo-EMG are each resampled
 from the 30 kHz AP band, and each is a full read of the raw binary: twice over a ~1 TB file
 for a 12 h recording. My runs on the cluster's scratch have taken about 20 m per hour of recording.
-Each pass shows a progress bar on stderr (the job's `.err` file), switched on/off by `job_kwargs.progress_bar`.
+Each pass shows a progress bar in stderr (the job's `.err` file), switched on/off by `job_kwargs.progress_bar`.
 
 ### OptiTrack movement veto
 
-Optional. Gross movement proves the animal is awake, so it overrules an NREM/REM call;
-stillness proves nothing and is ignored. This is the only signal here that catches running,
-whose hippocampal theta is otherwise indistinguishable from REM.
-
+Optional. Gross movement proves the animal is awake, so it overrules a NREM/REM call.
 The immobility threshold is a bimodal split on log10 speed, so breathing and postural
 sway (which keep movement non-zero) are handled without a hand-tuned floor.
 
@@ -235,46 +243,7 @@ sway (which keep movement non-zero) are handled without a hand-tuned floor.
 
 ## Curating results
 
-`0_load_inspect.ipynb` runs bombcell, UnitRefine and SLAy on a session's sorting, then
-opens spikeinterface-gui with outputs displayed (`spikeshpc/curation.py`):
-
-- each tool's call is shown in a sortable column in the unit table
-- the quality label starts filled in wherever bombcell and UnitRefine agree and blank
-  where they disagree
-- SLAy's merge proposals are listed in the Merge tab with their scores, to accept
-  (ctrl+a) or ignore.
-
-GUI reads everything from the session's `curation/` folder:
-
-| file | contents |
-| -- | --- |
-| `sorting.json` | the sorting the folder belongs to: unit ids, spikes per unit, a templates checksum |
-| `unitrefine_labels.csv`, `slay_merges.npz` | UnitRefine's and SLAy's results, next to bombcell's own files |
-| `automated_labels.csv` | every tool's call, one row per unit: what the GUI shows |
-| `sigui_curation.json` | written by the GUI's "Save curation"; the GUI resumes from it (delete it to start over) |
-| `curated_units.csv` | the automated calls plus your label, removal, merge group and split, per unit |
-| `sigui.log` | the GUI process's output, for when the window does not appear |
-
-```bash
-python -m spikeshpc.curation <output_dir> [--curation-dir DIR]   # started by launch_gui()
-```
-
-Everything in `curation/` is keyed by unit ID and each re-sort will have unique unit IDs.
-Because of this, each curation folder is tied to the sorting it was made from. After a pipeline re-run,
-make sure to move the old folder aside rather than loading the last sorting's labels.
-
-Things to note on Windows:
-
-- spikeinterface recomputes `valid_unit_periods` whenever units are split or merged, in
-  a process pool it has to send the whole sorting to. At 10^8 spikes that fails
-  (`OSError 22`), so SLAy's parameter search and `si.apply_curation` run inside
-  `detached_extensions(analyzer, "valid_unit_periods")`.
-- An analyzer opened here cannot reopen its own recording. `analyzer_recording()`
-  rebuilds it from the binary, re-applying the analyzer's own filters, or none if it had
-  none.
-
-The Merge tab is filled through spikeinterface-gui 0.13.1's internals, and
-`tests/test_curation.py` fails if an upgrade moves them.
+`spikeshpc/curation.py` contains functions to view and curate the results of the analysis pipeline
 
 ## Head-direction decoding
 
@@ -290,9 +259,6 @@ run = run_decoder(analyzer, hd_unit_ids, heading_deg, shutter_close_times,
 print(run.summary())
 ```
 
-The method follows Moritz's `run_decoder.py`, which used `replay_trajectory_classification`;
-that package is unmaintained and does not install here
-
 `decode_nrem=True` decodes NREM as well, judged against the same unit-permutation null as REM.
 `apply_decoder` and `reference_decode` carry it to other recordings, and `plot_transfer_summary`
 adds an NREM panel when there is one. NREM is long, so it costs the run's longest decode and
@@ -301,8 +267,8 @@ heading moves faster in NREM: decode it again with `movement_var_deg2=np.inf` as
 
 ### Ring attractor from correlations
 
-`spikeshpc/ring.py` reads heading without tuning curves. It is a port of the lab's
-`HD_CCH_to_ring.m`, with ideas from SPUD (Chaudhuri et al. 2019):
+`spikeshpc/ring.py` reads heading without tuning curves. It is influenced by ideas from SPUD
+(Chaudhuri et al. 2019):
 
 1. Pairs of units are scored by zero-lag correlation minus the mean correlation 5–10 s out.
 2. Units are placed on a ring by Isomap of those scores.
@@ -322,41 +288,12 @@ print(ring_vs_tuning(ring_run.ring, hd).summary())   # did it find the tuned uni
 
 `run_ring` masks and splits wake exactly as `run_decoder` does, so with the same settings both
 hold out the same bins. Its decodes are `Decoded` objects, so `show_decoded`, `plot_error` and
-`metrics_by_group` work on them. Where it departs from the MATLAB, and why, is in the module
-docstring. The biggest change: units with no partner correlated beyond noise are screened off
-before the embedding, because left in they pull the ring apart. Units of other structures have
-partners of their own, though, so give the ring one structure's units by depth: on session7 the
-whole probe's 285 units decoded wake at 70°, the 51 in the head-direction band at 18°.
+`metrics_by_group` work on them.
 
 A ring's decode is read as heading through its own alignment, or, with `RingAlignment.then`,
 through matched units onto another recording's ring and that ring's alignment. The second way
-needs none of the recording's own tuning. `plot_turn_summary` and `plot_turn_sweep` take a
+doesn't need the new recording's tuning. `plot_turn_summary` and `plot_turn_sweep` take a
 `"ring"` source beside the decoded one.
-
-## Looking at raw traces
-
-`spikeshpc.plot_traces` and `spikeshpc.get_traces` take the same arguments as
-spikeinterface's functions of the same name. Use them instead on long recordings:
-
-```python
-from spikeshpc import open_stream, plot_traces, get_traces
-
-rec = open_stream(phys_path, "openephysbinary", stream_name)
-plot_traces(rec, time_range=(1000.0, 1000.2), relative=True, mode="map")
-traces, times = get_traces(rec, (1000.0, 1000.2), relative=True, return_times=True)
-```
-
-Only the requested frames are read, and the time vector is never loaded whole. A
-range is refused, not read, in two cases. The first is when it resolves to more
-samples than it can hold, which happens when a clock restarts mid-recording
-(spikeinterface would read hours of data there). The second is when the traces
-would be larger than `max_gb` (default 1). `time_range` is on the recording's own
-clock. For Open Ephys that is the synchronized acquisition clock, which does not
-start at 0; `relative=True` counts from the first sample instead.
-
-Open Ephys `timestamps.npy` is also memory-mapped now rather than read into RAM
-(~11 GB for 12.75 h at 30 kHz). When several sessions are concatenated, their
-timestamps are joined once into `output_dir/sync_timestamps.npy`.
 
 ## Utilities
 

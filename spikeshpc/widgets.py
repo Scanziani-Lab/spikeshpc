@@ -8,7 +8,7 @@ the decision was made from against the thresholds that were applied.
 
 import numpy as np
 
-from .optitrack.widgets._backend import warn_if_noninteractive_backend
+from .optitrack.widgets._backend import use_backend
 
 STATE_COLORS = {"WAKE": "#d95f02", "NREM": "#1b9e77", "REM": "#7570b3"}
 
@@ -29,8 +29,8 @@ class StateEpochWidget:
     decided against. Override any of them with
     ``ylim={"movement (mm/s)": (0, 200)}``.
 
-    Requires an interactive matplotlib backend (``%matplotlib widget`` or
-    ``%matplotlib qt``) and the figure to have keyboard focus: click it once.
+    Needs an interactive matplotlib backend, which `backend` switches to, and
+    the figure to have keyboard focus: click it once.
 
     Parameters
     ----------
@@ -50,14 +50,19 @@ class StateEpochWidget:
         Percentiles of the whole recording that set the y-ranges.
     log_signals : tuple of str, default ()
         Signals drawn on a log axis.
+    backend : str or None, default "qt"
+        Matplotlib backend to switch to first, as ``%matplotlib`` names it:
+        ``"qt"`` opens a window, ``"widget"`` draws in the notebook. Only
+        applied in IPython; None keeps the current one.
     """
 
     def __init__(self, scoring, states=None, context_s: float = 60.0,
                  min_duration_s: float = 0.0, vetoed: bool = False,
-                 ylim=None, robust=(0.5, 99.5), log_signals=()):
+                 ylim=None, robust=(0.5, 99.5), log_signals=(),
+                 backend: str | None = "qt"):
         import matplotlib.pyplot as plt
 
-        warn_if_noninteractive_backend()
+        use_backend(backend)
 
         self.scoring = scoring
         self.context_s = float(context_s)
@@ -199,7 +204,8 @@ class StateEpochWidget:
 def show_state_epochs(scoring, states=None, context_s: float = 60.0,
                       min_duration_s: float = 0.0, vetoed: bool = False,
                       ylim=None, robust=(0.5, 99.5),
-                      log_signals=()) -> StateEpochWidget:
+                      log_signals=(),
+                      backend: str | None = "qt") -> StateEpochWidget:
     """Open an interactive figure; Left/Right step through scored epochs.
 
     Y-axes are fixed across epochs so heights are comparable. Movement spans
@@ -228,6 +234,9 @@ def show_state_epochs(scoring, states=None, context_s: float = 60.0,
         Percentiles that set the y-ranges.
     log_signals : tuple of str, default ()
         Signals drawn on a log axis.
+    backend : str or None, default "qt"
+        Matplotlib backend to switch to first; ``"widget"`` draws in the
+        notebook, None keeps the current one.
 
     Returns
     -------
@@ -237,5 +246,5 @@ def show_state_epochs(scoring, states=None, context_s: float = 60.0,
     return StateEpochWidget(
         scoring, states=states, context_s=context_s,
         min_duration_s=min_duration_s, vetoed=vetoed,
-        ylim=ylim, robust=robust, log_signals=log_signals,
+        ylim=ylim, robust=robust, log_signals=log_signals, backend=backend,
     )

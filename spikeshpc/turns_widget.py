@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 
 from .decoder_widget import break_at, wrap_through
-from .optitrack.widgets._backend import warn_if_noninteractive_backend
+from .optitrack.widgets._backend import use_backend
 from .raster import RasterPanel
 from .turns import Turns, _runs
 
@@ -47,8 +47,8 @@ class TurnWidget:
     Only the drawing moves with `apply_offset`: turns, velocity and drift do
     not depend on a constant, and the raster stays in the decoder's frame.
 
-    Requires an interactive matplotlib backend (``%matplotlib qt`` or
-    ``%matplotlib widget``) and the figure to have keyboard focus: click it once.
+    Needs an interactive matplotlib backend, which `backend` switches to, and
+    the figure to have keyboard focus: click it once.
 
     Parameters
     ----------
@@ -83,6 +83,10 @@ class TurnWidget:
         heading (notebook 3's ``wake_offset_deg`` for the decode).
     decoded_marker : {"dots", "line"}, default "dots"
         How the decoded heading is drawn: one dot per decoded bin, or a line.
+    backend : str or None, default "qt"
+        Matplotlib backend to switch to first, as ``%matplotlib`` names it:
+        ``"qt"`` opens a window, ``"widget"`` draws in the notebook. Only
+        applied in IPython; None keeps the current one.
 
     Notes
     -----
@@ -109,13 +113,14 @@ class TurnWidget:
         apply_offset: bool = False,
         offset_deg: float | None = None,
         decoded_marker: str = "dots",
+        backend: str | None = "qt",
     ):
         import matplotlib.pyplot as plt
         from matplotlib.lines import Line2D
         from matplotlib.patches import Patch
         from matplotlib.widgets import Slider
 
-        warn_if_noninteractive_backend()
+        use_backend(backend)
         self.time_s = np.asarray(time_s, dtype=float)
         self.heading_deg = np.asarray(heading_deg, dtype=float)
         n = len(self.time_s)
@@ -390,7 +395,7 @@ def show_turns(time_s, heading_deg, turns: Turns, window_s: float = 60.0, **kwar
     **kwargs
         Passed to :class:`TurnWidget`: ``run_index``, ``measured_deg``,
         ``color``, ``raster``, ``raster_color``, ``apply_offset``,
-        ``offset_deg`` and ``decoded_marker``.
+        ``offset_deg``, ``decoded_marker`` and ``backend`` (default ``"qt"``).
 
     Returns
     -------

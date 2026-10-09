@@ -382,6 +382,72 @@ def test_the_raster_scrolls_with_the_view(raster_widget):
     assert w.raster_panel.n_drawn > 0
 
 
+# ── what sits left of the raster ────────────────────────────────────────
+def _beside(w):
+    """The axes added around the raster: everything but raster, heading and slider."""
+    return [ax for ax in w.fig.axes if ax not in (w.raster_ax, w.ax, w.slider.ax)]
+
+
+def test_by_default_the_units_are_labelled_and_the_colorbar_is_right(raster_widget):
+    w = raster_widget
+    assert len(w.raster_ax.get_yticklabels()) == N_UNITS
+    assert "preferred" in w.raster_ax.get_ylabel()
+    (bar,) = _beside(w)
+    assert bar.get_position().x0 > w.raster_ax.get_position().x1
+
+
+@pytest.fixture
+def tuned_raster(decoded_run):
+    _, sorting, model = decoded_run
+    return unit_raster(sorting, model.unit_ids, model.preferred_deg, tuning=model)
+
+
+def test_colorbar_mode_puts_the_colorbar_where_the_labels_were(decoded, tuned_raster):
+    w = show_decoded(decoded, raster=tuned_raster, raster_mode="colorbar")
+    try:
+        assert list(w.raster_ax.get_yticks()) == [] and w.raster_ax.get_ylabel() == ""
+        (bar,) = _beside(w)
+        assert bar.get_position().x1 < w.raster_ax.get_position().x0
+    finally:
+        plt.close(w.fig)
+
+
+def test_ridgeline_mode_draws_a_curve_per_unit_left_of_the_raster(decoded, tuned_raster):
+    w = show_decoded(decoded, raster=tuned_raster, raster_mode="ridgeline")
+    try:
+        assert list(w.raster_ax.get_yticks()) == []
+        ridge, bar = sorted(_beside(w), key=lambda ax: -ax.get_position().height)
+        assert ridge.get_position().x1 < w.raster_ax.get_position().x0
+        assert len(ridge.lines) == N_UNITS
+        # the heading axis fits between the raster and the heading plot
+        assert w.ax.get_position().y1 < bar.get_position().y0
+        assert bar.get_position().y1 < w.raster_ax.get_position().y0
+    finally:
+        plt.close(w.fig)
+
+
+def test_the_view_scrolls_the_same_in_every_mode(decoded, tuned_raster):
+    for mode in ("colorbar", "ridgeline"):
+        w = show_decoded(decoded, window_s=20.0, raster=tuned_raster, raster_mode=mode)
+        try:
+            w._on_key(Key("right"))
+            assert w.raster_ax.get_xlim() == pytest.approx((w.t0, w.t0 + w.window_s))
+            assert w.raster_panel.n_drawn > 0
+        finally:
+            plt.close(w.fig)
+
+
+def test_a_bad_raster_mode_is_refused_before_a_figure_opens(decoded_run, decoded):
+    _, sorting, model = decoded_run
+    untuned = unit_raster(sorting, model.unit_ids, model.preferred_deg)
+    before = plt.get_fignums()
+    with pytest.raises(ValueError, match="raster_mode must be one of"):
+        show_decoded(decoded, raster=untuned, raster_mode="ridge")
+    with pytest.raises(ValueError, match="needs tuning curves"):
+        show_decoded(decoded, raster=untuned, raster_mode="ridgeline")
+    assert plt.get_fignums() == before
+
+
 def test_splices_cross_the_raster_too(raster_widget):
     w = raster_widget
     w.window_s = w.total_s

@@ -17,6 +17,9 @@ dependencies = [
     # sources for transitive dependencies.
     "torch",
     "ipykernel>=7.3.0",
+    # Also in the main env's dev group, which doesn't reach this env: uv
+    # installs only the root project's dependency groups.
+    "cmcrameri",
 ]
 
 [tool.uv]

@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from .optitrack.widgets._backend import warn_if_noninteractive_backend
+from .optitrack.widgets._backend import use_backend
 from .raster import RasterPanel
 
 __all__ = ["DecodedWidget", "show_decoded"]
 
+RASTER_MODES = ("text", "colorbar", "ridgeline")
 ACTUAL_COLOR = "black"
 DECODED_COLOR = "#00a000"
 MARK_COLOR = "0.45"
@@ -108,10 +109,16 @@ def wrap_through(x, y, breaks=(), top: float = 360.0):
     gap = np.full(len(i), np.nan)
 
     position = np.concatenate([cut, np.repeat(i + 1, 3)])
-    new_x = np.concatenate([np.full(len(cut), np.nan), np.column_stack([at_edge, gap, at_edge]).ravel()])
-    new_y = np.concatenate([np.full(len(cut), np.nan), np.column_stack([edge, gap, top - edge]).ravel()])
+    new_x = np.concatenate(
+        [np.full(len(cut), np.nan), np.column_stack([at_edge, gap, at_edge]).ravel()]
+    )
+    new_y = np.concatenate(
+        [np.full(len(cut), np.nan), np.column_stack([edge, gap, top - edge]).ravel()]
+    )
     order = np.argsort(position, kind="stable")
-    return np.insert(x, position[order], new_x[order]), np.insert(y, position[order], new_y[order])
+    return np.insert(x, position[order], new_x[order]), np.insert(
+        y, position[order], new_y[order]
+    )
 
 
 class DecodedWidget:
@@ -122,8 +129,8 @@ class DecodedWidget:
     window. ``home`` / ``end`` jump to the first and last decoded bin, and the
     slider at the bottom goes anywhere in between.
 
-    Requires an interactive matplotlib backend (``%matplotlib widget`` or
-    ``%matplotlib qt``) and the figure to have keyboard focus: click it once.
+    Needs an interactive matplotlib backend, which `backend` switches to, and
+    the figure to have keyboard focus: click it once.
 
     Parameters
     ----------
@@ -154,11 +161,23 @@ class DecodedWidget:
         Colormap for the raster.
     max_raster_spikes : int, default 150000
         A window holding more spikes shows a note instead of the ticks.
+    raster_mode : {"text", "colorbar", "ridgeline"}, default "text"
+        What goes left of the raster. ``"text"``: the unit labels, with the
+        preferred-direction colorbar on the right. ``"colorbar"``: that
+        colorbar, in place of the labels. ``"ridgeline"``: each unit's tuning
+        curve on its row, filled with the colormap, over a small heading
+        colorbar -- the raster must carry tuning curves
+        (``unit_raster(..., tuning=model)``).
+    backend : str or None, default "qt"
+        Matplotlib backend to switch to first, as ``%matplotlib`` names it:
+        ``"qt"`` opens a window, ``"widget"`` draws in the notebook. Only
+        applied in IPython; None keeps the current one.
 
     Raises
     ------
     ValueError
-        If fewer than two bins were decoded.
+        If fewer than two bins were decoded, `raster_mode` is unknown, or it
+        is ``"ridgeline"`` for a raster without tuning curves.
     """
 
     def __init__(
@@ -174,14 +193,23 @@ class DecodedWidget:
         raster=None,
         raster_color="hsv",
         max_raster_spikes: int = 150_000,
+        raster_mode: str = "text",
+        backend: str | None = "qt",
     ):
         import matplotlib.pyplot as plt
         from matplotlib.patches import Patch
         from matplotlib.widgets import Slider
 
-        warn_if_noninteractive_backend()
+        use_backend(backend)
         if decoded.n_decoded < 2:
             raise ValueError(f"{decoded.label!r} holds {decoded.n_decoded} bins")
+        if raster_mode not in RASTER_MODES:
+            raise ValueError(f"raster_mode must be one of {RASTER_MODES}, not {raster_mode!r}")
+        if raster_mode == "ridgeline" and raster is not None and raster.tuning_hz is None:
+            raise ValueError(
+                "raster_mode='ridgeline' needs tuning curves on the raster: build it "
+                "with unit_raster(..., tuning=run.model) or tuning=hd"
+            )
         if mark is not None:
             mark = np.asarray(mark, dtype=bool)
             if mark.shape != (decoded.n_decoded,):
@@ -222,9 +250,15 @@ class DecodedWidget:
             slider_box = [0.125, 0.07, 0.775, 0.035]
         else:
             self.fig, (self.raster_ax, self.ax) = plt.subplots(
-                2, 1, figsize=(12, 8.0), sharex=True, gridspec_kw={"height_ratios": [1.25, 1.0]}
+                2,
+                1,
+                figsize=(12, 8.0),
+                sharex=True,
+                gridspec_kw={"height_ratios": [1.25, 1.0]},
             )
-            self.fig.subplots_adjust(bottom=0.14, top=0.9, hspace=0.06)
+            # the ridgeline's heading axis hangs below the raster: make room
+            hspace = 0.15 if raster_mode == "ridgeline" else 0.06
+            self.fig.subplots_adjust(bottom=0.14, top=0.9, hspace=hspace)
             self.raster_ax.set_facecolor("white")
             slider_box = [0.125, 0.045, 0.775, 0.025]
         self.fig.patch.set_facecolor("white")
@@ -249,10 +283,22 @@ class DecodedWidget:
         if raster is not None:
             start = decoded.time_s - decoded.duration_s / 2
             self.raster_panel = RasterPanel(
-                self.raster_ax, raster, start, start + decoded.duration_s, self.edges,
-                cmap=raster_color, max_spikes=max_raster_spikes,
+                self.raster_ax,
+                raster,
+                start,
+                start + decoded.duration_s,
+                self.edges,
+                cmap=raster_color,
+                max_spikes=max_raster_spikes,
             )
-            self.raster_panel.add_colorbar(self.fig)
+            if raster_mode == "text":
+                self.raster_panel.add_colorbar(self.fig)
+            else:
+                self.raster_panel.hide_unit_labels()
+                if raster_mode == "colorbar":
+                    self.raster_panel.add_colorbar(self.fig, width=0.01, side="left")
+                else:
+                    self.raster_panel.add_ridgeline(self.fig)
 
         slider_ax = self.fig.add_axes(slider_box)
         self.slider = Slider(
@@ -268,15 +314,21 @@ class DecodedWidget:
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
 
         self.fig.text(
-            0.99, 0.005, "← → pan   ↑ ↓ window   home/end",
-            ha="right", fontsize=8, color="gray",
+            0.99,
+            0.005,
+            "← → pan   ↑ ↓ window   home/end",
+            ha="right",
+            fontsize=8,
+            color="gray",
         )
         self._draw()
 
     # ── state ───────────────────────────────────────────────────────────
     def _clamp(self):
         self.window_s = float(
-            np.clip(self.window_s, self.min_window_s, min(self.max_window_s, self.total_s))
+            np.clip(
+                self.window_s, self.min_window_s, min(self.max_window_s, self.total_s)
+            )
         )
         self.t0 = float(np.clip(self.t0, 0.0, max(self.total_s - self.window_s, 0.0)))
 
@@ -375,7 +427,9 @@ class DecodedWidget:
             for ax in (self.ax, self.raster_ax):
                 if ax is not None:
                     self._break_lines.append(
-                        ax.axvline(at, color="#c03030", lw=1.0, ls="--", alpha=0.9, zorder=5)
+                        ax.axvline(
+                            at, color="#c03030", lw=1.0, ls="--", alpha=0.9, zorder=5
+                        )
                     )
 
         # above the posterior, below the traces; one span per marked run, and
@@ -399,7 +453,10 @@ class DecodedWidget:
         self.ax.set_xlim(self.t0, stop)
         self._set_title(index)
         self.ax.legend(
-            handles=handles, loc="upper right", fontsize=8, framealpha=0.9,
+            handles=handles,
+            loc="upper right",
+            fontsize=8,
+            framealpha=0.9,
             ncol=len(handles),
         )
         self.fig.canvas.draw_idle()
@@ -416,9 +473,7 @@ class DecodedWidget:
         if error.size:
             title += f"\nmedian |error| here {np.median(np.abs(error)):.1f} deg"
             if "median_abs_error_deg" in self.decoded.metrics:
-                title += (
-                    f", whole set {self.decoded.metrics['median_abs_error_deg']:.1f} deg"
-                )
+                title += f", whole set {self.decoded.metrics['median_abs_error_deg']:.1f} deg"
         n_breaks = int(
             ((self.break_s > self.t0) & (self.break_s < self.t0 + self.window_s)).sum()
         )
@@ -449,7 +504,9 @@ def show_decoded(decoded, window_s: float = 60.0, **kwargs) -> DecodedWidget:
         decoded bin, to shade bins gray, e.g. stillness) and ``raster`` (from
         :func:`~spikeshpc.raster.unit_raster`) for the decoder's units' spikes
         above the heading, colored by preferred direction through
-        ``raster_color``.
+        ``raster_color``; ``raster_mode`` (``"text"``, ``"colorbar"`` or
+        ``"ridgeline"``) for what sits left of the raster; and ``backend``
+        (default ``"qt"``; ``"widget"`` to draw in the notebook).
 
     Returns
     -------

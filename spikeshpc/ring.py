@@ -2740,7 +2740,9 @@ def _identity_lines(ax):
     ax.set_yticks(np.arange(0, 361, 90))
 
 
-def plot_ring(ring: RingModel, color=None, cmap="turbo", axes=None):
+def plot_ring(
+    ring: RingModel, color=None, ring_cmap="turbo", matrix_cmap="seismic", axes=None
+):
     """Plot the ring, its sorted correlations, its consistency and its eigenvalues.
 
     MATLAB's Figs 1d and 2, plus the eigenvalue check:
@@ -2792,7 +2794,7 @@ def plot_ring(ring: RingModel, color=None, cmap="turbo", axes=None):
         ring.embedding[:, 0],
         ring.embedding[:, 1],
         c=values,
-        cmap=cmap,
+        cmap=ring_cmap,
         s=np.where(member, 40, 18),
         edgecolors=np.where(member, "k", "none"),
         linewidths=0.6,
@@ -2810,9 +2812,9 @@ def plot_ring(ring: RingModel, color=None, cmap="turbo", axes=None):
     order = np.argsort(ring.angle_deg, kind="stable")
     matrix = ring.corr_z[np.ix_(order, order)]
     limit = float(np.nanpercentile(np.abs(matrix), 98)) or 1.0
-    colormap = matplotlib.colormaps["vanimo"].with_extremes(bad="0.85")
+    # colormap = matplotlib.colormaps[matrix_cmap].with_extremes(bad="0.85")
     image = matrix_ax.imshow(
-        matrix, cmap=colormap, vmin=-limit, vmax=limit, interpolation="nearest"
+        matrix, cmap=matrix_cmap, vmin=-limit, vmax=limit, interpolation="nearest"
     )
     matrix_ax.figure.colorbar(image, ax=matrix_ax, label="pair metric (z)", shrink=0.8)
     matrix_ax.set_title("sorted by ring angle", fontsize=10)
@@ -2923,7 +2925,7 @@ def plot_correlograms(data: DecoderData, ring: RingModel, mask, pairs=None, axes
     return axes
 
 
-def plot_ring_vs_tuning(result: RingTuning, axes=None):
+def plot_ring_vs_tuning(result: RingTuning, axes=None, cmap="magma"):
     """Plot how the ring lines up with tuning: positions, coupling, the pair metric.
 
     MATLAB's Fig 3, with coupling in place of radius.
@@ -2934,6 +2936,7 @@ def plot_ring_vs_tuning(result: RingTuning, axes=None):
         From :func:`ring_vs_tuning`.
     axes : sequence of matplotlib.axes.Axes, optional
         Three axes to draw on.
+    cmap : colormap, default magma
 
     Returns
     -------
@@ -2952,7 +2955,7 @@ def plot_ring_vs_tuning(result: RingTuning, axes=None):
         shown["preferred_deg"],
         shown["ring_angle_deg"],
         c=shown["mvl"],
-        cmap="viridis",
+        cmap=cmap,
         s=30,
         edgecolors="k",
         linewidths=0.4,

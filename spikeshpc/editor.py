@@ -22,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .optitrack.widgets._backend import warn_if_noninteractive_backend
+from .optitrack.widgets._backend import use_backend
 from .states import (
     STATE_CODES,
     apply_movement_veto,
@@ -60,6 +60,10 @@ class StateEditor:
         Signals drawn on a log axis.
     robust : tuple of float, default (0.5, 99.5)
         Percentiles used to set axis limits.
+    backend : str or None, default "qt"
+        Matplotlib backend to switch to first, as ``%matplotlib`` names it:
+        ``"qt"`` opens a window, ``"widget"`` draws in the notebook. Only
+        applied in IPython; None keeps the current one.
 
     Raises
     ------
@@ -68,12 +72,12 @@ class StateEditor:
     """
 
     def __init__(self, scoring, window_s: float = 600.0, log_signals=("movement (mm/s)",),
-                 robust=(0.5, 99.5)):
+                 robust=(0.5, 99.5), backend: str | None = "qt"):
         import matplotlib.pyplot as plt
         from matplotlib.gridspec import GridSpec
         from matplotlib.offsetbox import AnchoredOffsetbox, HPacker
 
-        warn_if_noninteractive_backend()
+        use_backend(backend)
         self.scoring = scoring
         self.times = np.asarray(scoring.times, dtype=float)
         self.step_s = float(scoring.step_s)
@@ -578,7 +582,8 @@ class StateEditor:
 
 def show_state_editor(scoring, window_s: float = 600.0,
                       log_signals=("movement (mm/s)",),
-                      robust=(0.5, 99.5)) -> StateEditor:
+                      robust=(0.5, 99.5),
+                      backend: str | None = "qt") -> StateEditor:
     """Open the interactive state editor.
 
     Drag a threshold line and every bin re-classifies against it live. Drag on
@@ -599,6 +604,9 @@ def show_state_editor(scoring, window_s: float = 600.0,
         Signals drawn on a log axis.
     robust : tuple of float, default (0.5, 99.5)
         Percentiles used to set axis limits.
+    backend : str or None, default "qt"
+        Matplotlib backend to switch to first; ``"widget"`` draws in the
+        notebook, None keeps the current one.
 
     Returns
     -------
@@ -606,4 +614,4 @@ def show_state_editor(scoring, window_s: float = 600.0,
         The open editor.
     """
     return StateEditor(scoring, window_s=window_s, log_signals=log_signals,
-                       robust=robust)
+                       robust=robust, backend=backend)

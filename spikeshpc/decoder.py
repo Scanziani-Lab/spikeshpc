@@ -2973,7 +2973,9 @@ def _read_out(
 
 
 # ── looking at it ────────────────────────────────────────────────────────
-def plot_encoding_model(model: EncodingModel, sort_by_preferred: bool = True, ax=None):
+def plot_encoding_model(
+    model: EncodingModel, sort_by_preferred: bool = True, ax=None, cmap="magma"
+):
     """Plot the tuning curves the decoder is using, as a units x heading heatmap.
 
     Each unit's curve is scaled to its own peak, so the picture is about where
@@ -2988,6 +2990,7 @@ def plot_encoding_model(model: EncodingModel, sort_by_preferred: bool = True, ax
         Sort units by preferred direction.
     ax : matplotlib.axes.Axes, optional
         Axes to draw on.
+    cmap : colormap, default magma
 
     Returns
     -------
@@ -3011,7 +3014,7 @@ def plot_encoding_model(model: EncodingModel, sort_by_preferred: bool = True, ax
         aspect="auto",
         origin="lower",
         extent=(0, 360, -0.5, len(order) - 0.5),
-        cmap="magma",
+        cmap=cmap,
         interpolation="nearest",
     )
     ax.set_xlabel("head direction (deg)")
@@ -3157,7 +3160,7 @@ def plot_decoded(
     return ax
 
 
-def plot_error(decoded: Decoded, axes=None):
+def plot_error(decoded: Decoded, axes=None, cmap="magma"):
     """Plot an error histogram and an actual-vs-decoded confusion map.
 
     The confusion map is the one that shows *how* a decoder fails. A bright
@@ -3172,6 +3175,7 @@ def plot_error(decoded: Decoded, axes=None):
         The decode.
     axes : sequence of matplotlib.axes.Axes, optional
         The two axes to draw on.
+    cmap : colormap, default magma
 
     Returns
     -------
@@ -3205,7 +3209,7 @@ def plot_error(decoded: Decoded, axes=None):
         counts.T,
         origin="lower",
         extent=(0, 360, 0, 360),
-        cmap="magma",
+        cmap=cmap,
         aspect="equal",
         interpolation="nearest",
     )
